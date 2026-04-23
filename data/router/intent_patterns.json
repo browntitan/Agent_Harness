@@ -1,0 +1,189 @@
+{
+  "tool_or_multistep_intent": {
+    "phrases": [
+      "use tool",
+      "call tool",
+      "tool call",
+      "run tool",
+      "look up",
+      "open file",
+      "summarize this",
+      "document",
+      "documents",
+      "pdf",
+      "pdfs",
+      "spreadsheet",
+      "spreadsheets",
+      "compare and recommend",
+      "step by step",
+      "paso a paso"
+    ],
+    "regexes": [
+      "\\b(execute|calculate|compute|search|find|retrieve|query|upload|attached|attachment|compare|comparison|diff|difference)\\b",
+      "\\bfirst\\s+do\\s+.*\\s+then\\s+\\b"
+    ]
+  },
+  "data_analysis_intent": {
+    "phrases": [
+      "analyze data",
+      "analyse data",
+      "analisis de datos",
+      "análisis de datos",
+      "data exploration",
+      "excel",
+      "csv",
+      "spreadsheet",
+      "worksheet",
+      "workbook",
+      "sheet",
+      "tab",
+      "dataframe",
+      "pandas",
+      "sentiment",
+      "classify rows",
+      "add column",
+      "add sheet",
+      "correlation",
+      "scatter",
+      "chart",
+      "group by",
+      "pivot",
+      "filter rows"
+    ],
+    "regexes": [
+      "\\b(average|mean|median|aggregate|statistics|histogram|distribution|top\\s+\\d+\\s+by|breakdown\\s+by|sum\\s+of|count\\s+of|total\\s+by)\\b"
+    ]
+  },
+  "citation_grounding_intent": {
+    "phrases": [
+      "cite",
+      "citations",
+      "sources",
+      "evidence",
+      "grounded",
+      "according to",
+      "segun",
+      "según"
+    ],
+    "regexes": []
+  },
+  "high_stakes_intent": {
+    "phrases": [
+      "medical",
+      "diagnosis",
+      "legal",
+      "contract",
+      "financial",
+      "tax",
+      "security incident",
+      "compliance",
+      "contrat",
+      "contrato"
+    ],
+    "regexes": []
+  },
+  "kb_inventory_intent": {
+    "phrases": [
+      "what documents do we have access to",
+      "what files do we have access to",
+      "what docs do you have",
+      "what documents are available",
+      "what files are available",
+      "what documents do we have access to in the knowledge base",
+      "what documents are in the knowledge base",
+      "what documents are available in the knowledge base",
+      "what docs are in the knowledge base",
+      "what docs are in the kb",
+      "what files are in the knowledge base",
+      "what files are available in the knowledge base",
+      "what is indexed",
+      "what's indexed",
+      "knowledge base inventory",
+      "show available kb docs",
+      "show me the knowledge base inventory"
+    ],
+    "regexes": [
+      "\\b(?:what|which)\\s+(?:documents|docs|files)\\b.*\\b(?:do\\s+(?:we|you)\\s+have(?:\\s+access\\s+to)?|are\\s+available)\\b",
+      "\\b(?:what|which)\\s+(?:documents|docs|files)\\b.*\\b(?:have\\s+access\\s+to|are\\s+available|are\\s+in)\\b.*\\b(?:knowledge\\s*base|kb)\\b",
+      "\\b(?:show|list)\\b.*\\b(?:knowledge\\s*base|kb)\\b.*\\b(?:documents|docs|files)\\b",
+      "\\b(?:show|list)\\b.*\\b(?:documents|docs|files)\\b.*\\b(?:knowledge\\s*base|kb)\\b",
+      "\\bwhat(?:'s|\\s+is)\\s+indexed\\b"
+    ]
+  },
+  "coordinator_campaign_intent": {
+    "phrases": [
+      "compare",
+      "comparison",
+      "differences",
+      "across documents",
+      "multi-step",
+      "step by step",
+      "research",
+      "investigate",
+      "long running",
+      "background",
+      "parallel",
+      "plan the work",
+      "make a plan",
+      "plan out",
+      "orchestrate",
+      "coordinate",
+      "import graph",
+      "refresh graph",
+      "verify",
+      "synthesize",
+      "identify all documents",
+      "which documents",
+      "list all documents",
+      "list documents",
+      "list all files",
+      "across the corpus",
+      "across policies",
+      "across sops",
+      "every document",
+      "inventory",
+      "exhaustive",
+      "all sops",
+      "cross document",
+      "identificar todos los documentos",
+      "que documentos",
+      "qué documentos",
+      "todos los documentos"
+    ],
+    "regexes": [
+      "\\bfirst\\s+do\\s+.*\\s+then\\s+\\b"
+    ]
+  },
+  "rag_grounding_intent": {
+    "phrases": [
+      "cite",
+      "citations",
+      "sources",
+      "source",
+      "evidence",
+      "grounded",
+      "architecture",
+      "document",
+      "documents",
+      "docs",
+      "kb",
+      "policy",
+      "policies",
+      "agreement",
+      "agreements",
+      "contract",
+      "contracts",
+      "requirement",
+      "requirements",
+      "playbook",
+      "playbooks",
+      "runbook",
+      "runbooks",
+      "documento",
+      "documentos",
+      "politica",
+      "política"
+    ],
+    "regexes": []
+  }
+}

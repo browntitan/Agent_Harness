@@ -1,0 +1,262 @@
+{
+  "version": "v1",
+  "scenarios": [
+    {
+      "id": "basic_route_smalltalk",
+      "title": "Basic Route Small Talk",
+      "description": "Prove the deterministic BASIC path and basic-turn trace events.",
+      "conversation_id": "new-demo-basic-route",
+      "ingest_paths": [],
+      "messages": [
+        "Hello there. Give me a brief explanation of what this assistant can help with."
+      ],
+      "force_agent": false,
+      "expected_route": "BASIC",
+      "expected_agents": [
+        "basic"
+      ],
+      "expected_event_types": [
+        "router_decision",
+        "basic_turn_started",
+        "model_start",
+        "model_end",
+        "basic_turn_completed"
+      ],
+      "fallback_prompts": [],
+      "trace_focus": [
+        "basic",
+        "router_decision",
+        "basic_turn_started",
+        "basic_turn_completed"
+      ]
+    },
+    {
+      "id": "general_grounded_rag",
+      "title": "General Agent Grounded RAG",
+      "description": "Force AGENT and show general-agent delegation to the KB-backed RAG tool.",
+      "conversation_id": "new-demo-general-grounded-rag",
+      "ingest_paths": [],
+      "messages": [
+        {
+          "content": "Using the indexed knowledge base, explain what changed around tool-calling reliability in the release notes and why those changes matter to production operations. Include citations.",
+          "metadata": {
+            "requested_agent": "general"
+          }
+        }
+      ],
+      "force_agent": true,
+      "expected_route": "AGENT",
+      "expected_agents": [
+        "general"
+      ],
+      "expected_event_types": [
+        "router_decision",
+        "agent_turn_started",
+        "tool_start",
+        "tool_end",
+        "agent_turn_completed"
+      ],
+      "fallback_prompts": [
+        "Use rag_agent_tool on the indexed knowledge base and explain what changed around tool-calling reliability in the release notes. Return a grounded answer with citations.",
+        "Use the KB-backed RAG workflow only. Summarize the release-note changes around tool-calling reliability and include a citations section."
+      ],
+      "trace_focus": [
+        "general",
+        "rag_agent_tool",
+        "tool_start",
+        "tool_end"
+      ]
+    },
+    {
+      "id": "direct_grounded_rag",
+      "title": "Direct Grounded RAG",
+      "description": "Show the direct grounded-document path that starts in rag_worker without going through the general tool layer.",
+      "conversation_id": "new-demo-direct-grounded-rag",
+      "ingest_paths": [],
+      "messages": [
+        "Using the indexed knowledge base, explain what changed around tool-calling reliability in the release notes and why those changes matter to production operations. Include citations."
+      ],
+      "force_agent": true,
+      "expected_route": "AGENT",
+      "expected_agents": [
+        "rag_worker"
+      ],
+      "expected_event_types": [
+        "router_decision",
+        "agent_turn_started",
+        "agent_turn_completed"
+      ],
+      "fallback_prompts": [
+        "Use the direct grounded-document workflow only. Explain what changed around tool-calling reliability in the release notes and include citations.",
+        "Start in the grounded RAG specialist. Summarize the release-note changes around tool-calling reliability with a citations section."
+      ],
+      "trace_focus": [
+        "rag_worker",
+        "agent_turn_started",
+        "agent_turn_completed"
+      ]
+    },
+    {
+      "id": "data_analyst_csv_review",
+      "title": "Data Analyst CSV Review",
+      "description": "Route into data_analyst, inspect uploaded CSVs, and execute code in the sandbox.",
+      "conversation_id": "new-demo-data-analyst",
+      "ingest_paths": [
+        "new_demo_notebook/demo_data/regional_spend.csv",
+        "new_demo_notebook/demo_data/regional_controls.csv"
+      ],
+      "messages": [
+        "Analyze the uploaded CSV spreadsheets with Python and pandas. Join them on region, calculate the reserve target gap for each region, and identify the top three highest-risk regions with a concise table and summary."
+      ],
+      "force_agent": false,
+      "expected_route": "AGENT",
+      "expected_agents": [
+        "data_analyst"
+      ],
+      "expected_event_types": [
+        "router_decision",
+        "agent_turn_started",
+        "tool_start",
+        "tool_end",
+        "agent_turn_completed"
+      ],
+      "fallback_prompts": [
+        "Analyze the uploaded CSV spreadsheet data using the data analyst workflow. Use load_dataset, inspect the columns, then execute Python code to join the files on region and rank the highest reserve gaps.",
+        "Use the data_analyst agent workflow on the uploaded CSV files. Inspect the data first, then write Python code to calculate reserve gaps and rank the top three risk regions."
+      ],
+      "trace_focus": [
+        "data_analyst",
+        "load_dataset",
+        "inspect_columns",
+        "execute_code"
+      ]
+    },
+    {
+      "id": "coordinator_due_diligence",
+      "title": "Coordinator Due Diligence",
+      "description": "Show coordinator planning, rag workers, finalization, and verification over a multi-document diligence task.",
+      "conversation_id": "new-demo-coordinator-due-diligence",
+      "ingest_paths": [],
+      "messages": [
+        "Research across 06_master_services_agreement_v2.md, 08_data_processing_addendum_global.md, and 11_vendor_security_schedule.md. Plan the work, gather evidence, synthesize the answer, and verify it before responding with citations."
+      ],
+      "force_agent": false,
+      "expected_route": "AGENT",
+      "expected_agents": [
+        "coordinator",
+        "planner",
+        "rag_worker",
+        "finalizer",
+        "verifier"
+      ],
+      "expected_event_types": [
+        "router_decision",
+        "agent_turn_started",
+        "coordinator_planning_started",
+        "coordinator_planning_completed",
+        "coordinator_finalizer_completed",
+        "coordinator_verifier_completed",
+        "agent_turn_completed"
+      ],
+      "fallback_prompts": [
+        "This is a multi-step research and verification task. Orchestrate it with planning, worker execution, synthesis, and verification across 06_master_services_agreement_v2.md, 08_data_processing_addendum_global.md, and 11_vendor_security_schedule.md.",
+        "Coordinate a multi-step due-diligence review: plan the work, run document workers, synthesize the findings, and verify the answer across the MSA, DPA, and vendor security schedule."
+      ],
+      "trace_focus": [
+        "coordinator",
+        "planner",
+        "rag_worker",
+        "finalizer",
+        "verifier"
+      ]
+    },
+    {
+      "id": "coordinator_mixed_workers",
+      "title": "Coordinator Mixed Workers",
+      "description": "Force a coordinator-led workflow that surfaces utility, rag_worker, and general workers in the same session.",
+      "conversation_id": "new-demo-coordinator-mixed-workers",
+      "ingest_paths": [],
+      "messages": [
+        "This is a coordinated workflow. First, calculate a 12.5% reserve from a 1900000 USD budget and list the most relevant diligence documents. Second, analyze 08_data_processing_addendum_global.md and 11_vendor_security_schedule.md for the top obligations and risks. Third, have a general-purpose worker convert those intermediate results into an executive decision memo. Plan the work, execute the specialist tasks, synthesize the result, and verify it."
+      ],
+      "force_agent": false,
+      "expected_route": "AGENT",
+      "expected_agents": [
+        "coordinator",
+        "planner",
+        "utility",
+        "rag_worker",
+        "general",
+        "finalizer",
+        "verifier"
+      ],
+      "expected_event_types": [
+        "router_decision",
+        "agent_turn_started",
+        "coordinator_planning_started",
+        "coordinator_batch_started",
+        "worker_agent_started",
+        "worker_agent_completed",
+        "agent_turn_completed"
+      ],
+      "fallback_prompts": [
+        "Coordinate this as three explicit worker tasks: one utility task for the reserve calculation and document listing, one rag_worker task for the contract evidence, and one general worker task to draft an executive memo from the intermediate outputs. Then finalize and verify.",
+        "Use the coordinator. Create one utility task, one rag_worker task, and one general task, then synthesize and verify the final answer."
+      ],
+      "trace_focus": [
+        "coordinator",
+        "utility",
+        "rag_worker",
+        "general",
+        "worker_agent_started",
+        "worker_agent_completed"
+      ]
+    },
+    {
+      "id": "sync_long_form_general",
+      "title": "Synchronous Long-Form Writing",
+      "description": "Pin the general agent and demonstrate synchronous long-form writing with a returned Markdown artifact plus manifest files in the workspace.",
+      "conversation_id": "new-demo-sync-long-form",
+      "ingest_paths": [
+        "data/kb/05_release_notes.md",
+        "data/kb/07_master_services_agreement_v2.md",
+        "data/kb/08_data_processing_addendum_global.md",
+        "data/kb/11_vendor_security_schedule.md"
+      ],
+      "messages": [
+        {
+          "content": "Using the indexed repo documents, write a multi-section architecture briefing that explains how the live runtime routes work, how long-form writing is orchestrated, and how artifacts and traces are exposed to users. Keep it grounded in the indexed material and attach the full draft as a Markdown artifact.",
+          "metadata": {
+            "requested_agent": "general",
+            "long_output": {
+              "enabled": true,
+              "target_words": 1800,
+              "target_sections": 4,
+              "delivery_mode": "hybrid",
+              "output_format": "markdown"
+            }
+          }
+        }
+      ],
+      "force_agent": true,
+      "expected_route": "AGENT",
+      "expected_agents": [
+        "general"
+      ],
+      "expected_event_types": [
+        "router_decision",
+        "agent_turn_started",
+        "agent_turn_completed"
+      ],
+      "fallback_prompts": [
+        "Use the general agent long-form writing path only. Produce a grounded four-section architecture briefing and attach the generated Markdown draft as an artifact.",
+        "Write a grounded long-form runtime architecture briefing with metadata.long_output enabled and return the Markdown artifact."
+      ],
+      "trace_focus": [
+        "general",
+        "agent_turn_started",
+        "agent_turn_completed"
+      ]
+    }
+  ]
+}

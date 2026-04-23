@@ -1,0 +1,1048 @@
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Dict, List
+
+from agentic_chatbot_next.contracts.rag import Citation, RagContract, RetrievalSummary
+from agentic_chatbot_next.rag.hints import (
+    coerce_controller_hints,
+    normalize_coverage_goal,
+    normalize_research_profile,
+    normalize_result_mode,
+    prefers_bounded_synthesis,
+)
+from agentic_chatbot_next.rag.adaptive import CorpusRetrievalAdapter, run_retrieval_controller
+from agentic_chatbot_next.rag.citations import build_citations
+from agentic_chatbot_next.rag.collection_selection import (
+    apply_selection_to_session,
+    select_collection_for_query,
+    selection_answer,
+)
+from agentic_chatbot_next.rag.discovery_precision import (
+    discovery_topic_label,
+    document_has_explicit_topic_support,
+)
+from agentic_chatbot_next.rag.doc_targets import IndexedDocResolution, resolve_query_document_targets
+from agentic_chatbot_next.rag.fanout import RagRuntimeBridge
+from agentic_chatbot_next.rag.ingest import (
+    CollectionReadinessStatus,
+    KBCoverageStatus,
+    get_collection_readiness_status,
+    get_kb_coverage_status,
+)
+from agentic_chatbot_next.rag.inventory import (
+    INVENTORY_QUERY_GRAPH_INDEXES,
+    INVENTORY_QUERY_GRAPH_FILE,
+    INVENTORY_QUERY_KB_FILE,
+    INVENTORY_QUERY_KB_COLLECTIONS,
+    INVENTORY_QUERY_SESSION_ACCESS,
+    classify_inventory_query,
+    dispatch_authoritative_inventory,
+    inventory_query_requests_grounded_analysis,
+    sync_session_kb_collection_state,
+)
+from agentic_chatbot_next.rag.retrieval import GradedChunk
+from agentic_chatbot_next.rag.retrieval_scope import (
+    RetrievalScopeDecision,
+    decide_retrieval_scope,
+    has_upload_evidence,
+    resolve_kb_collection_id,
+)
+from agentic_chatbot_next.rag.synthesis import generate_grounded_answer
+from agentic_chatbot_next.runtime.deep_rag import (
+    deep_rag_controller_hints,
+    deep_rag_search_mode,
+)
+
+
+def _tenant_id(settings: Any, session: Any) -> str:
+    return str(
+        getattr(session, "tenant_id", getattr(settings, "default_tenant_id", "local-dev"))
+        or getattr(settings, "default_tenant_id", "local-dev")
+        or "local-dev"
+    )
+
+
+def _early_contract(query: str, answer_payload: Dict[str, Any], *, search_mode: str = "none") -> RagContract:
+    return RagContract(
+        answer=str(answer_payload.get("answer") or ""),
+        citations=[],
+        used_citation_ids=[],
+        confidence=float(answer_payload.get("confidence_hint") or 0.0),
+        retrieval_summary=RetrievalSummary(query_used=query, search_mode=search_mode),
+        followups=[str(item) for item in (answer_payload.get("followups") or []) if str(item)],
+        warnings=[str(item) for item in (answer_payload.get("warnings") or []) if str(item)],
+    )
+
+
+def _title_overlap_score(question: str, doc: Any) -> int:
+    title = str((getattr(doc, "metadata", {}) or {}).get("title") or "").lower()
+    if not title:
+        return 0
+    q_terms = set(re.findall(r"[A-Za-z0-9_]{3,}", question.lower()))
+    t_terms = set(re.findall(r"[A-Za-z0-9_]{3,}", title.replace("_", " ")))
+    overlap = len(q_terms & t_terms)
+    if "architecture" in q_terms and "architecture" in t_terms:
+        overlap += 2
+    return overlap
+
+
+def _select_evidence_docs(question: str, graded: list[GradedChunk], min_chunks: int) -> list[Any]:
+    target = max(1, int(min_chunks))
+    strong = [item.doc for item in graded if item.relevance >= 2]
+    strong.sort(key=lambda doc: _title_overlap_score(question, doc), reverse=True)
+    if len(strong) >= target:
+        return strong
+
+    supplemental = [item.doc for item in graded if item.relevance == 1]
+    supplemental.sort(key=lambda doc: _title_overlap_score(question, doc), reverse=True)
+    return (strong + supplemental)[:target]
+
+
+def _summary_snippet(text: str, *, limit: int = 180) -> str:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return ""
+    return normalized[:limit].rstrip()
+
+
+def _kb_not_ready_answer(status: CollectionReadinessStatus | KBCoverageStatus) -> Dict[str, Any]:
+    reason = str(getattr(status, "reason", "") or "").strip().lower()
+    maintenance_policy = str(getattr(status, "maintenance_policy", "") or "").strip().lower()
+    if status.sync_error:
+        detail = (
+            f"Startup KB sync failed for collection '{status.collection_id}': {status.sync_error}. "
+            f"Run `{status.suggested_fix}` and retry the request."
+        )
+        warning = "KB_SYNC_FAILED"
+    elif reason == "empty_collection" and maintenance_policy == "indexed_documents":
+        detail = (
+            f"Collection '{status.collection_id}' does not have indexed documents yet. "
+            f"{status.suggested_fix}"
+        )
+        warning = "KB_COLLECTION_EMPTY"
+    else:
+        detail = (
+            f"The configured knowledge base is not indexed for collection '{status.collection_id}'. "
+            f"Run `{status.suggested_fix}` and retry the request."
+        )
+        warning = "KB_COVERAGE_MISSING"
+
+    if status.missing_source_paths:
+        preview = ", ".join(status.missing_source_paths[:3])
+        if len(status.missing_source_paths) > 3:
+            preview += ", ..."
+        detail = f"{detail} Missing sources: {preview}"
+
+    return {
+        "answer": detail,
+        "used_citation_ids": [],
+        "followups": [],
+        "warnings": [warning],
+        "confidence_hint": 0.0,
+    }
+
+
+def _ambiguous_scope_answer(decision: RetrievalScopeDecision) -> Dict[str, Any]:
+    detail = (
+        "I can answer this using the uploaded files, the knowledge base, both, or neither, "
+        "but your request does not say which one to use."
+    )
+    if decision.has_uploads and decision.kb_available:
+        detail = (
+            "I have both the same-chat uploads and the shared knowledge base available, "
+            "but your request does not say which one to use."
+        )
+    return {
+        "answer": (
+            f"{detail} Reply with one of: "
+            "`uploaded files only`, `knowledge base only`, `both`, or `neither`."
+        ),
+        "used_citation_ids": [],
+        "followups": [
+            "uploaded files only",
+            "knowledge base only",
+            "both",
+            "neither",
+        ],
+        "warnings": ["RETRIEVAL_SCOPE_AMBIGUOUS"],
+        "confidence_hint": 0.0,
+    }
+
+
+def _ambiguous_kb_collection_answer(collection_ids: list[str]) -> Dict[str, Any]:
+    options = [str(item).strip() for item in collection_ids if str(item).strip()]
+    quoted_options = ", ".join(f"`{item}`" for item in options)
+    return {
+        "answer": (
+            "I can search multiple knowledge base collections in this chat, "
+            "but your request does not say which collection to use. "
+            f"Reply with one of: {quoted_options}."
+        ),
+        "used_citation_ids": [],
+        "followups": options,
+        "warnings": ["KB_COLLECTION_SELECTION_REQUIRED"],
+        "confidence_hint": 0.0,
+    }
+
+
+def _uploads_missing_answer(*, allow_kb_fallback: bool) -> Dict[str, Any]:
+    suffix = " Upload a file and retry the request."
+    if allow_kb_fallback:
+        suffix = " Upload a file, or ask me to use the knowledge base instead."
+    return {
+        "answer": f"There are no uploaded files attached to this chat yet.{suffix}",
+        "used_citation_ids": [],
+        "followups": [],
+        "warnings": ["NO_CHAT_UPLOADS_AVAILABLE"],
+        "confidence_hint": 0.0,
+    }
+
+
+def _retrieval_disabled_answer() -> Dict[str, Any]:
+    return {
+        "answer": (
+            "I’m not consulting the knowledge base or uploaded files for this turn. "
+            "Tell me to use `uploaded files only`, `knowledge base only`, `both`, or `neither` "
+            "if you want a grounded answer."
+        ),
+        "used_citation_ids": [],
+        "followups": [],
+        "warnings": ["RETRIEVAL_SKIPPED_BY_INTENT"],
+        "confidence_hint": 0.0,
+    }
+
+
+def _build_inventory_answer(docs: list[Any]) -> Dict[str, Any]:
+    lines = ["Documents with grounded evidence relevant to the request:"]
+    used_citation_ids: List[str] = []
+    seen_doc_ids: set[str] = set()
+    for doc in docs:
+        metadata = dict(getattr(doc, "metadata", {}) or {})
+        doc_id = str(metadata.get("doc_id") or "")
+        if doc_id and doc_id in seen_doc_ids:
+            continue
+        if doc_id:
+            seen_doc_ids.add(doc_id)
+        title = str(metadata.get("title") or doc_id or "Untitled document")
+        citation_id = str(metadata.get("chunk_id") or "")
+        snippet = _summary_snippet(getattr(doc, "page_content", ""))
+        suffix = f" ({citation_id})" if citation_id else ""
+        if snippet:
+            lines.append(f"- {title}: {snippet}{suffix}")
+        else:
+            lines.append(f"- {title}{suffix}")
+        if citation_id:
+            used_citation_ids.append(citation_id)
+    if len(lines) == 1:
+        lines.append("- No matching documents were identified from the selected evidence set.")
+    return {
+        "answer": "\n".join(lines),
+        "used_citation_ids": used_citation_ids,
+        "followups": [],
+        "warnings": [],
+        "confidence_hint": 0.68 if used_citation_ids else 0.4,
+    }
+
+
+def _is_corpus_discovery_inventory(
+    *,
+    query: str,
+    research_profile: str,
+    coverage_goal: str,
+    result_mode: str,
+    controller_hints: Dict[str, Any],
+) -> bool:
+    if not (result_mode == "inventory" or bool(controller_hints.get("prefer_inventory_output"))):
+        return False
+    if coverage_goal in {"corpus_wide", "exhaustive"}:
+        return True
+    if research_profile in {"corpus_discovery", "process_flow_identification"}:
+        return True
+    return bool(re.search(r"\b(which|identify|list|find)\s+(?:all\s+)?(?:documents|files)\b", query, re.IGNORECASE))
+
+
+def _filter_confirmed_discovery_docs(query: str, docs: list[Any]) -> tuple[list[Any], list[Dict[str, Any]]]:
+    confirmed: List[Any] = []
+    rejected: List[Dict[str, Any]] = []
+    for doc in docs:
+        details = document_has_explicit_topic_support(query, doc)
+        if details.get("matches", True):
+            confirmed.append(doc)
+            continue
+        rejected.append(
+            {
+                "doc_id": str(details.get("doc_id") or ""),
+                "title": str(details.get("title") or ""),
+                "reason": "missing_topic_anchor",
+                "required_anchors": list(details.get("required_anchors") or []),
+            }
+        )
+    return confirmed, rejected
+
+
+def _build_no_confirmed_discovery_matches_answer(
+    query: str,
+    retrieval_run: Any,
+    *,
+    rejected_candidates: list[Dict[str, Any]] | None = None,
+    verification_failed: bool = False,
+) -> Dict[str, Any]:
+    label = discovery_topic_label(query)
+    target = "knowledge-base documents" if re.search(r"\bknowledge\s*base\b|\bKB\b", query, re.IGNORECASE) else "indexed documents"
+    lines = [f"No confirmed {target} were found that explicitly mention {label}."]
+    if rejected_candidates:
+        lines.append(
+            f"I reviewed broader candidate matches across {int((retrieval_run.candidate_counts or {}).get('unique_docs', 0))} document(s), "
+            f"but the grounded snippets did not explicitly mention {label}."
+        )
+    if verification_failed:
+        lines.append("The remaining evidence also could not be verified strongly enough to return a document list.")
+    return {
+        "answer": " ".join(lines),
+        "used_citation_ids": [],
+        "followups": [
+            "If you want, I can broaden this to near matches or search for an exact phrase like `onboarding workflow` or `new hire workflow`."
+        ],
+        "warnings": ["INSUFFICIENT_CORPUS_EVIDENCE"],
+        "confidence_hint": 0.18,
+    }
+
+
+def _build_negative_evidence_answer(query: str, retrieval_run: Any) -> Dict[str, Any]:
+    strategies = ", ".join(retrieval_run.strategies_used or ["hybrid"])
+    doc_count = int((retrieval_run.candidate_counts or {}).get("unique_docs", 0))
+    round_count = max(1, int(getattr(retrieval_run, "rounds", 0) or 0))
+    answer = (
+        f"I could not find enough grounded evidence to answer this request confidently. "
+        f"I searched for '{query}' across {doc_count} candidate document(s) using {strategies} "
+        f"over {round_count} retrieval round(s)."
+    )
+    return {
+        "answer": answer,
+        "used_citation_ids": [],
+        "followups": [
+            "Try naming a specific workflow, process name, or exact term to narrow the search."
+        ],
+        "warnings": ["INSUFFICIENT_CORPUS_EVIDENCE"],
+        "confidence_hint": 0.15,
+    }
+
+
+def _emit_progress(progress_emitter: Any | None, event_type: str, **payload: Any) -> None:
+    if progress_emitter is None or not hasattr(progress_emitter, "emit_progress"):
+        return
+    progress_emitter.emit_progress(event_type, **payload)
+
+
+def _format_ambiguous_doc_candidate(candidate: Any) -> str:
+    title = str(getattr(candidate, "title", "") or "").strip() or str(
+        getattr(candidate, "match_name", "") or "document"
+    ).strip() or "document"
+    details: List[str] = []
+    source_type = str(getattr(candidate, "source_type", "") or "").strip()
+    collection_id = str(getattr(candidate, "collection_id", "") or "").strip()
+    source_path = str(getattr(candidate, "source_path", "") or "").strip()
+    if source_type:
+        details.append(f"scope {source_type}")
+    if collection_id:
+        details.append(f"collection {collection_id}")
+    if source_path:
+        details.append(f"path {source_path}")
+    if not details:
+        return title
+    return f"{title} ({'; '.join(details)})"
+
+
+def _format_ambiguous_doc_request(match: Any) -> str:
+    candidates = list(getattr(match, "candidates", ()) or [])
+    candidate_text = ", ".join(
+        _format_ambiguous_doc_candidate(candidate)
+        for candidate in candidates[:5]
+    )
+    if len(candidates) > 5:
+        candidate_text = f"{candidate_text}, +{len(candidates) - 5} more"
+    requested_name = str(getattr(match, "requested_name", "") or "document").strip() or "document"
+    if not candidate_text:
+        return requested_name
+    return f"{requested_name} [{candidate_text}]"
+
+
+def _requested_doc_resolution_answer(resolution: IndexedDocResolution) -> Dict[str, Any]:
+    missing = ", ".join(item.requested_name for item in resolution.missing)
+    ambiguous_names = ", ".join(item.requested_name for item in resolution.ambiguous)
+    ambiguous_details = " ".join(
+        _format_ambiguous_doc_request(item) for item in resolution.ambiguous
+    ).strip()
+    parts: List[str] = []
+    warnings: List[str] = []
+    if missing:
+        parts.append(
+            f"I could not find indexed documents matching: {missing}. "
+            "Those files may not be indexed in the current collection yet."
+        )
+        warnings.append("REQUESTED_DOCS_NOT_INDEXED")
+    if ambiguous_names:
+        parts.append(
+            f"These document names were ambiguous in the current index: {ambiguous_names}. "
+            f"Candidates: {ambiguous_details}. Use an exact title or a more specific path/basename."
+        )
+        warnings.append("REQUESTED_DOCS_AMBIGUOUS")
+    return {
+        "answer": " ".join(parts).strip(),
+        "used_citation_ids": [],
+        "followups": [],
+        "warnings": warnings,
+        "confidence_hint": 0.0,
+    }
+
+
+def _apply_requested_doc_resolution_note(
+    answer_payload: Dict[str, Any],
+    *,
+    resolution: IndexedDocResolution,
+) -> Dict[str, Any]:
+    if not resolution.missing and not resolution.ambiguous:
+        return answer_payload
+    prefix_parts: List[str] = []
+    warnings = [str(item) for item in (answer_payload.get("warnings") or []) if str(item)]
+    if resolution.missing:
+        prefix_parts.append(
+            "Missing indexed docs: " + ", ".join(item.requested_name for item in resolution.missing) + "."
+        )
+        if "REQUESTED_DOCS_NOT_INDEXED" not in warnings:
+            warnings.append("REQUESTED_DOCS_NOT_INDEXED")
+    if resolution.ambiguous:
+        prefix_parts.append(
+            "Ambiguous doc names: " + ", ".join(item.requested_name for item in resolution.ambiguous) + "."
+        )
+        if "REQUESTED_DOCS_AMBIGUOUS" not in warnings:
+            warnings.append("REQUESTED_DOCS_AMBIGUOUS")
+    answer = str(answer_payload.get("answer") or "").strip()
+    combined = " ".join(prefix_parts).strip()
+    if answer:
+        combined = f"{combined}\n\n{answer}".strip()
+    return {
+        **answer_payload,
+        "answer": combined,
+        "warnings": warnings,
+    }
+
+
+def _merge_unique_documents(primary: List[Any], secondary: List[Any]) -> List[Any]:
+    merged: List[Any] = []
+    seen: set[str] = set()
+    for doc in [*primary, *secondary]:
+        metadata = dict(getattr(doc, "metadata", {}) or {})
+        chunk_id = str(metadata.get("chunk_id") or "")
+        key = chunk_id or f"{metadata.get('doc_id')}#{metadata.get('chunk_index')}"
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(doc)
+    return merged
+
+
+def _ensure_target_doc_coverage(
+    *,
+    settings: Any,
+    stores: Any,
+    session: Any,
+    question: str,
+    selected_docs: List[Any],
+    graded: List[GradedChunk],
+    resolution: IndexedDocResolution,
+) -> List[Any]:
+    resolved_doc_ids = resolution.resolved_doc_ids
+    if not resolved_doc_ids:
+        return selected_docs
+
+    per_doc_candidates: Dict[str, List[Any]] = {doc_id: [] for doc_id in resolved_doc_ids}
+    for item in graded:
+        doc_id = str((item.doc.metadata or {}).get("doc_id") or "")
+        if doc_id in per_doc_candidates and item.relevance >= 1:
+            per_doc_candidates[doc_id].append(item.doc)
+
+    adapter = CorpusRetrievalAdapter(stores, settings=settings, session=session)
+    guaranteed: List[Any] = []
+    for doc_id in resolved_doc_ids:
+        candidates = per_doc_candidates.get(doc_id) or []
+        if candidates:
+            guaranteed.extend(candidates[:2])
+            continue
+        fallback_docs = adapter.read_document(doc_id, focus=question, max_chunks=2)
+        guaranteed.extend(fallback_docs[:2])
+    return _merge_unique_documents(guaranteed, selected_docs)
+
+
+def run_rag_contract(
+    settings: Any,
+    stores: Any,
+    *,
+    providers: Any,
+    session: Any,
+    query: str,
+    conversation_context: str,
+    preferred_doc_ids: list[str],
+    must_include_uploads: bool,
+    top_k_vector: int,
+    top_k_keyword: int,
+    max_retries: int,
+    callbacks: list[Any] | None = None,
+    base_guidance: str = "",
+    skill_context: str = "",
+    task_context: str = "",
+    search_mode: str = "auto",
+    max_search_rounds: int = 0,
+    research_profile: str = "",
+    coverage_goal: str = "",
+    result_mode: str = "",
+    controller_hints: Dict[str, Any] | None = None,
+    runtime_bridge: RagRuntimeBridge | None = None,
+    progress_emitter: Any | None = None,
+    event_sink: Any | None = None,
+    allow_internal_fanout: bool = True,
+) -> RagContract:
+    kb_scope = sync_session_kb_collection_state(settings, stores, session, query=query)
+    resolved_research_profile = normalize_research_profile(research_profile)
+    resolved_coverage_goal = normalize_coverage_goal(coverage_goal)
+    resolved_result_mode = normalize_result_mode(result_mode)
+    resolved_controller_hints = coerce_controller_hints(controller_hints)
+    tenant_id = _tenant_id(settings, session)
+    session_metadata = dict(getattr(session, "metadata", {}) or {})
+    route_context = dict(session_metadata.get("route_context") or {})
+    resolved_controller_hints = {
+        **deep_rag_controller_hints(route_context),
+        **dict(resolved_controller_hints or {}),
+    }
+    effective_search_mode = deep_rag_search_mode(route_context, default=search_mode or "auto")
+    has_uploads = has_upload_evidence(session)
+    inventory_query_type = classify_inventory_query(query)
+    if inventory_query_type in {
+        INVENTORY_QUERY_SESSION_ACCESS,
+        INVENTORY_QUERY_KB_COLLECTIONS,
+        INVENTORY_QUERY_KB_FILE,
+        INVENTORY_QUERY_GRAPH_FILE,
+        INVENTORY_QUERY_GRAPH_INDEXES,
+    } and not inventory_query_requests_grounded_analysis(query, query_type=inventory_query_type):
+        dispatched = dispatch_authoritative_inventory(
+            settings,
+            stores,
+            session,
+            query=query,
+            query_type=inventory_query_type,
+        )
+        if bool(dispatched.get("handled")):
+            return _early_contract(
+                query,
+                dict(dispatched.get("answer") or {}),
+                search_mode="metadata_inventory",
+            )
+
+    kb_collection_id = str(kb_scope.get("kb_collection_id") or resolve_kb_collection_id(settings, session))
+    available_kb_collection_ids = [
+        str(item).strip()
+        for item in (kb_scope.get("available_kb_collection_ids") or [])
+        if str(item).strip()
+    ]
+    kb_collection_confirmed = bool(kb_scope.get("kb_collection_confirmed"))
+    preliminary_scope = decide_retrieval_scope(
+        settings,
+        session,
+        query=query,
+        kb_available=False,
+        has_uploads=has_uploads,
+    )
+    if preliminary_scope.mode in {"kb_only", "both"} and len(available_kb_collection_ids) > 1 and not kb_collection_confirmed:
+        return _early_contract(
+            query,
+            _ambiguous_kb_collection_answer(available_kb_collection_ids),
+            search_mode="none",
+        )
+    kb_status = None
+    should_check_kb = preliminary_scope.mode not in {"none"} and preliminary_scope.reason not in {
+        "explicit_uploads_only",
+    }
+    if should_check_kb:
+        kb_status = get_collection_readiness_status(
+            settings,
+            stores,
+            tenant_id=tenant_id,
+            collection_id=kb_collection_id,
+        )
+    scope_decision = decide_retrieval_scope(
+        settings,
+        session,
+        query=query,
+        kb_available=bool(kb_status.ready) if kb_status is not None else False,
+        has_uploads=has_uploads,
+    )
+    session.metadata = {
+        **dict(getattr(session, "metadata", {}) or {}),
+        **scope_decision.to_metadata(),
+    }
+    resolved_controller_hints = {
+        **dict(resolved_controller_hints or {}),
+        **scope_decision.to_metadata(),
+    }
+    active_graph_ids = [
+        str(item).strip()
+        for item in (dict(getattr(session, "metadata", {}) or {}).get("active_graph_ids") or [])
+        if str(item).strip()
+    ]
+    if active_graph_ids:
+        resolved_controller_hints = {
+            **dict(resolved_controller_hints or {}),
+            "graph_ids": list(active_graph_ids),
+            "planned_graph_ids": list(active_graph_ids),
+        }
+    effective_preferred_doc_ids = list(preferred_doc_ids or [])
+
+    if scope_decision.mode == "ambiguous":
+        return _early_contract(query, _ambiguous_scope_answer(scope_decision), search_mode="none")
+
+    if scope_decision.mode == "none":
+        return _early_contract(query, _retrieval_disabled_answer(), search_mode="none")
+
+    if scope_decision.mode in {"uploads_only", "both"} and not has_uploads:
+        return _early_contract(
+            query,
+            _uploads_missing_answer(allow_kb_fallback=scope_decision.mode == "uploads_only"),
+            search_mode="none",
+        )
+
+    if scope_decision.mode in {"kb_only", "both"} and kb_status is not None and not kb_status.ready:
+        return _early_contract(query, _kb_not_ready_answer(kb_status), search_mode="none")
+
+    requested_doc_resolution = IndexedDocResolution()
+    if scope_decision.mode in {"kb_only", "both"}:
+        requested_doc_resolution = resolve_query_document_targets(
+            settings,
+            stores,
+            session,
+            query=query,
+        )
+        if requested_doc_resolution.requested_names:
+            _emit_progress(
+                progress_emitter,
+                "doc_focus",
+                label="Resolving named documents",
+                detail=", ".join(requested_doc_resolution.requested_names[:4]),
+                agent="rag_worker",
+                docs=[
+                    {
+                        "doc_id": item.doc_id,
+                        "title": item.title,
+                        "source_path": item.source_path,
+                        "source_type": item.source_type,
+                    }
+                    for item in requested_doc_resolution.resolved[:6]
+                ],
+                why="The request named specific indexed files, so retrieval is being scoped to those docs first.",
+            )
+            if not requested_doc_resolution.resolved_doc_ids:
+                return _early_contract(
+                    query,
+                    _requested_doc_resolution_answer(requested_doc_resolution),
+                    search_mode="none",
+                )
+            resolved_controller_hints = {
+                **dict(resolved_controller_hints or {}),
+                "prefer_doc_focus": True,
+                "explicit_doc_targets": list(requested_doc_resolution.requested_names),
+                "resolved_doc_ids": list(requested_doc_resolution.resolved_doc_ids),
+            }
+
+    if scope_decision.mode in {"kb_only", "both"} and not requested_doc_resolution.resolved_doc_ids:
+        requested_collection_id = str(
+            resolved_controller_hints.get("requested_kb_collection_id")
+            or dict(getattr(session, "metadata", {}) or {}).get("requested_kb_collection_id")
+            or ""
+        ).strip()
+        collection_selection = select_collection_for_query(
+            stores,
+            settings,
+            session,
+            query,
+            source_type="all" if scope_decision.mode == "both" else "kb",
+            explicit_collection_id=requested_collection_id,
+            event_sink=event_sink,
+        )
+        resolved_controller_hints = {
+            **dict(resolved_controller_hints or {}),
+            "collection_selection": collection_selection.to_dict(),
+        }
+        if collection_selection.resolved:
+            apply_selection_to_session(session, collection_selection)
+            resolved_controller_hints = {
+                **dict(resolved_controller_hints or {}),
+                "requested_kb_collection_id": collection_selection.selected_collection_id,
+                "kb_collection_id": collection_selection.selected_collection_id,
+                "search_collection_ids": [collection_selection.selected_collection_id],
+            }
+        elif scope_decision.mode == "kb_only":
+            return _early_contract(query, selection_answer(collection_selection), search_mode="none")
+
+    if scope_decision.mode == "uploads_only":
+        effective_preferred_doc_ids = list(getattr(session, "uploaded_doc_ids", []) or [])
+    elif requested_doc_resolution.resolved_doc_ids:
+        effective_preferred_doc_ids = list(requested_doc_resolution.resolved_doc_ids)
+
+    retrieval_run = run_retrieval_controller(
+        settings,
+        stores,
+        providers=providers,
+        session=session,
+        query=query,
+        conversation_context=conversation_context,
+        preferred_doc_ids=effective_preferred_doc_ids,
+        must_include_uploads=must_include_uploads,
+        top_k_vector=top_k_vector,
+        top_k_keyword=top_k_keyword,
+        max_retries=max_retries,
+        callbacks=callbacks or [],
+        search_mode=effective_search_mode,
+        max_search_rounds=max_search_rounds,
+        research_profile=research_profile,
+        coverage_goal=resolved_coverage_goal,
+        result_mode=resolved_result_mode,
+        controller_hints=resolved_controller_hints,
+        runtime_bridge=runtime_bridge,
+        progress_emitter=progress_emitter,
+        event_sink=event_sink,
+        allow_internal_fanout=allow_internal_fanout,
+    )
+    selected_docs = list(retrieval_run.selected_docs)
+
+    if hasattr(session, "scratchpad") and isinstance(getattr(session, "scratchpad", None), dict):
+        try:
+            session.scratchpad["rag_last_evidence_ledger"] = json.dumps(
+                retrieval_run.evidence_ledger,
+                ensure_ascii=False,
+            )
+            session.scratchpad["rag_last_search_mode"] = str(retrieval_run.search_mode)
+            session.scratchpad["rag_last_requested_doc_resolution"] = json.dumps(
+                {
+                    "mode": (
+                        "explicit_doc_targets"
+                        if requested_doc_resolution.resolved_doc_ids
+                        else "generic_retrieval"
+                    ),
+                    **requested_doc_resolution.to_dict(),
+                },
+                ensure_ascii=False,
+            )
+            session.scratchpad["rag_last_retrieval_verification"] = json.dumps(
+                dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+                ensure_ascii=False,
+            )
+        except Exception:
+            pass
+
+    selected_docs = _ensure_target_doc_coverage(
+        settings=settings,
+        stores=stores,
+        session=session,
+        question=query,
+        selected_docs=selected_docs,
+        graded=list(retrieval_run.graded),
+        resolution=requested_doc_resolution,
+    )
+
+    if not selected_docs:
+        if scope_decision.mode in {"kb_only", "both"} and kb_status is not None and not kb_status.ready:
+            answer_payload = _kb_not_ready_answer(kb_status)
+        else:
+            negative_reporting = (
+                resolved_coverage_goal in {"corpus_wide", "exhaustive"}
+                or bool(resolved_controller_hints.get("prefer_negative_evidence_reporting"))
+            )
+            if negative_reporting:
+                answer_payload = _build_negative_evidence_answer(query, retrieval_run)
+            else:
+                if progress_emitter is not None and hasattr(progress_emitter, "emit_progress"):
+                    progress_emitter.emit_progress(
+                        "phase_start",
+                        label="Synthesizing answer",
+                        detail="Grounding final response",
+                        agent="rag_worker",
+                    )
+                answer_payload = generate_grounded_answer(
+                    providers.chat,
+                    settings=settings,
+                    question=query,
+                    conversation_context=_answer_context(
+                        query,
+                        conversation_context,
+                        retrieval_run.evidence_ledger,
+                        base_guidance=base_guidance,
+                        skill_context=skill_context,
+                        task_context=task_context,
+                        coverage_goal=resolved_coverage_goal,
+                        result_mode=resolved_result_mode,
+                        controller_hints=resolved_controller_hints,
+                    ),
+                    evidence_docs=selected_docs,
+                    callbacks=callbacks or [],
+                )
+    else:
+        inventory_mode = resolved_result_mode == "inventory" or bool(resolved_controller_hints.get("prefer_inventory_output"))
+        discovery_inventory_mode = _is_corpus_discovery_inventory(
+            query=query,
+            research_profile=resolved_research_profile,
+            coverage_goal=resolved_coverage_goal,
+            result_mode=resolved_result_mode,
+            controller_hints=resolved_controller_hints,
+        )
+        rejected_discovery_candidates: List[Dict[str, Any]] = []
+        downgraded_inventory_reason = ""
+        if inventory_mode and discovery_inventory_mode:
+            confirmed_docs, rejected_discovery_candidates = _filter_confirmed_discovery_docs(query, selected_docs)
+            retrieval_run.candidate_counts["confirmed_match_count"] = len(confirmed_docs)
+            retrieval_verification = dict(getattr(retrieval_run, "retrieval_verification", {}) or {})
+            if rejected_discovery_candidates:
+                retrieval_verification["rejected_candidate_reasons"] = rejected_discovery_candidates
+            retrieval_verification["confirmed_match_count"] = len(confirmed_docs)
+            generated_subqueries = [
+                str(item)
+                for summary in (retrieval_run.evidence_ledger or {}).get("round_summaries", [])
+                for item in (summary.get("queries") or [])
+                if str(item)
+            ]
+            if generated_subqueries:
+                retrieval_verification["generated_subqueries"] = generated_subqueries
+            retrieval_run.retrieval_verification = retrieval_verification
+            selected_docs = confirmed_docs
+            if not selected_docs:
+                downgraded_inventory_reason = "no_confirmed_topic_matches"
+                retrieval_run.retrieval_verification = {
+                    **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+                    "downgraded_to_negative_evidence": True,
+                    "downgrade_reason": downgraded_inventory_reason,
+                }
+
+        if inventory_mode:
+            if downgraded_inventory_reason:
+                answer_payload = _build_no_confirmed_discovery_matches_answer(
+                    query,
+                    retrieval_run,
+                    rejected_candidates=rejected_discovery_candidates,
+                )
+            else:
+                answer_payload = _build_inventory_answer(selected_docs)
+        else:
+            if progress_emitter is not None and hasattr(progress_emitter, "emit_progress"):
+                progress_emitter.emit_progress(
+                    "phase_start",
+                    label="Synthesizing answer",
+                    detail="Grounding final response",
+                    agent="rag_worker",
+                )
+            answer_payload = generate_grounded_answer(
+                providers.chat,
+                settings=settings,
+                    question=query,
+                    conversation_context=_answer_context(
+                        query,
+                        conversation_context,
+                        retrieval_run.evidence_ledger,
+                        base_guidance=base_guidance,
+                        skill_context=skill_context,
+                        task_context=task_context,
+                        coverage_goal=resolved_coverage_goal,
+                    result_mode=resolved_result_mode,
+                    controller_hints=resolved_controller_hints,
+                ),
+                evidence_docs=selected_docs,
+                callbacks=callbacks or [],
+            )
+        if inventory_mode and discovery_inventory_mode:
+            retrieval_verification = dict(getattr(retrieval_run, "retrieval_verification", {}) or {})
+            if str(retrieval_verification.get("status") or "").lower() == "revise":
+                retrieval_run.retrieval_verification = {
+                    **retrieval_verification,
+                    "downgraded_to_negative_evidence": True,
+                    "downgrade_reason": "retrieval_verification_failed",
+                }
+                selected_docs = []
+                answer_payload = _build_no_confirmed_discovery_matches_answer(
+                    query,
+                    retrieval_run,
+                    rejected_candidates=rejected_discovery_candidates,
+                    verification_failed=True,
+                )
+    answer_payload = _apply_requested_doc_resolution_note(
+        answer_payload,
+        resolution=requested_doc_resolution,
+    )
+    citations = build_citations(selected_docs)
+    used_citation_ids = [
+        citation_id
+        for citation_id in answer_payload.get("used_citation_ids", [])
+        if citation_id in {citation.citation_id for citation in citations}
+        ]
+    if not used_citation_ids:
+        used_citation_ids = [citation.citation_id for citation in citations[: min(4, len(citations))]]
+
+    if progress_emitter is not None and hasattr(progress_emitter, "emit_progress"):
+        progress_emitter.emit_progress(
+            "summary",
+            label="Grounded answer ready",
+            detail=f"{len(used_citation_ids)} citation(s) selected",
+            agent="rag_worker",
+            docs=[
+                {
+                    "doc_id": citation.doc_id,
+                    "title": citation.title,
+                    "source_path": "",
+                    "source_type": citation.source_type,
+                    "collection_id": citation.collection_id,
+                }
+                for citation in citations[:6]
+            ],
+            counts={"citations": len(citations)},
+        )
+
+    warnings = [str(item) for item in (answer_payload.get("warnings") or []) if str(item)]
+    retrieval_verification = dict(getattr(retrieval_run, "retrieval_verification", {}) or {})
+    suppress_verification_warning = bool(retrieval_verification.get("downgraded_to_negative_evidence"))
+    if str(retrieval_verification.get("status") or "").lower() == "revise" and not suppress_verification_warning:
+        if "RETRIEVAL_VERIFICATION_ISSUES" not in warnings:
+            warnings.append("RETRIEVAL_VERIFICATION_ISSUES")
+
+    return RagContract(
+        answer=str(answer_payload.get("answer") or ""),
+        citations=citations,
+        used_citation_ids=used_citation_ids,
+        confidence=float(answer_payload.get("confidence_hint") or 0.0),
+        retrieval_summary=retrieval_run.to_summary(citations_found=len(citations)),
+        followups=[str(item) for item in (answer_payload.get("followups") or []) if str(item)],
+        warnings=warnings,
+    )
+
+
+def _answer_context(
+    question: str,
+    conversation_context: str,
+    evidence_ledger: Dict[str, Any],
+    *,
+    base_guidance: str = "",
+    skill_context: str = "",
+    task_context: str = "",
+    coverage_goal: str = "",
+    result_mode: str = "",
+    controller_hints: Dict[str, Any] | None = None,
+) -> str:
+    context = str(conversation_context or "").strip()
+    normalized_controller_hints = coerce_controller_hints(controller_hints)
+    detailed_doc_focus_mode = (
+        str(normalized_controller_hints.get("summary_scope") or "").strip().lower() == "active_doc_focus"
+        or bool(normalized_controller_hints.get("prefer_detailed_synthesis"))
+    )
+    if prefers_bounded_synthesis(question) and not detailed_doc_focus_mode:
+        context = (
+            f"{context}\n\n"
+            "Formatting directive: answer with one short synthesis paragraph, then 3 to 6 bullets "
+            "covering the main implementation details, and end with a `Sources:` line naming the "
+            "most relevant documents used. Do not switch into a per-document inventory unless the "
+            "user explicitly asked to list or identify documents."
+        ).strip()
+    if detailed_doc_focus_mode:
+        context = (
+            f"{context}\n\n"
+            "Formatting directive: provide a detailed subsystem-organized synthesis grounded in the scoped documents. "
+            "Merge overlapping evidence across documents, name which documents support each subsystem, and call out any thin or conflicting support instead of omitting it."
+        ).strip()
+    if re.search(r"\b(identify|list|which|find)\s+(?:all\s+)?(?:documents|files)\b", question, re.IGNORECASE):
+        extra = (
+            "Retrieval directive: this is a corpus-discovery request. "
+            "Prefer a per-document answer that names relevant titles or file names with short grounded justifications."
+        )
+        context = f"{context}\n\n{extra}".strip()
+    if normalize_result_mode(result_mode) == "inventory" or bool(normalized_controller_hints.get("prefer_inventory_output")):
+        context = (
+            f"{context}\n\n"
+            "Formatting directive: prefer a per-document inventory with file titles and short grounded evidence."
+        ).strip()
+    if normalize_coverage_goal(coverage_goal) in {"corpus_wide", "exhaustive"}:
+        context = (
+            f"{context}\n\n"
+            "Coverage directive: avoid overclaiming corpus-wide completeness unless the evidence clearly supports it."
+        ).strip()
+    if base_guidance:
+        context = f"{context}\n\nBase guidance:\n{base_guidance}".strip()
+    if task_context:
+        context = f"{context}\n\nTask focus:\n{task_context}".strip()
+    if skill_context:
+        context = f"{context}\n\nSkill guidance:\n{skill_context}".strip()
+    rounds = list((evidence_ledger or {}).get("round_summaries") or [])
+    if rounds:
+        tried = []
+        for round_summary in rounds[:3]:
+            for item in round_summary.get("queries") or []:
+                if str(item) and str(item) not in tried:
+                    tried.append(str(item))
+        if tried:
+            context = f"{context}\n\nQueries tried: {'; '.join(tried[:6])}".strip()
+    claim_ledger = dict(evidence_ledger or {})
+    supported_claim_ids = [str(item) for item in (claim_ledger.get("supported_claim_ids") or []) if str(item)]
+    unverified_hops = [str(item) for item in (claim_ledger.get("unverified_hops") or []) if str(item)]
+    if supported_claim_ids:
+        context = f"{context}\n\nSupported claims: {', '.join(supported_claim_ids[:6])}".strip()
+    if unverified_hops:
+        context = f"{context}\n\nUnverified hops: {', '.join(unverified_hops[:4])}".strip()
+    return context
+
+
+def coerce_rag_contract(contract: Dict[str, Any]) -> RagContract:
+    return RagContract(
+        answer=str(contract.get("answer") or ""),
+        citations=[
+            Citation.from_dict(dict(item))
+            for item in (contract.get("citations") or [])
+            if isinstance(item, dict)
+        ],
+        used_citation_ids=[str(item) for item in (contract.get("used_citation_ids") or []) if str(item)],
+        confidence=float(contract.get("confidence") or 0.0),
+        retrieval_summary=RetrievalSummary.from_dict(dict(contract.get("retrieval_summary") or {})),
+        followups=[str(item) for item in (contract.get("followups") or []) if str(item)],
+        warnings=[str(item) for item in (contract.get("warnings") or []) if str(item)],
+    )
+
+
+def render_rag_contract(contract: RagContract | Dict[str, Any]) -> str:
+    raw = contract.to_dict() if isinstance(contract, RagContract) else dict(contract)
+    answer = raw.get("answer", "")
+    citations = raw.get("citations", [])
+    used = set(raw.get("used_citation_ids", []))
+    warnings = raw.get("warnings", [])
+    followups = raw.get("followups", [])
+
+    lines = [str(answer).strip()]
+    if citations:
+        lines.append("\nCitations:")
+        for citation in citations:
+            item = citation.to_dict() if isinstance(citation, Citation) else dict(citation)
+            citation_id = item.get("citation_id", "")
+            if used and citation_id not in used:
+                continue
+            title = str(item.get("title") or "")
+            location = str(item.get("location") or "").strip()
+            collection_id = str(item.get("collection_id") or "").strip()
+            source_type = str(item.get("source_type") or "").strip().lower()
+            details = []
+            if location:
+                details.append(location)
+            if collection_id:
+                collection_label = "KB Collection" if source_type == "kb" else "Collection"
+                details.append(f"{collection_label}: {collection_id}")
+            suffix = f" ({'; '.join(details)})" if details else ""
+            lines.append(f"- [{citation_id}] {title}{suffix}")
+    if warnings:
+        lines.append("\nWarnings: " + ", ".join(str(item) for item in warnings))
+    if followups:
+        lines.append("\nFollow-ups:")
+        for followup in followups:
+            lines.append(f"- {followup}")
+    return "\n".join(lines).strip()

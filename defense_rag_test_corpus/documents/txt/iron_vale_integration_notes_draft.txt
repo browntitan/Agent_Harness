@@ -1,0 +1,55 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Iron Vale Integration Notes Draft
+Date: 03 Oct 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Iron Vale Autonomous Ground Vehicle Integration
+DOCUMENT: Integration Bay Notes / Draft Consolidation
+CONTRACT: SYN-GV-28-2317
+DATE: 03 Oct 2028
+AUTHOR TEAM: Systems Integration and Test Cell
+STATUS: Informal draft, not release controlled
+
+1. PURPOSE
+
+These notes consolidate what the integration bay team learned while preparing the Block 2 vehicles for mobility and autonomy testing. The notes were assembled before the formal endurance summary and before the supplier retrofit proposal was received. They therefore capture the language technicians actually used in the bay rather than polished report wording. For retrieval testing, that means the file contains semantically important clues—'heat soak,' 'dust packing,' 'fan threshold too high,' and 'suspension castings short'—even where exact milestone names are absent.
+
+2. CONFIGURATION UNDER DISCUSSION
+
+Vehicle set: IV-B2-03 through IV-B2-08
+Drive module: DPU-88
+Navigation package: NAV-TRX-42
+Battery pack: BAT-6M
+Cooling shroud: SHD-18
+Fan controller: FC-9A
+Known fragile element: front suspension casting CR-12
+
+Technicians repeatedly noted that the current shroud geometry works acceptably on paved loops but loads with fine dust during repeated off-axis turns at the Cinder Flats Test Range. Once the shroud packs up, fan duty cycle increases, the controller threshold is reached later than desired, and the autonomy compute tray begins to derate. This chain was not yet quantified when the notes were first typed, but the pattern was consistent across multiple driver comments.
+
+3. WHAT THE TEAM OBSERVED
+
+During hot afternoon runs the autonomy compute stack reached thermal protection earlier than expected. Operators saw speed limits drop and route replans lag. The immediate symptom looked like a software problem because navigation updates became sluggish, but inspection showed substantial dust accumulation at the inner lip of SHD-18. One technician described the behavior as 'breathing through a straw after lap four.' Another noted that cleaning the shroud restored normal performance for the next short run, which pointed away from permanent hardware damage and toward ingestion plus threshold logic.
+
+The same work period also revealed a secondary schedule issue: the received quantity of CR-12 castings from Red Butte Composites was not enough to support both test articles and spares. Program controls flagged this because any retrofit campaign on the cooling path would consume shop time precisely when the suspension replacements were supposed to occur. The combined effect made the original limited user test objective feel fragile even before the formal IMS was updated.
+
+4. ENGINEERING DISCUSSION
+
+The engineering cell debated three options. Option one was a procedural fix: clean the shroud every mission loop and accept lower endurance confidence. Option two was a software fix: command the fan controller into a more aggressive state earlier in the thermal ramp. Option three was a hardware fix: redesign the shroud inlet and add a debris relief geometry. The consensus in the bay was that option three would be necessary if the program wanted to pass the official endurance threshold of 120 km with at least 85 percent mission completion.
+
+A key nuance from the whiteboard discussion is that the shroud issue alone did not fully explain schedule pressure. Even if thermal performance improved, the vehicle line still needed enough suspension spares to support the test fleet. That is why later planning products talk about the cooling retrofit and the supplier capacity problem in the same breath rather than treating them as separate problems.
+
+5. PRELIMINARY IMPACT TO TEST EVENTS
+
+The test team informally assessed that the upcoming endurance demonstration would probably fall short if run without hardware change. The phrase used in the bay was 'we can probably make the morning numbers, not the afternoon numbers.' No one had yet assigned the actual shortfall in kilometers or completion rate, but the concern was severe enough that the program manager directed a branch schedule for limited user test, originally aligned to 12 Feb 2029. The branch assumption was that a retrofit option could add four to six weeks once drawings, fabricated parts, and install labor were counted.
+
+6. TRACEABLE ACTIONS
+
+- Obtain more precise thermal traces with the controller threshold manually lowered.
+- Request supplier feedback on a modified SHD-18 with less dust retention.
+- Reserve bay labor for retrofit installs in case the hardware branch is selected.
+- Reconcile the shortage of CR-12 spares against the vehicle allocation for Cinder Flats.
+- Carry the risk forward to the schedule workbook so the test community and finance team are using the same story.
+
+7. INTERPRETATION GUIDANCE
+
+This file matters because it uses the language that field engineers actually used before formal reports existed. The phrase 'heat soak in the tray' later becomes a quantified endurance failure in the final summary. The phrase 'limited user test feels fragile' later becomes a dated milestone move in the workbook. Systems that rely only on exact document titles may miss this chain. Systems that do semantic retrieval well should connect this draft to the ground test plan, the endurance summary, and the Aegis Mobility Works proposal that followed.

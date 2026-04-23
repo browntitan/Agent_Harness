@@ -1,0 +1,49 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Trident Echo Manufacturing Constraint Report
+Date: 18 Jun 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Trident Echo Naval Power Distribution Upgrade
+DOCUMENT: Manufacturing Constraint Report
+CONTRACT: SYN-NV-27-7740
+DATE: 18 Jun 2028
+PREPARED BY: Integrated Production Cell
+FACILITY OF CONCERN: Gulf Forge Annex
+
+1. SUMMARY OF BOTTLENECKS
+
+Production of the BCB-440 breaker cabinet and the BUS-9R plated bus bar is constrained by three near-term factory conditions at Gulf Forge Annex: outage of furnace F-2, delayed silver-plating queue capacity, and inconsistent casting throughput at Halcyon Foundry for cabinet housings that mate to the PCU-17 power conversion unit. None of these issues independently stops the program forever, but together they compress the window available to build the shock qualification article and threaten the previous milestone date used in the factory plan.
+
+The report distinguishes between material bottlenecks and sequencing bottlenecks. Material bottlenecks concern when a component physically exists. Sequencing bottlenecks concern whether build steps can occur in the right order once the part exists. The bus bar queue is mostly a sequencing problem because raw stock is on hand but plating capacity is not. The cabinet housing problem is a material problem because late or flawed castings are arriving from Halcyon Foundry. Both problems touch the same shipset and therefore converge on the same milestone.
+
+2. DETAIL ON BUS BAR FLOW
+
+The BUS-9R route includes machining, deburr, inspection, silver plating, and final flatness verification. The current average queue time before plating is 11.5 calendar days, compared with the planning assumption of 4 days. The queue grew after another naval program reserved the plating line for a corrosion-recovery campaign. Meridian Maritime Power investigated outside plating houses, but changing houses would require coupon validation and add transportation risk. Therefore the near-term recovery recommendation is to keep the current house, prioritize Trident Echo lots, and stage all upstream work so parts enter plating with no administrative delay.
+
+Flatness is an additional concern. Reheated bars from the alternate temporary furnace route show more variance than the team expected. While most bars can still be brought into tolerance, the added straightening work consumes the same skilled technicians needed later for cabinet assembly.
+
+3. DETAIL ON CABINET HOUSINGS
+
+Halcyon Foundry has delivered usable housings, but the foundry is seeing void indications in a subset of castings and is contending with its own furnace scheduling problem. The practical effect is that cabinet housings arrive later and with more inspection churn. Because the BCB-440 frame is the structural parent for several installation steps, a late housing does not merely delay one component; it delays downstream fit checks, wiring layout, and the final integrated shock article build. The team opened a corrective action record and requested a daily status board from Halcyon until process stability improves.
+
+Readers should note that Halcyon Foundry is unrelated to Halcyon Microdevices, which appears later in the Ember Reach procurement scenario. The similar supplier names are intentional synthetic ambiguity, useful for validating metadata and entity resolution in retrieval systems.
+
+4. SCHEDULE CONSEQUENCE
+
+The production cell's branch plan indicates that the shock qualification event previously planned for 08 Sep 2028 is no longer credible. Even with aggressive expedite actions, the best recoverable working date is approximately five and a half weeks later. Program controls rounded that effect into a formal current target of 17 Oct 2028 in the milestone workbook. The actual physical test date will depend on lab availability at Pier Nine Shock Laboratory once hardware is ready.
+
+5. COST CONSEQUENCE
+
+Most of the cost growth is not material unit price inflation. It is schedule-driven inefficiency: overtime, repeated inspections, premium freight on selected castings, and engineering effort associated with bracket reinforcement once the shock article exposed a structural weakness. The integrated estimate now carries total program hardware cost of $23.31M versus the earlier baseline of $22.44M, a delta of $0.87M. That number is reflected more formally in the workbook rather than in this narrative note, but the note explains why cost moved.
+
+6. RECOMMENDED ACTIONS
+
+- Maintain daily production control board for BUS-9R plating queue.
+- Hold Halcyon Foundry on a standing weekly executive call until void rate stabilizes.
+- Pre-stage non-constrained hardware for the shock article so the lab date can be accepted immediately when the shipset is ready.
+- Keep bracket reinforcement concept paper warm in case the first shock run reveals margin issues.
+- Update the integrated cost workbook and ensure narrative products use the same total.
+
+7. WHY THIS FILE MATTERS FOR RETRIEVAL
+
+The formal shock briefing later states that the article conditionally passed with a bracket concern. This constraint report explains the earlier manufacturing reasons why the test moved. A robust RAG system should connect the manufacturing bottleneck, the later bracket issue, and the workbook cost increase, even though each document uses different phrasing and appears in a different file format.

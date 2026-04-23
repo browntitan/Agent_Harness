@@ -1,0 +1,46 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Blue Mica After Action Notes
+Date: 14 Sep 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Blue Mica Tactical Communications Refresh
+DOCUMENT: Brigade Pilot After-Action Notes
+DATE: 14 Sep 2028
+LOCATION: Bastion Fielding Center
+STATUS: Informal fielding note set
+
+1. USER FEEDBACK THEMES
+
+Operators liked the improved audio clarity of the refreshed handset package anchored by HND-54, but they consistently asked for more disciplined battery labeling and better quick-reference cards during first issue. Several platoon communications representatives said the equipment itself was usable, yet the fielding team moved too quickly through account setup and radio profile verification. In other words, some of the friction attributed to the hardware was actually training and staging friction.
+
+The most repeated hardware complaint concerned the ENC-21M crypto module package. Users did not report a cryptographic malfunction; instead they reported confusion about which serialized modules were cleared for which mission set and frustration when delayed certificates forced last-minute swaps. That distinction matters because a search for 'failed crypto hardware' would be misleading. The issue was compliance package timing and fielding administration more than pure hardware failure.
+
+2. LOGISTICS AND SPARES OBSERVATIONS
+
+Field maintainers noted that the spare battery policy was too thin for units conducting extended mounted operations. Some teams consumed their ready issue batteries faster than expected because new amplifiers pulled more power in high-noise environments. The spares model in the workbook later increased coverage for selected line items, but these notes are where the problem first appears in plain language.
+
+Another observation concerned nomenclature. Several soldiers referred to the encrypted handset assembly as 'the North Coast set,' even though the actual peripheral supplier on Blue Mica is Northcoast Signal Labs. That nickname has already created confusion with North Coast Systems LLC on Asterion. Retrieval evaluations should therefore treat supplier name normalization as a first-class challenge, not a cosmetic one.
+
+3. STAFFING AND FIELDING DISCIPLINE
+
+The fielding team generally met the planned daily equipment issue counts, but at the cost of compressing the training block. By the third day, instructors were spending more time on troubleshooting than on planned curriculum. The notes recommend that later waves add another trainer and allocate more time to serialized asset verification, especially for the ENC-21M module. Those staffing shifts eventually flowed into the workbook and the refresh plan, where they are stated in more formal resourcing language.
+
+The finance implication was relatively modest compared with the operational benefit. Leaders assessed that adding trainer coverage and a better quick-reference package would cost far less than repeated return visits. That logic supports why the workbook carries separate training and fielding lines rather than burying all expenses inside a single deployment number.
+
+4. IMPLICATIONS FOR WAVE 2
+
+The after-action team did not formally move the wave 2 fielding date, but the note clearly signals that the baseline timing was vulnerable. The narrative said the team should 'not launch the next brigade package until the compliance binder for ENC-21M is fully clean and the spare battery posture is corrected.' Later documents show that wave 2 indeed shifted to a later date. A good retrieval system should connect this less formal language to the later schedule movement without requiring the exact milestone name to appear here.
+
+5. SELECT RECOMMENDATIONS
+
+- Increase serialized asset verification time during fielding reception.
+- Add one field trainer per wave and preserve the full training block.
+- Expand spare battery and amplifier coverage where mounted operations dominate.
+- Freeze module assignment list 72 hours before shipment instead of at the loading dock.
+- Do not confuse Northcoast Signal Labs with North Coast Systems LLC in supplier reporting.
+
+These notes pair especially well with the refresh plan, the vendor performance review, the compliance summary, and the staffing/deployment/spares workbook. The notes show what users experienced; the formal documents show how the program answered those experiences.
+
+6. COST SIGNALS
+
+Although this note does not provide a final current estimate, it foreshadows the cost structure later visible in the workbook: approximately $14.62M for fielding operations, $1.94M for spares, and $0.83M for training content and surge support. The split matters because the remedy was not a single line item. The program improved the user experience by combining staffing changes, documentation updates, and selective spares growth.

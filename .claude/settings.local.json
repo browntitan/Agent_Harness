@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(npm test *)",
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(find node_modules -name \"package.json\" -path \"*/react/package.json\" -maxdepth 3 -exec grep -l \"\\\\\"name\\\\\": \\\\\"react\\\\\"\" {} \\\\;)",
+      "Bash(npm ls *)",
+      "Bash(awk 'NR >= 1666' src/index.css)",
+      "Bash(grep -nE '#[0-9a-fA-F]{3,8}\\\\b' src/index.css)",
+      "Bash(xargs grep *)"
+    ]
+  }
+}

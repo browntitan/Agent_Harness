@@ -1,0 +1,49 @@
+.git
+.gitignore
+.migration
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.DS_Store
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.ipynb_checkpoints
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Node/build output
+node_modules
+control_panel/node_modules
+control_panel/dist
+frontend
+packages
+examples/vercel-ai-sdk
+training
+dist
+build
+*.tsbuildinfo
+
+# Runtime state owned by Docker volumes in v3
+data/runtime
+data/workspaces
+data/uploads
+data/cache
+data/control_panel
+data/graphrag/projects
+
+# Local one-off artifacts
+*.sqlite
+*.db
+*.pdf
+*.tmp
+slide-*.jpg
+Agent Powerpoint Creator

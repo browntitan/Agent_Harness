@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">Safe first tour</title>
+  <desc id="desc">Flow chart showing the safe first tour through Dashboard, Collections, Agents, Config Validate, and Operations.</desc>
+  <rect width="1200" height="300" fill="#f3f0e8"/>
+  <g font-family="IBM Plex Sans, Arial, sans-serif">
+    <rect x="40" y="90" width="180" height="120" rx="24" fill="#ffffff" stroke="#cdbf9f" stroke-width="2"/>
+    <rect x="270" y="90" width="180" height="120" rx="24" fill="#ffffff" stroke="#cdbf9f" stroke-width="2"/>
+    <rect x="500" y="90" width="180" height="120" rx="24" fill="#ffffff" stroke="#cdbf9f" stroke-width="2"/>
+    <rect x="730" y="90" width="180" height="120" rx="24" fill="#fff8ec" stroke="#9b6b2d" stroke-width="3"/>
+    <rect x="960" y="90" width="180" height="120" rx="24" fill="#ffffff" stroke="#cdbf9f" stroke-width="2"/>
+
+    <text x="78" y="136" font-size="26" fill="#1f2b24" font-weight="700">Dashboard</text>
+    <text x="68" y="172" font-size="18" fill="#4c5b52">Confirm status and</text>
+    <text x="83" y="196" font-size="18" fill="#4c5b52">reload summary</text>
+
+    <text x="300" y="136" font-size="26" fill="#1f2b24" font-weight="700">Collections</text>
+    <text x="304" y="172" font-size="18" fill="#4c5b52">Inspect content</text>
+    <text x="311" y="196" font-size="18" fill="#4c5b52">without editing</text>
+
+    <text x="550" y="136" font-size="26" fill="#1f2b24" font-weight="700">Agents</text>
+    <text x="531" y="172" font-size="18" fill="#4c5b52">Review tools and</text>
+    <text x="544" y="196" font-size="18" fill="#4c5b52">agent coverage</text>
+
+    <text x="760" y="136" font-size="26" fill="#1f2b24" font-weight="700">Config</text>
+    <text x="761" y="172" font-size="18" fill="#4c5b52">Draft and stop</text>
+    <text x="763" y="196" font-size="18" fill="#4c5b52">at Validate</text>
+
+    <text x="984" y="136" font-size="26" fill="#1f2b24" font-weight="700">Operations</text>
+    <text x="996" y="172" font-size="18" fill="#4c5b52">Review audit and</text>
+    <text x="1007" y="196" font-size="18" fill="#4c5b52">reload history</text>
+
+    <path d="M220 150 L270 150" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <path d="M450 150 L500 150" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <path d="M680 150 L730 150" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <path d="M910 150 L960 150" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <polygon points="262,142 270,150 262,158" fill="#9b6b2d"/>
+    <polygon points="492,142 500,150 492,158" fill="#9b6b2d"/>
+    <polygon points="722,142 730,150 722,158" fill="#9b6b2d"/>
+    <polygon points="952,142 960,150 952,158" fill="#9b6b2d"/>
+
+    <text x="40" y="48" font-size="30" fill="#1f2b24" font-weight="700">Recommended first-use review path</text>
+    <text x="40" y="75" font-size="18" fill="#4c5b52">Follow this sequence when you want to learn the system without making a live change.</text>
+  </g>
+</svg>

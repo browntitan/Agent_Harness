@@ -1,0 +1,5 @@
+region,reserve_target_pct,risk_score,control_owner
+NA,0.11,72,Platform Ops
+EMEA,0.15,88,Security
+APAC,0.13,81,Compliance
+LATAM,0.10,64,Customer Ops

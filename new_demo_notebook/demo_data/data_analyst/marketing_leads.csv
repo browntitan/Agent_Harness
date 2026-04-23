@@ -1,0 +1,49 @@
+lead_id,created_at,region,channel,campaign,spend_usd,impressions,clicks,leads,conversions,revenue_usd,landing_page_score,owner,notes
+LEAD-001,2026-03-01,North,Email,Spring Push,,5000,90,12,,4200.0,68.0,J. Patel,Missing spend
+LEAD-002,2026-03-02,South,Web,Retention Reactivation,1287.5,5260,97,13,5,4510.5,70.5,R. Flores,
+LEAD-003,2026-03-03,East,App,Webinar,1375.0,5520,104,14,6,4821.0,73.0,K. Young,
+LEAD-004,2026-03-04,West,Partner,Partner Boost,1462.5,5780,111,15,7,5131.5,75.5,A. White,
+LEAD-005,2026-03-05,Central,Retail,Spring Push,1550.0,6040,118,16,8,5442.0,78.0,J. Patel,
+LEAD-006,2026-03-06,Enterprise,Email,Retention Reactivation,1637.5,6300,125,17,9,5752.5,80.5,R. Flores,
+LEAD-007,2026-03-07,North,Web,Webinar,1725.0,6560,132,18,4,6063.0,83.0,K. Young,
+LEAD-008,2026-03-08,South,App,Partner Boost,1812.5,6820,139,19,5,6373.5,85.5,A. White,Delayed CRM sync
+LEAD-009,2026-03-09,East,Partner,Spring Push,1900.0,7080,146,20,6,6684.0,68.0,J. Patel,
+LEAD-010,2026-03-10,West,Retail,Retention Reactivation,1987.5,7340,153,21,,6994.5,70.5,R. Flores,
+LEAD-011,2026-03-11,Central,Email,Webinar,2075.0,7600,160,12,8,7305.0,73.0,K. Young,
+LEAD-012,2026-03-12,Enterprise,Web,Partner Boost,,7860,167,13,9,7615.5,75.5,A. White,Missing spend
+LEAD-013,2026-03-13,North,App,Spring Push,2250.0,8120,174,14,4,7926.0,78.0,J. Patel,
+LEAD-014,2026-03-14,South,Partner,Retention Reactivation,2337.5,8380,181,15,5,8236.5,80.5,R. Flores,
+LEAD-015,2026-03-15,East,Retail,Webinar,2425.0,8640,188,16,6,8547.0,83.0,K. Young,Delayed CRM sync
+LEAD-016,2026-03-16,West,Email,Partner Boost,2512.5,8900,195,17,7,8857.5,85.5,A. White,
+LEAD-017,2026-03-17,Central,Web,Spring Push,2600.0,9160,202,18,8,9168.0,68.0,J. Patel,
+LEAD-018,2026-03-18,Enterprise,App,Retention Reactivation,2687.5,9420,209,19,9,9478.5,70.5,R. Flores,
+LEAD-019,2026-03-19,North,Partner,Webinar,2775.0,9680,216,20,,9789.0,73.0,K. Young,
+LEAD-020,2026-03-20,South,Retail,Partner Boost,2862.5,9940,223,21,5,10099.5,75.5,A. White,
+LEAD-021,2026-03-21,East,Email,Spring Push,2950.0,10200,230,12,6,10410.0,78.0,J. Patel,
+LEAD-022,2026-03-22,West,Web,Retention Reactivation,3037.5,10460,237,13,7,10720.5,80.5,R. Flores,Delayed CRM sync
+LEAD-023,2026-03-23,Central,App,Webinar,,10720,244,14,8,11031.0,83.0,K. Young,Missing spend
+LEAD-024,2026-03-24,Enterprise,Partner,Partner Boost,3212.5,10980,251,15,9,11341.5,85.5,A. White,
+LEAD-025,2026-03-25,North,Retail,Spring Push,3300.0,11240,258,16,4,11652.0,68.0,J. Patel,
+LEAD-026,2026-03-26,South,Email,Retention Reactivation,3387.5,11500,265,17,5,11962.5,70.5,R. Flores,
+LEAD-027,2026-03-27,East,Web,Webinar,3475.0,11760,272,18,6,12273.0,73.0,K. Young,
+LEAD-028,2026-03-28,West,App,Partner Boost,3562.5,12020,279,19,,12583.5,75.5,A. White,
+LEAD-029,2026-03-01,Central,Partner,Spring Push,3650.0,12280,286,20,8,12894.0,78.0,J. Patel,Delayed CRM sync
+LEAD-030,2026-03-02,Enterprise,Retail,Retention Reactivation,3737.5,12540,293,21,9,13204.5,80.5,R. Flores,
+LEAD-031,2026-03-03,North,Email,Webinar,3825.0,12800,300,12,4,13515.0,83.0,K. Young,
+LEAD-032,2026-03-04,South,Web,Partner Boost,3912.5,13060,307,13,5,13825.5,85.5,A. White,
+LEAD-033,2026-03-05,East,App,Spring Push,4000.0,13320,314,14,6,14136.0,68.0,J. Patel,
+LEAD-034,2026-03-06,West,Partner,Retention Reactivation,,13580,321,15,7,14446.5,70.5,R. Flores,Missing spend
+LEAD-035,2026-03-07,Central,Retail,Webinar,4175.0,13840,328,16,8,14757.0,73.0,K. Young,
+LEAD-036,2026-03-08,Enterprise,Email,Partner Boost,4262.5,14100,335,17,9,15067.5,75.5,A. White,Delayed CRM sync
+LEAD-037,2026-03-09,North,Web,Spring Push,4350.0,14360,342,18,,15378.0,78.0,J. Patel,
+LEAD-038,2026-03-10,South,App,Retention Reactivation,4437.5,14620,349,19,5,15688.5,80.5,R. Flores,
+LEAD-039,2026-03-11,East,Partner,Webinar,4525.0,14880,356,20,6,15999.0,83.0,K. Young,
+LEAD-040,2026-03-12,West,Retail,Partner Boost,4612.5,15140,363,21,7,16309.5,85.5,A. White,
+LEAD-041,2026-03-13,Central,Email,Spring Push,4700.0,15400,370,12,8,16620.0,68.0,J. Patel,
+LEAD-042,2026-03-14,Enterprise,Web,Retention Reactivation,4787.5,15660,377,13,9,16930.5,70.5,R. Flores,
+LEAD-043,2026-03-15,North,App,Webinar,4875.0,15920,384,14,4,17241.0,73.0,K. Young,Delayed CRM sync
+LEAD-044,2026-03-16,South,Partner,Partner Boost,4962.5,16180,391,15,5,17551.5,75.5,A. White,
+LEAD-045,2026-03-17,East,Retail,Spring Push,,16440,398,16,6,17862.0,78.0,J. Patel,Missing spend
+LEAD-046,2026-03-18,West,Email,Retention Reactivation,5137.5,16700,405,17,,18172.5,80.5,R. Flores,
+LEAD-047,2026-03-19,Central,Web,Webinar,5225.0,16960,412,18,8,18483.0,83.0,K. Young,
+LEAD-048,2026-03-20,Enterprise,App,Partner Boost,5312.5,17220,419,19,9,18793.5,85.5,A. White,

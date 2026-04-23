@@ -1,0 +1,44 @@
+services:
+  app-bootstrap:
+    volumes:
+      - ./src:/app/src:ro
+      - ./run.py:/app/run.py:ro
+      - ./control_panel/dist:/app/control_panel/dist:ro
+
+  app:
+    volumes:
+      - ./src:/app/src:ro
+      - ./run.py:/app/run.py:ro
+      - ./control_panel/dist:/app/control_panel/dist:ro
+    command:
+      - python
+      - -m
+      - uvicorn
+      - agentic_chatbot_next.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/src
+
+  control-panel-dev:
+    image: node:20-bookworm-slim
+    working_dir: /workspace/control_panel
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      APP_API_HOST: app
+      APP_API_PORT: "8000"
+    ports:
+      - "${CONTROL_PANEL_DEV_PORT:-4174}:4174"
+    volumes:
+      - ./control_panel:/workspace/control_panel
+      - control_panel_node_modules:/workspace/control_panel/node_modules
+    command: >
+      sh -c "npm install && npm run dev -- --host 0.0.0.0"
+
+volumes:
+  control_panel_node_modules:

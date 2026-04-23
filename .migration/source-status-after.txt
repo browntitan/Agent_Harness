@@ -1,0 +1,365 @@
+ M .DS_Store
+ M .dockerignore
+ M .env
+ M .env.example
+ M .gitignore
+ M Dockerfile
+ M README.md
+ M data/agents/basic.md
+ M data/agents/coordinator.md
+ M data/agents/data_analyst.md
+ M data/agents/finalizer.md
+ M data/agents/general.md
+ M data/agents/memory_maintainer.md
+ M data/agents/planner.md
+ M data/agents/utility.md
+ M data/agents/verifier.md
+ M data/prompts/grounded_answer.md
+ M data/prompts/grounded_answer.txt
+ M data/prompts/planner.md
+ M data/prompts/rag_synthesis.md
+ M data/prompts/rag_synthesis.txt
+ M data/prompts/router.md
+ M data/prompts/verifier.md
+ M data/skill_packs/data_analyst/dataset_workflow.md
+ M data/skill_packs/finalizer/synthesis_rules.md
+ M data/skill_packs/general/delegation_policy.md
+ M data/skill_packs/planner/task_decomposition.md
+ M data/skill_packs/rag/citation_hygiene.md
+ M data/skill_packs/rag/clause_extraction.md
+ M data/skill_packs/rag/collection_scoping.md
+ M data/skill_packs/rag/document_resolution.md
+ M data/skill_packs/rag/empty_result_recovery.md
+ M data/skill_packs/rag/multi_document_comparison.md
+ M data/skill_packs/rag/retrieval_strategy.md
+ M data/skill_packs/utility/memory_and_listing.md
+ M data/skill_packs/verifier/review_checklist.md
+ M data/skills/basic_chat.md
+ M data/skills/data_analyst_agent.md
+ M data/skills/finalizer_agent.md
+ M data/skills/general_agent.md
+ M data/skills/planner_agent.md
+ M data/skills/rag_agent.md
+ M data/skills/skills.md
+ M data/skills/supervisor_agent.md
+ M data/skills/utility_agent.md
+ M data/skills/verifier_agent.md
+ M docker-compose.yml
+ M docs/AGENT_DEEP_DIVE.md
+ M docs/AGENT_HARNESS_AUDIT.md
+ M docs/AGENT_REGISTRY.md
+ M docs/ARCHITECTURE.md
+ M docs/C4_ARCHITECTURE.md
+ M docs/COMPOSITION.md
+ M docs/CONTROL_FLOW.md
+ M docs/DATA_ANALYST_AGENT.md
+ M docs/KB_DEMO_PACKS.md
+ M docs/LANGCHAIN_LANGGRAPH_ECOSYSTEM.md
+ M docs/LOCAL_DOCKER_STACK.md
+ M docs/NEXT_RUNTIME_FOUNDATION.md
+ M docs/OBSERVABILITY_LANGFUSE.md
+ M docs/OPENAI_GATEWAY.md
+ M docs/PATTERNS.md
+ M docs/PROVIDERS.md
+ M docs/RAG_AGENT_DESIGN.md
+ M docs/RAG_TOOL_CONTRACT.md
+ M docs/ROUTER_RUBRIC.md
+ M docs/SKILLS_PLAYBOOK.md
+ M docs/TEST_QUERIES.md
+ M docs/TOOLS_AND_TOOL_CALLING.md
+ M docs/WORKSPACE.md
+ M examples/vercel-ai-sdk/README.md
+ M frontend/package-lock.json
+ M frontend/package.json
+ M frontend/src/api/client.ts
+ M frontend/src/components/AgentStatusPanel.css
+ M frontend/src/components/AgentStatusPanel.tsx
+ M frontend/src/components/MessageBubble.css
+ M frontend/src/components/MessageBubble.tsx
+ M frontend/src/hooks/useChat.ts
+ M frontend/src/types.ts
+ M frontend/vite.config.ts
+ M new_demo_notebook/README.md
+ M new_demo_notebook/agentic_system_showcase.ipynb
+ M new_demo_notebook/lib/__init__.py
+ M new_demo_notebook/lib/client.py
+ M new_demo_notebook/lib/preflight.py
+ M new_demo_notebook/lib/render.py
+ M new_demo_notebook/lib/scenario_runner.py
+ M new_demo_notebook/lib/server.py
+ M new_demo_notebook/lib/trace_reader.py
+ M new_demo_notebook/scenarios/scenarios.json
+ M requirements.txt
+ M src/agentic_chatbot_next/agents/loader.py
+ M src/agentic_chatbot_next/agents/prompt_builder.py
+ M src/agentic_chatbot_next/agents/registry.py
+ M src/agentic_chatbot_next/api/main.py
+ M src/agentic_chatbot_next/api/progress_callback.py
+ M src/agentic_chatbot_next/app/service.py
+ M src/agentic_chatbot_next/basic_chat.py
+ M src/agentic_chatbot_next/cli.py
+ M src/agentic_chatbot_next/config.py
+ M src/agentic_chatbot_next/context.py
+ M src/agentic_chatbot_next/contracts/agents.py
+ M src/agentic_chatbot_next/contracts/jobs.py
+ M src/agentic_chatbot_next/contracts/messages.py
+ M src/agentic_chatbot_next/contracts/rag.py
+ M src/agentic_chatbot_next/contracts/tools.py
+ M src/agentic_chatbot_next/general_agent.py
+ M src/agentic_chatbot_next/memory/context_builder.py
+ M src/agentic_chatbot_next/observability/callbacks.py
+ M src/agentic_chatbot_next/observability/events.py
+ M src/agentic_chatbot_next/persistence/postgres/__init__.py
+ M src/agentic_chatbot_next/persistence/postgres/chunks.py
+ M src/agentic_chatbot_next/persistence/postgres/connection.py
+ M src/agentic_chatbot_next/persistence/postgres/documents.py
+ M src/agentic_chatbot_next/persistence/postgres/schema.sql
+ M src/agentic_chatbot_next/persistence/postgres/skills.py
+ M src/agentic_chatbot_next/persistence/postgres/vector_schema.py
+ M src/agentic_chatbot_next/prompting.py
+ M src/agentic_chatbot_next/providers/__init__.py
+ M src/agentic_chatbot_next/providers/factory.py
+ M src/agentic_chatbot_next/providers/llm_factory.py
+ M src/agentic_chatbot_next/rag/__init__.py
+ M src/agentic_chatbot_next/rag/citations.py
+ M src/agentic_chatbot_next/rag/clause_splitter.py
+ M src/agentic_chatbot_next/rag/engine.py
+ M src/agentic_chatbot_next/rag/ingest.py
+ M src/agentic_chatbot_next/rag/ocr.py
+ M src/agentic_chatbot_next/rag/retrieval.py
+ M src/agentic_chatbot_next/rag/specialist_tools.py
+ M src/agentic_chatbot_next/rag/stores.py
+ M src/agentic_chatbot_next/rag/structure_detector.py
+ M src/agentic_chatbot_next/rag/synthesis.py
+ M src/agentic_chatbot_next/router/llm_router.py
+ M src/agentic_chatbot_next/router/router.py
+ M src/agentic_chatbot_next/runtime/__init__.py
+ M src/agentic_chatbot_next/runtime/event_sink.py
+ M src/agentic_chatbot_next/runtime/job_manager.py
+ M src/agentic_chatbot_next/runtime/kernel.py
+ M src/agentic_chatbot_next/runtime/query_loop.py
+ M src/agentic_chatbot_next/runtime/task_plan.py
+ M src/agentic_chatbot_next/runtime/transcript_store.py
+ M src/agentic_chatbot_next/sandbox/__init__.py
+ M src/agentic_chatbot_next/sandbox/docker_exec.py
+ M src/agentic_chatbot_next/session.py
+ M src/agentic_chatbot_next/skills/base_loader.py
+ M src/agentic_chatbot_next/skills/indexer.py
+ M src/agentic_chatbot_next/skills/pack_loader.py
+ M src/agentic_chatbot_next/skills/resolver.py
+ M src/agentic_chatbot_next/skills/runtime.py
+ M src/agentic_chatbot_next/tools/base.py
+ M src/agentic_chatbot_next/tools/data_analyst_tools.py
+ M src/agentic_chatbot_next/tools/executor.py
+ M src/agentic_chatbot_next/tools/groups/analyst.py
+ M src/agentic_chatbot_next/tools/groups/memory.py
+ M src/agentic_chatbot_next/tools/groups/orchestration.py
+ M src/agentic_chatbot_next/tools/groups/rag_gateway.py
+ M src/agentic_chatbot_next/tools/list_docs.py
+ M src/agentic_chatbot_next/tools/policy.py
+ M src/agentic_chatbot_next/tools/rag_agent_tool.py
+ M src/agentic_chatbot_next/tools/registry.py
+ M src/agentic_chatbot_next/tools/skills_search_tool.py
+ M src/agentic_chatbot_next/utils/json_utils.py
+ M tests/test_api_gateway.py
+ M tests/test_cli_provider_scope.py
+ M tests/test_data_analyst_tools.py
+ M tests/test_docker_executor.py
+ M tests/test_new_demo_notebook_helpers.py
+ M tests/test_next_agent_loader.py
+ M tests/test_next_config_compat.py
+ M tests/test_next_contracts.py
+ M tests/test_next_job_manager.py
+ M tests/test_next_json_utils.py
+ M tests/test_next_kb_readiness.py
+ M tests/test_next_memory.py
+ M tests/test_next_provider_overrides.py
+ M tests/test_next_retrieval.py
+ M tests/test_next_router.py
+ M tests/test_next_runtime_foundation.py
+ M tests/test_next_synthesis.py
+ M tests/test_next_tool_policy.py
+ M tests/test_planner_runtime.py
+ M tests/test_provider_setup.py
+ M tests/test_repo_docs_paths.py
+ M tests/test_runtime_observability.py
+ M tests/test_runtime_persistence.py
+ M tests/test_skill_index.py
+ M tests/test_skills_search_tool.py
+?? .~lock.agentic_chatbot_v2_deep_dive.pdf#
+?? "Agent Powerpoint Creator/"
+?? agentic_chatbot_v2_deep_dive.pdf
+?? control_panel/
+?? data/agents/graph_manager.md
+?? data/graphrag/
+?? data/router/
+?? data/skill_packs/data_analyst/chart_generation_and_export.md
+?? data/skill_packs/data_analyst/correlation_and_statistical_analysis.md
+?? data/skill_packs/data_analyst/dataset_cleanup_and_type_repair.md
+?? data/skill_packs/data_analyst/groupby_and_summary_reporting.md
+?? data/skill_packs/data_analyst/llm_nlp_batch_validation.md
+?? data/skill_packs/data_analyst/llm_nlp_row_labeling.md
+?? data/skill_packs/data_analyst/multi_sheet_resolution.md
+?? data/skill_packs/data_analyst/return_file_handoff.md
+?? data/skill_packs/data_analyst/workbook_mutation_copy_on_write.md
+?? data/skill_packs/finalizer/document_campaign_synthesis.md
+?? data/skill_packs/general/clarification_thresholding.md
+?? data/skill_packs/general/document_research_delegation.md
+?? data/skill_packs/general/evidence_synthesis.md
+?? data/skill_packs/general/failure_recovery.md
+?? data/skill_packs/general/long_running_work.md
+?? data/skill_packs/general/result_format_selection.md
+?? data/skill_packs/general/task_intake.md
+?? data/skill_packs/general/unsupported_task_handling.md
+?? data/skill_packs/planner/document_campaign_planning.md
+?? data/skill_packs/rag/comparison_campaign.md
+?? data/skill_packs/rag/corpus_discovery.md
+?? data/skill_packs/rag/coverage_sufficiency_audit.md
+?? data/skill_packs/rag/cross_document_inventory.md
+?? data/skill_packs/rag/defense_graph_guidance.md
+?? data/skill_packs/rag/graph_drift_followup.md
+?? data/skill_packs/rag/graph_freshness_and_staleness_check.md
+?? data/skill_packs/rag/graph_global_community_discovery.md
+?? data/skill_packs/rag/graph_grounding_and_resolve_back.md
+?? data/skill_packs/rag/graph_local_relationship_tracing.md
+?? data/skill_packs/rag/graph_vs_vector_source_selection.md
+?? data/skill_packs/rag/negative_evidence_reporting.md
+?? data/skill_packs/rag/process_flow_identification.md
+?? data/skill_packs/rag/windowed_keyword_followup.md
+?? data/skill_packs/verifier/corpus_coverage_and_overclaim_check.md
+?? data/skills/graph_manager_agent.md
+?? defense_rag_test_corpus/
+?? deployment/
+?? docker/sandbox.Dockerfile
+?? docs/DOC_ALIGNMENT_AUDIT.md
+?? docs/GRAPH_INVENTORY_REGRESSION_AUDIT.md
+?? docs/RFP_CORPUS_TEST_PROMPTS.md
+?? frontend/src/api/client.test.ts
+?? frontend/src/components/AgentStatusPanel.test.tsx
+?? frontend/src/test/
+?? frontend/src/utils/
+?? lu316434iw95.tmp
+?? new_demo_notebook/demo_data/data_analyst/
+?? packages/
+?? slide-37.jpg
+?? slide-38.jpg
+?? slide-39.jpg
+?? slide-40.jpg
+?? slide-41.jpg
+?? slide-42.jpg
+?? slide-43.jpg
+?? slide-44.jpg
+?? slide-45.jpg
+?? slide-46.jpg
+?? slide-47.jpg
+?? slide-48.jpg
+?? slide-49.jpg
+?? slide-50.jpg
+?? slide-51.jpg
+?? slide-52.jpg
+?? slide-53.jpg
+?? slide-54.jpg
+?? src/agentic_chatbot_next/agents/validation.py
+?? src/agentic_chatbot_next/api/connector_security.py
+?? src/agentic_chatbot_next/api/gateway_security.py
+?? src/agentic_chatbot_next/api/live_progress.py
+?? src/agentic_chatbot_next/api/status_tracker.py
+?? src/agentic_chatbot_next/authz/
+?? src/agentic_chatbot_next/benchmark/
+?? src/agentic_chatbot_next/control_panel/
+?? src/agentic_chatbot_next/graph/
+?? src/agentic_chatbot_next/memory/manager.py
+?? src/agentic_chatbot_next/memory/projector.py
+?? src/agentic_chatbot_next/memory/store.py
+?? src/agentic_chatbot_next/observability/token_usage.py
+?? src/agentic_chatbot_next/persistence/postgres/access.py
+?? src/agentic_chatbot_next/persistence/postgres/collections.py
+?? src/agentic_chatbot_next/persistence/postgres/entities.py
+?? src/agentic_chatbot_next/persistence/postgres/graphs.py
+?? src/agentic_chatbot_next/persistence/postgres/memory_v2.py
+?? src/agentic_chatbot_next/persistence/postgres/requirements.py
+?? src/agentic_chatbot_next/prompt_fallbacks.py
+?? src/agentic_chatbot_next/providers/circuit_breaker.py
+?? src/agentic_chatbot_next/providers/output_limits.py
+?? src/agentic_chatbot_next/rag/adaptive.py
+?? src/agentic_chatbot_next/rag/collection_selection.py
+?? src/agentic_chatbot_next/rag/discovery_precision.py
+?? src/agentic_chatbot_next/rag/doc_targets.py
+?? src/agentic_chatbot_next/rag/entity_linking.py
+?? src/agentic_chatbot_next/rag/fanout.py
+?? src/agentic_chatbot_next/rag/graph_store.py
+?? src/agentic_chatbot_next/rag/hints.py
+?? src/agentic_chatbot_next/rag/inventory.py
+?? src/agentic_chatbot_next/rag/requirements.py
+?? src/agentic_chatbot_next/rag/retrieval_scope.py
+?? src/agentic_chatbot_next/rag/skill_policy.py
+?? src/agentic_chatbot_next/rag/verification.py
+?? src/agentic_chatbot_next/rag/workbook_loader.py
+?? src/agentic_chatbot_next/router/feedback_loop.py
+?? src/agentic_chatbot_next/router/patterns.py
+?? src/agentic_chatbot_next/router/semantic.py
+?? src/agentic_chatbot_next/runtime/artifacts.py
+?? src/agentic_chatbot_next/runtime/clarification.py
+?? src/agentic_chatbot_next/runtime/deep_rag.py
+?? src/agentic_chatbot_next/runtime/doc_focus.py
+?? src/agentic_chatbot_next/runtime/kernel_coordinator.py
+?? src/agentic_chatbot_next/runtime/kernel_events.py
+?? src/agentic_chatbot_next/runtime/kernel_providers.py
+?? src/agentic_chatbot_next/runtime/long_output.py
+?? src/agentic_chatbot_next/runtime/openwebui_helpers.py
+?? src/agentic_chatbot_next/runtime/rag_bridge.py
+?? src/agentic_chatbot_next/runtime/research_packet.py
+?? src/agentic_chatbot_next/runtime/task_decomposition.py
+?? src/agentic_chatbot_next/runtime/tool_parallelism.py
+?? src/agentic_chatbot_next/runtime/turn_contracts.py
+?? src/agentic_chatbot_next/runtime/worker_scheduler.py
+?? src/agentic_chatbot_next/sandbox/images.py
+?? src/agentic_chatbot_next/skills/dependency_graph.py
+?? src/agentic_chatbot_next/skills/query_builder.py
+?? src/agentic_chatbot_next/skills/telemetry.py
+?? src/agentic_chatbot_next/tools/data_analyst_nlp.py
+?? src/agentic_chatbot_next/tools/groups/graph_gateway.py
+?? src/agentic_chatbot_next/tools/indexed_docs.py
+?? src/agentic_chatbot_next/tools/requirements.py
+?? tests/test_collection_selection.py
+?? tests/test_control_panel.py
+?? tests/test_control_panel_startup_helpers.py
+?? tests/test_data_analyst_demo_data.py
+?? tests/test_deep_rag_policy.py
+?? tests/test_defense_corpus_support.py
+?? tests/test_discovery_precision.py
+?? tests/test_graph_service.py
+?? tests/test_inventory_queries.py
+?? tests/test_long_output.py
+?? tests/test_next_adaptive_retrieval.py
+?? tests/test_next_doc_targets.py
+?? tests/test_next_indexed_doc_tools.py
+?? tests/test_next_kb_health.py
+?? tests/test_ollama_throughput.py
+?? tests/test_openwebui_helper_tasks.py
+?? tests/test_openwebui_pipe.py
+?? tests/test_postgres_schema_migrations.py
+?? tests/test_prompt_surface_hardening.py
+?? tests/test_provider_circuit_breaker.py
+?? tests/test_rag_engine_hints.py
+?? tests/test_rag_runtime_bridge.py
+?? tests/test_rag_skill_policy.py
+?? tests/test_requirements_extraction.py
+?? tests/test_requirements_tools.py
+?? tests/test_retrieval_scope.py
+?? tests/test_router_feedback_loop.py
+?? tests/test_sandbox_images.py
+?? tests/test_skill_telemetry.py
+?? tests/test_task_decomposition.py
+?? tests/test_tool_parallelism.py
+?? tests/test_training_datasets.py
+?? tests/test_training_export.py
+?? tests/test_training_rewards.py
+?? tests/test_training_rfp_environment.py
+?? tests/test_training_rollouts.py
+?? tests/test_training_runtime.py
+?? tests/test_training_scripts.py
+?? tests/test_worker_scheduler.py
+?? tests/training_test_utils.py
+?? tmp/
+?? training/

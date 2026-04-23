@@ -1,0 +1,128 @@
+# RAG Tool Contract
+
+`rag_agent_tool` remains backward-compatible.
+
+It wraps `run_rag_contract()` and returns the same stable JSON contract used by the live
+next runtime.
+
+## Current positioning
+
+In the live runtime:
+
+- `general` uses `rag_agent_tool` for grounded document work from the top-level ReAct loop
+- `verifier` can also use `rag_agent_tool`
+- `rag_worker` bypasses the wrapper and calls `run_rag_contract()` directly
+
+So the contract remains central even though not every RAG invocation goes through the tool.
+
+Normal bounded grounded lookups may route straight to `rag_worker`. The delegated
+`general -> rag_agent_tool` path is still supported and is sometimes pinned intentionally with
+`metadata.requested_agent=general` in demos, tests, or operator troubleshooting so the tool
+wrapper remains visible in traces.
+
+## Input
+
+Supported arguments:
+
+- `query`
+- `conversation_context`
+- `preferred_doc_ids_csv`
+- `must_include_uploads`
+- `top_k_vector`
+- `top_k_keyword`
+- `max_retries`
+- `search_mode`
+- `max_search_rounds`
+- `scratchpad_context_key`
+
+Internal planner/worker payloads may carry additional RAG-shaping fields such as
+`research_profile`, `coverage_goal`, `result_mode`, and `controller_hints`, but those are
+not part of the public `rag_agent_tool` input surface.
+
+Coordinator-owned typed handoff artifacts are also internal-only. They can shape the live
+`rag_worker` path, but direct tool callers do not send them as first-class tool arguments.
+
+Important boundary:
+
+- `rag_agent_tool` exposes caller-controlled retrieval knobs
+- exact file targeting for named indexed docs is now also available through the read-only
+  `resolve_indexed_docs`, `read_indexed_doc`, and `compare_indexed_docs` tools
+- planner/coordinator payloads may add internal structured retrieval hints
+- typed handoffs may add validated downstream context for worker-to-worker campaigns
+- optional GraphRAG augmentation stays internal to the retrieval controller
+
+That split is what lets the runtime support both direct grounded RAG and delegated
+tool-wrapped grounded RAG without changing the contract shape.
+
+## Output
+
+```json
+{
+  "answer": "...",
+  "citations": [
+    {
+      "citation_id": "...",
+      "doc_id": "...",
+      "title": "...",
+      "source_type": "...",
+      "location": "...",
+      "snippet": "..."
+    }
+  ],
+  "used_citation_ids": ["..."],
+  "confidence": 0.84,
+  "retrieval_summary": {
+    "query_used": "...",
+    "steps": 3,
+    "tool_calls_used": 5,
+    "tool_call_log": [],
+    "citations_found": 4,
+    "search_mode": "deep",
+    "rounds": 2,
+    "strategies_used": ["hybrid", "keyword", "grade", "worker"],
+    "candidate_counts": {
+      "unique_chunks": 12,
+      "unique_docs": 4,
+      "selected_docs": 3
+    },
+    "parallel_workers_used": true
+  },
+  "followups": [],
+  "warnings": []
+}
+```
+
+## Stability expectations
+
+The next-runtime cutover did **not** change:
+
+- key names
+- citation object shape
+- confidence field
+- retrieval summary presence
+
+The public shape is still stable even though the summary now exposes richer telemetry for
+adaptive retrieval and internal worker fan-out.
+
+That stability is what lets the tool remain a safe interface for callers outside the
+specialist RAG worker path.
+
+## Live implementation note
+
+The live `rag_agent_tool` / `rag_worker` path is a direct Python pipeline over:
+
+- adaptive candidate retrieval
+- multi-round grading and evidence selection
+- optional internal evidence-worker fan-out
+- grounded answer synthesis
+- stable-contract rendering
+
+For direct callers, the tool still returns one final answer contract. The internal
+fan-out path is runtime-owned and not exposed as a separate public tool surface.
+
+For broad corpus-discovery campaigns, the public tool is still only one piece of the full
+runtime story. The live system now prefers coordinator-owned multi-worker planning above
+the tool layer, while preserving the same public contract for any direct RAG tool call.
+
+When GraphRAG is enabled, that remains true: graph traversal is an internal retrieval
+augmentation step, not a separate public tool contract layered on top of `rag_agent_tool`.

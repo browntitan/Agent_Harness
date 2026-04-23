@@ -1,0 +1,337 @@
+{
+  "version": "v2",
+  "scenarios": [
+    {
+      "id": "utility_memory_finance_bootstrap",
+      "title": "Utility + Memory Bootstrap",
+      "goal": "Demonstrate deterministic utility tool usage for calculations, doc visibility, and persistent memory.",
+      "difficulty": "easy",
+      "tool_focus": [
+        "list_indexed_docs",
+        "calculator",
+        "memory_save",
+        "memory_load",
+        "memory_list"
+      ],
+      "notes": "Use this as the first scenario in stakeholder demos to prove control and reliability before RAG-heavy tasks.",
+      "checks": {
+        "expected_keywords": [
+          "memory",
+          "docs"
+        ]
+      },
+      "turns": [
+        {
+          "prompt": "List the indexed documents and group them into contracts, security/compliance, runbooks, and API references.",
+          "force_agent": true,
+          "expected_keywords": [
+            "api",
+            "runbook"
+          ]
+        },
+        {
+          "prompt": "Assume annual platform spend is 2,760,000 USD. Calculate 17.5% risk reserve and monthly reserve. Show both results.",
+          "force_agent": true,
+          "expected_keywords": [
+            "483000",
+            "40250"
+          ]
+        },
+        {
+          "prompt": "Remember these values exactly: target_jurisdiction=England and Wales; risk_reserve_monthly_usd=40250; executive_demo_owner=Platform Reliability.",
+          "force_agent": true,
+          "expected_keywords": [
+            "saved"
+          ]
+        },
+        {
+          "prompt": "What are all saved memory keys, and what value is stored for target_jurisdiction?",
+          "force_agent": true,
+          "expected_keywords": [
+            "target_jurisdiction",
+            "England and Wales"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rag_resolution_and_search_strategy",
+      "title": "RAG Resolution and Search Strategy Switching",
+      "goal": "Show title resolution, scoped search, cross-document retrieval, and strategy shifts for non-trivial prompts.",
+      "difficulty": "medium",
+      "tool_focus": [
+        "resolve_document",
+        "search_document",
+        "search_all_documents"
+      ],
+      "notes": "Prompts intentionally use partial file names and synonym drift to force resolution + mixed retrieval behavior.",
+      "checks": {
+        "expected_citations_min": 2
+      },
+      "turns": [
+        {
+          "prompt": "Using the release notes and integrations docs, identify what changed around tool-calling reliability and why those changes matter to production operations. Cite precisely.",
+          "force_agent": true,
+          "expected_citations_min": 3,
+          "expected_keywords": [
+            "tool",
+            "reliability"
+          ]
+        },
+        {
+          "prompt": "Search across all KB documents for policy language that describes retention boundaries and deletion windows, then reconcile any wording differences into one policy summary with citations.",
+          "force_agent": true,
+          "expected_citations_min": 3,
+          "expected_keywords": [
+            "retention",
+            "delete"
+          ]
+        },
+        {
+          "prompt": "I remember a document about integrations and tool schemas, but not the exact file name. Resolve it, then explain when keyword search is preferable to vector search in this codebase context.",
+          "force_agent": true,
+          "expected_citations_min": 2,
+          "expected_keywords": [
+            "keyword",
+            "vector"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rag_clause_navigation_and_extraction",
+      "title": "Clause Navigation and Precise Extraction",
+      "goal": "Demonstrate structure discovery followed by exact clause extraction across a long legal-style document.",
+      "difficulty": "hard",
+      "tool_focus": [
+        "resolve_document",
+        "list_document_structure",
+        "extract_clauses"
+      ],
+      "notes": "Designed to force structure-aware retrieval instead of broad semantic search.",
+      "checks": {
+        "expected_citations_min": 3
+      },
+      "turns": [
+        {
+          "prompt": "From 06_master_services_agreement_v1.md, extract and summarize Clause 6, Clause 9, and Clause 14 with exact obligations and penalties. Include citations for each clause.",
+          "force_agent": true,
+          "expected_citations_min": 3,
+          "expected_keywords": [
+            "Clause 6",
+            "Clause 9",
+            "Clause 14"
+          ]
+        },
+        {
+          "prompt": "From that same agreement, pull Clause 11.2, Clause 11.3, and Clause 12.1 and explain how they interact from an operational risk perspective.",
+          "force_agent": true,
+          "expected_citations_min": 3,
+          "expected_keywords": [
+            "11.2",
+            "11.3",
+            "12.1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rag_requirements_traceability",
+      "title": "Requirements Traceability Review",
+      "goal": "Exercise requirement extraction and filtered evidence retrieval for compliance traceability.",
+      "difficulty": "hard",
+      "tool_focus": [
+        "resolve_document",
+        "extract_requirements",
+        "search_document"
+      ],
+      "notes": "Prompts require identification of SHALL/MUST/REQ statements and filtered constraint mapping.",
+      "checks": {
+        "expected_citations_min": 3
+      },
+      "turns": [
+        {
+          "prompt": "In 09_ai_ops_control_standard.md, extract all requirements related to model release gates, approval workflow, and rollback obligations. Return them as REQ-mapped bullets with citations.",
+          "force_agent": true,
+          "expected_citations_min": 4,
+          "expected_keywords": [
+            "REQ-",
+            "rollback"
+          ]
+        },
+        {
+          "prompt": "Now extract requirements from 11_vendor_security_schedule.md that apply to encryption, key management, and incident notification timing. Highlight any explicit deadlines.",
+          "force_agent": true,
+          "expected_citations_min": 4,
+          "expected_keywords": [
+            "encryption",
+            "notification"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rag_structural_diff_contract_versions",
+      "title": "Structural Diff Across Contract Versions",
+      "goal": "Show document-structure diff and identify newly introduced, removed, or renumbered obligations.",
+      "difficulty": "hard",
+      "tool_focus": [
+        "resolve_document",
+        "diff_documents",
+        "scratchpad_write"
+      ],
+      "notes": "This scenario is best for showing how the agent handles large legal documents and version drift.",
+      "checks": {
+        "expected_citations_min": 3
+      },
+      "turns": [
+        {
+          "prompt": "Run a structural diff between 06_master_services_agreement_v1.md and 07_master_services_agreement_v2.md. Identify clauses only in v2, clauses removed from v1, and clauses that were split or merged.",
+          "force_agent": true,
+          "expected_citations_min": 3,
+          "expected_keywords": [
+            "only",
+            "shared"
+          ]
+        },
+        {
+          "prompt": "Based on the structural diff, produce a change log for legal review with three categories: scope expansion, risk tightening, and operational burden increase.",
+          "force_agent": true,
+          "expected_citations_min": 3,
+          "expected_keywords": [
+            "risk",
+            "operational"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rag_clause_compare_conflict_review",
+      "title": "Clause-by-Clause Conflict Review",
+      "goal": "Demonstrate side-by-side clause comparison and contradiction analysis with intermediate reasoning state.",
+      "difficulty": "hard",
+      "tool_focus": [
+        "resolve_document",
+        "compare_clauses",
+        "scratchpad_write",
+        "scratchpad_read",
+        "scratchpad_list"
+      ],
+      "notes": "Built to encourage multiple compare calls and scratchpad accumulation before final synthesis.",
+      "checks": {
+        "expected_citations_min": 4
+      },
+      "turns": [
+        {
+          "prompt": "Compare Clause 5, Clause 8, Clause 11, and Clause 15 between 06_master_services_agreement_v1.md and 07_master_services_agreement_v2.md. For each clause, state whether v2 is stricter, looser, or materially different.",
+          "force_agent": true,
+          "expected_citations_min": 4,
+          "expected_keywords": [
+            "stricter",
+            "materially different"
+          ]
+        },
+        {
+          "prompt": "Now focus only on contradictions between security obligations in the same two documents and produce a remediation negotiation checklist with citations.",
+          "force_agent": true,
+          "expected_citations_min": 4,
+          "expected_keywords": [
+            "contradiction",
+            "checklist"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "parallel_rag_multi_doc_risk_board",
+      "title": "Parallel Multi-Document Risk Board",
+      "goal": "Trigger supervisor fan-out/fan-in via parallel_rag and synthesize a unified cross-document risk board.",
+      "difficulty": "expert",
+      "tool_focus": [
+        "supervisor.parallel_rag",
+        "rag_worker",
+        "rag_synthesizer"
+      ],
+      "notes": "Use this to highlight enterprise-scale orchestration rather than single-document Q&A.",
+      "checks": {
+        "expected_citations_min": 5
+      },
+      "turns": [
+        {
+          "prompt": "Build a unified risk board by comparing obligations and failure-handling guidance across 08_data_processing_addendum_global.md, 09_ai_ops_control_standard.md, and 10_incident_communications_playbook.md. Return top 10 risks with severity, owner, and evidence citations.",
+          "force_agent": true,
+          "expected_citations_min": 5,
+          "expected_keywords": [
+            "risk",
+            "severity",
+            "owner"
+          ]
+        },
+        {
+          "prompt": "For the same three documents, produce a 30-60-90 day remediation roadmap and justify each milestone with citations.",
+          "force_agent": true,
+          "expected_citations_min": 5,
+          "expected_keywords": [
+            "30",
+            "60",
+            "90"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "executive_due_diligence_grand_finale",
+      "title": "Executive Due Diligence Grand Finale",
+      "goal": "Show end-to-end utility + RAG + memory orchestration in one executive briefing flow.",
+      "difficulty": "expert",
+      "tool_focus": [
+        "calculator",
+        "memory_save",
+        "memory_load",
+        "resolve_document",
+        "search_all_documents",
+        "compare_clauses",
+        "extract_requirements"
+      ],
+      "notes": "Recommended final demo for manager walkthrough: deterministic setup, evidence-heavy analysis, and concise recommendation.",
+      "checks": {
+        "expected_citations_min": 6
+      },
+      "turns": [
+        {
+          "prompt": "Remember this executive context: board_priority=regulatory resilience, budget_ceiling_usd=1900000, launch_window=Q3 2026.",
+          "force_agent": true,
+          "expected_keywords": [
+            "saved"
+          ]
+        },
+        {
+          "prompt": "Using 06_master_services_agreement_v2.md, 08_data_processing_addendum_global.md, and 11_vendor_security_schedule.md, produce an executive due-diligence brief: top obligations, top breach exposure vectors, and top negotiation asks with citations.",
+          "force_agent": true,
+          "expected_citations_min": 6,
+          "expected_keywords": [
+            "obligations",
+            "negotiation"
+          ]
+        },
+        {
+          "prompt": "Now calculate a proposed reserve equal to 12.5% of budget_ceiling_usd and map that reserve to the top three mitigation workstreams you just identified.",
+          "force_agent": true,
+          "expected_keywords": [
+            "237500",
+            "mitigation"
+          ]
+        },
+        {
+          "prompt": "Finish with a board-ready recommendation in three sections: proceed conditions, blockers, and immediate next actions. Use citations and reference the remembered launch_window.",
+          "force_agent": true,
+          "expected_citations_min": 6,
+          "expected_keywords": [
+            "launch_window",
+            "next actions"
+          ]
+        }
+      ]
+    }
+  ]
+}

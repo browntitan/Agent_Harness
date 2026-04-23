@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.cover
+.hypothesis/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Node/build output
+node_modules/
+control_panel/node_modules/
+control_panel/dist/
+*.tsbuildinfo
+
+# v3 runtime artifacts are Docker-volume owned
+data/runtime/
+data/workspaces/
+data/uploads/
+data/cache/
+data/control_panel/
+data/graphrag/projects/
+
+# Notebook/runtime scratch
+new_demo_notebook/.artifacts/*
+!new_demo_notebook/.artifacts/.gitkeep
+.ipynb_checkpoints/
+
+# Local one-off artifacts
+*.sqlite
+*.db
+*.pdf
+*.tmp
+.~lock.*
+slide-*.jpg
+Agent Powerpoint Creator/

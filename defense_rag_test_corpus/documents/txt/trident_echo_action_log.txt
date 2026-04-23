@@ -1,0 +1,35 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Trident Echo Action Log
+Date: 02 Jul 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Trident Echo Naval Power Distribution Upgrade
+DOCUMENT: Action Log and Corrective Action Thread
+DATE: 02 Jul 2028
+OWNER: Program Integration Office
+STATUS: working log extract
+
+Action T-01: Halcyon Foundry to provide metallurgical review of housing void indications. Due 06 Jul 2028. Status: Open at log issue; later rolled into Corrective Action Request CAR-22.
+Action T-02: Production engineering to map all shipset tasks waiting on BUS-9R plating release. Due 05 Jul 2028. Status: Complete.
+Action T-03: Shock lab scheduler to identify backup windows beyond the former 08 Sep 2028 target. Due 09 Jul 2028. Status: Complete.
+Action T-04: Structures team to assess whether mounting bracket BR-6 should be thickened if late rework reduces available retest margin. Due 12 Jul 2028. Status: In work.
+Action T-05: Supplier management to reconcile Pelagic Switchgear delivery assumptions with actual cabinet release dates. Due 10 Jul 2028. Status: Open.
+
+NARRATIVE COMMENTARY
+
+The action log is intentionally terse, but it captures how the program office translated factory concerns into ownership. CAR-22 became the primary quality vehicle for the foundry issue after inspectors identified recurring void indications in cabinet housings. Internal emails repeatedly asked whether the voids were 'cosmetic or structural.' The quality team treated them as structural until proof existed otherwise, which is why the program did not allow housings to flow unchecked into the shock build.
+
+A secondary but important thread concerned bracket BR-6. At the time of this log the bracket had not yet failed any test. The team simply recognized that schedule margin was so thin that any structural weakness discovered in shock would be painful. For that reason, the structures group was told to keep a reinforcement concept warm. Later documents show that this precaution was justified.
+
+CAR-22 SUMMARY
+
+Corrective Action Record CAR-22 was opened against Halcyon Foundry for inconsistent internal quality on the cabinet housing castings. The problem statement cited unacceptable void indications, variable cleanup effort, and late notifications that prevented smooth factory sequencing. Proposed containment at the time of the log included 100 percent radiographic review of the next shipment, supplier-side sign-off by a foundry quality manager, and priority freight for acceptable castings. Long-term corrective action was expected to include process parameter tightening at pour and cooling stages.
+
+This log is useful because it connects the supplier quality story to the later shock qualification narrative. A query phrased as 'what quality action was associated with the housing problem before the test brief?' should land here, not only in the more polished final documents.
+
+CROSS-REFERENCE NOTES
+
+- The supplier requirements for Pelagic Switchgear appear in the separate subtier SOW.
+- The final current milestone date appears in the workbook rather than in this log.
+- The actual shock event results appear in the formal briefing dated 24 Oct 2028.
+- Similar supplier names appear elsewhere in the corpus and should be resolved by program context, not by string similarity alone.

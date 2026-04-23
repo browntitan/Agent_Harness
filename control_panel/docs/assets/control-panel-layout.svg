@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Control panel layout</title>
+  <desc id="desc">Annotated overview of the control panel layout showing the sidebar, top area, and main content panels.</desc>
+  <rect width="1200" height="760" fill="#f3f0e8"/>
+  <rect x="40" y="40" width="250" height="680" rx="24" fill="#ffffff" stroke="#d8cfbf" stroke-width="2"/>
+  <rect x="320" y="40" width="840" height="100" rx="24" fill="#ffffff" stroke="#d8cfbf" stroke-width="2"/>
+  <rect x="320" y="170" width="260" height="250" rx="24" fill="#ffffff" stroke="#d8cfbf" stroke-width="2"/>
+  <rect x="610" y="170" width="260" height="250" rx="24" fill="#ffffff" stroke="#d8cfbf" stroke-width="2"/>
+  <rect x="900" y="170" width="260" height="250" rx="24" fill="#ffffff" stroke="#d8cfbf" stroke-width="2"/>
+  <rect x="320" y="450" width="840" height="270" rx="24" fill="#ffffff" stroke="#d8cfbf" stroke-width="2"/>
+
+  <text x="72" y="95" font-family="IBM Plex Sans, Arial, sans-serif" font-size="32" fill="#1f2b24" font-weight="700">Sidebar</text>
+  <text x="72" y="135" font-family="IBM Plex Sans, Arial, sans-serif" font-size="20" fill="#4c5b52">Dashboard</text>
+  <text x="72" y="170" font-family="IBM Plex Sans, Arial, sans-serif" font-size="20" fill="#4c5b52">Config</text>
+  <text x="72" y="205" font-family="IBM Plex Sans, Arial, sans-serif" font-size="20" fill="#4c5b52">Agents</text>
+  <text x="72" y="240" font-family="IBM Plex Sans, Arial, sans-serif" font-size="20" fill="#4c5b52">Prompts</text>
+  <text x="72" y="275" font-family="IBM Plex Sans, Arial, sans-serif" font-size="20" fill="#4c5b52">Collections</text>
+  <text x="72" y="310" font-family="IBM Plex Sans, Arial, sans-serif" font-size="20" fill="#4c5b52">Skills</text>
+  <text x="72" y="345" font-family="IBM Plex Sans, Arial, sans-serif" font-size="20" fill="#4c5b52">Operations</text>
+  <text x="72" y="400" font-family="IBM Plex Sans, Arial, sans-serif" font-size="18" fill="#82673a">Lock clears the current browser session token.</text>
+
+  <text x="350" y="92" font-family="IBM Plex Sans, Arial, sans-serif" font-size="30" fill="#1f2b24" font-weight="700">Page header and error banner</text>
+  <text x="350" y="124" font-family="IBM Plex Sans, Arial, sans-serif" font-size="18" fill="#4c5b52">Each section shows its own title. Errors appear directly under the title.</text>
+
+  <text x="350" y="210" font-family="IBM Plex Sans, Arial, sans-serif" font-size="24" fill="#1f2b24" font-weight="700">List panel</text>
+  <text x="350" y="244" font-family="IBM Plex Sans, Arial, sans-serif" font-size="18" fill="#4c5b52">Most sections start with a list or grouped selector.</text>
+
+  <text x="640" y="210" font-family="IBM Plex Sans, Arial, sans-serif" font-size="24" fill="#1f2b24" font-weight="700">Editor panel</text>
+  <text x="640" y="244" font-family="IBM Plex Sans, Arial, sans-serif" font-size="18" fill="#4c5b52">Editable sections keep the draft controls in the center or right panel.</text>
+
+  <text x="930" y="210" font-family="IBM Plex Sans, Arial, sans-serif" font-size="24" fill="#1f2b24" font-weight="700">Detail / preview</text>
+  <text x="930" y="244" font-family="IBM Plex Sans, Arial, sans-serif" font-size="18" fill="#4c5b52">The current UI often renders raw JSON detail here.</text>
+
+  <text x="350" y="500" font-family="IBM Plex Sans, Arial, sans-serif" font-size="28" fill="#1f2b24" font-weight="700">What to notice in the shipped UI</text>
+  <text x="350" y="545" font-family="IBM Plex Sans, Arial, sans-serif" font-size="19" fill="#4c5b52">1. Dashboard and Operations are mostly read-only review pages.</text>
+  <text x="350" y="580" font-family="IBM Plex Sans, Arial, sans-serif" font-size="19" fill="#4c5b52">2. Config, Agents, Prompts, Collections, and Skills can change live behavior.</text>
+  <text x="350" y="615" font-family="IBM Plex Sans, Arial, sans-serif" font-size="19" fill="#4c5b52">3. Prompt saves apply on the next turn. Agent edits need an explicit reload.</text>
+  <text x="350" y="650" font-family="IBM Plex Sans, Arial, sans-serif" font-size="19" fill="#4c5b52">4. Several panels intentionally expose raw JSON so operators can inspect exact payloads.</text>
+  <text x="350" y="685" font-family="IBM Plex Sans, Arial, sans-serif" font-size="19" fill="#4c5b52">5. The v1 UI is repo-first and local-admin-first, not a full end-user admin portal.</text>
+</svg>

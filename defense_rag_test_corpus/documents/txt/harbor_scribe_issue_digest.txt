@@ -1,0 +1,44 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Harbor Scribe Issue Digest
+Date: 11 May 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Harbor Scribe Depot Maintenance Digitization
+DOCUMENT: Weekly Issue Digest
+DATE: 11 May 2028
+CONTRACT: SYN-DM-28-5602
+FACILITY: Redstone Depot / Paint Barn 2
+
+1. CURRENT STATE
+
+The depot digitization effort is improving work order visibility, but rollout conditions remain uneven across functional areas. The highest-friction area is Paint Barn 2, where overspray and intermittent wireless coverage interfere with scanner use. The current scanner model, SCN-11, performs well in the controlled receiving area yet becomes unreliable when operators move between coated work surfaces and steel-heavy corners of the bay. That inconsistency is frustrating maintainers because the system appears to work and fail in the same shift depending on location.
+
+At Redstone Depot more broadly, supervisors remain supportive because they can already see better job visibility and faster discrepancy logging. However, they are also warning that confidence could erode if the pilot team overstates readiness before network segmentation and scanner hardening are complete. That tension between visible benefit and uneven shop-floor reliability shapes almost every issue in this digest.
+
+2. OPEN ISSUES
+
+Issue H-03: Wi-Fi dead zones in and around Paint Barn 2 interrupt synchronization of tablet TAB-7R and scanner SCN-11 transactions. Users can continue in offline mode for a short period, but delayed synchronization produces duplicate effort when jobs are reassigned.
+
+Issue H-07: Paint residue and gloves reduce barcode read reliability on work travelers. Operators requested larger labels and a fallback manual search workflow.
+
+Issue H-11: Training attendance is high, but supervisors report uneven confidence among second-shift personnel. The future meeting minutes and training workshop notes expand on this problem using the acronym ATP, which in Harbor Scribe means annual training plan. Analysts should not confuse that with acceptance test procedure or any other use of ATP elsewhere in engineering documents.
+
+Issue H-14: Network segmentation review is still open with depot cybersecurity. The pilot can proceed only after the revised boundary rule set is approved.
+
+3. SCHEDULE AND DEPENDENCY COMMENTARY
+
+The baseline pilot transition date remains 22 Jul 2028, but the integration office already believes that the date will move if the network review does not close. The concern is not manpower; it is authorization and site readiness. The program manager stated that forcing the date would create the appearance of progress without durable adoption. A slip of several weeks was discussed as acceptable if it produced a cleaner launch and reduced the need for manual workarounds.
+
+4. PERFORMANCE TREND
+
+Even with the open issues, the depot has begun to see real benefit. Average backlog age on digitized jobs is trending down from roughly 18.2 days in the old paper-heavy baseline toward the low teens in current pilot areas. The full workbook later records a current value of 11.6 days on selected lines, which is not yet universal but is directionally encouraging. This matters because the project is not just software deployment; it is a business-process change measured in throughput and rework avoidance.
+
+5. ACTIONS
+
+- Extend site survey in the paint barn to map dead zones precisely.
+- Pilot larger barcode label stock with LPR-5.
+- Preserve supervisor-led refresher training on second shift.
+- Keep pilot gate tied to closure of network segmentation review.
+- Feed user comments directly into steering group minutes rather than waiting for a quarterly review.
+
+This digest should be read alongside the steering group minutes, the training workshop notes, the quality audit summary, and the resource/KPI workbook. Together they tell the story of why the pilot date moved and how process performance improved anyway.

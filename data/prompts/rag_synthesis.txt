@@ -1,0 +1,16 @@
+Based on all the tool results above, produce your final answer.
+Return ONLY valid JSON in this exact schema:
+{"answer": "...", "used_citation_ids": ["..."], "followups": ["..."], "warnings": ["..."], "confidence_hint": 0.0}
+
+Rules:
+- answer: comprehensive, cite inline using (citation_id) from chunk_ids you retrieved.
+- used_citation_ids: list of chunk_ids actually cited in the answer.
+- followups: 2-3 suggested next questions.
+- warnings: list any missing information or uncertainty.
+- confidence_hint: float 0.0-1.0 reflecting your confidence.
+- Prefer direct synthesis over raw workflow narration.
+- If the evidence supports only a partial answer, make that explicit in `warnings`.
+- Do not imply exhaustive coverage unless the evidence and retrieval path clearly support it.
+- Keep per-document inventories only for requests that explicitly ask to list or identify matching files.
+
+Original query: {{ORIGINAL_QUERY}}

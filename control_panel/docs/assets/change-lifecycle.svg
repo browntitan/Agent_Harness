@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">Change lifecycle</title>
+  <desc id="desc">Flow diagram showing review, draft, validate or save overlay, apply or reload, and audit verification.</desc>
+  <rect width="1200" height="420" fill="#f3f0e8"/>
+  <g font-family="IBM Plex Sans, Arial, sans-serif">
+    <text x="48" y="56" font-size="30" fill="#1f2b24" font-weight="700">Control-panel change lifecycle</text>
+    <text x="48" y="86" font-size="18" fill="#4c5b52">Use this map when deciding whether an action is only a draft, a live change, or a post-change verification step.</text>
+
+    <rect x="50" y="150" width="170" height="90" rx="22" fill="#ffffff" stroke="#cdbf9f" stroke-width="2"/>
+    <rect x="275" y="150" width="170" height="90" rx="22" fill="#ffffff" stroke="#cdbf9f" stroke-width="2"/>
+    <rect x="500" y="150" width="170" height="90" rx="22" fill="#fff8ec" stroke="#9b6b2d" stroke-width="3"/>
+    <rect x="725" y="150" width="170" height="90" rx="22" fill="#fff8ec" stroke="#9b6b2d" stroke-width="3"/>
+    <rect x="950" y="150" width="190" height="90" rx="22" fill="#ffffff" stroke="#cdbf9f" stroke-width="2"/>
+
+    <text x="97" y="188" font-size="24" fill="#1f2b24" font-weight="700">Review</text>
+    <text x="86" y="214" font-size="17" fill="#4c5b52">Read the current</text>
+    <text x="83" y="235" font-size="17" fill="#4c5b52">state first</text>
+
+    <text x="318" y="188" font-size="24" fill="#1f2b24" font-weight="700">Draft</text>
+    <text x="303" y="214" font-size="17" fill="#4c5b52">Type changes or</text>
+    <text x="306" y="235" font-size="17" fill="#4c5b52">save overlay text</text>
+
+    <text x="518" y="188" font-size="22" fill="#1f2b24" font-weight="700">Validate or save</text>
+    <text x="538" y="214" font-size="17" fill="#4c5b52">Config preview,</text>
+    <text x="523" y="235" font-size="17" fill="#4c5b52">prompt save, or</text>
+    <text x="535" y="256" font-size="17" fill="#4c5b52">agent overlay</text>
+
+    <text x="765" y="188" font-size="23" fill="#1f2b24" font-weight="700">Apply or reload</text>
+    <text x="750" y="214" font-size="17" fill="#4c5b52">Runtime swap, next</text>
+    <text x="753" y="235" font-size="17" fill="#4c5b52">turn prompt use,</text>
+    <text x="766" y="256" font-size="17" fill="#4c5b52">or agent reload</text>
+
+    <text x="1002" y="188" font-size="22" fill="#1f2b24" font-weight="700">Verify and record</text>
+    <text x="988" y="214" font-size="17" fill="#4c5b52">Check Dashboard or</text>
+    <text x="998" y="235" font-size="17" fill="#4c5b52">Operations for the</text>
+    <text x="1016" y="256" font-size="17" fill="#4c5b52">audit trail</text>
+
+    <path d="M220 195 L275 195" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <path d="M445 195 L500 195" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <path d="M670 195 L725 195" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <path d="M895 195 L950 195" stroke="#9b6b2d" stroke-width="4" fill="none"/>
+    <polygon points="267,187 275,195 267,203" fill="#9b6b2d"/>
+    <polygon points="492,187 500,195 492,203" fill="#9b6b2d"/>
+    <polygon points="717,187 725,195 717,203" fill="#9b6b2d"/>
+    <polygon points="942,187 950,195 942,203" fill="#9b6b2d"/>
+
+    <text x="50" y="320" font-size="20" fill="#82673a" font-weight="700">Low-risk pattern</text>
+    <text x="50" y="347" font-size="18" fill="#4c5b52">Read first, draft carefully, and verify after every live change.</text>
+    <text x="50" y="376" font-size="18" fill="#4c5b52">The most common mistake in the current UI is assuming that save, validate, apply, and reload all mean the same thing.</text>
+  </g>
+</svg>

@@ -1,0 +1,37 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Harbor Scribe Training Workshop Notes
+Date: 06 Jun 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Harbor Scribe Depot Maintenance Digitization
+DOCUMENT: Training Workshop Notes
+DATE: 06 Jun 2028
+SESSION TYPE: Supervisor and Maintainer Enablement
+
+1. WORKSHOP PURPOSE
+
+The workshop was designed to convert early pilot lessons into a durable training package before broader rollout. In practical terms, that meant identifying where maintainers struggled, where supervisors improvised good practices, and where system terminology was blocking adoption. The acronym ATP appears frequently in these notes; here it refers to the annual training plan that site leadership wanted to align with digital work order training. This meaning differs from common engineering uses of ATP and is intentionally included as an ambiguity stressor.
+
+2. WHAT PARTICIPANTS SAID
+
+Participants generally agreed that the tablets were not the problem. The problem was workflow confidence. Mechanics said they could scan a tag or tap a lookup, but they were not always sure whether the record had synchronized when they walked back into a dead zone. Supervisors wanted a simple visual cue and a stronger end-of-shift reconciliation routine. Operators in Paint Barn 2 also said that labels needed to be larger and more resistant to overspray if the digital process was going to displace the paper traveler for good.
+
+The trainer collected examples in which a mechanic abandoned scanning after two read failures and reverted to handwritten notes. That behavior is understandable in a depot environment, but it creates a hidden adoption problem because official training completion does not equal confident day-to-day use.
+
+3. CURRICULUM CHANGES AGREED IN THE ROOM
+
+- Add a practical module on offline mode and later synchronization.
+- Add a supervisor checklist for end-of-shift reconciliation.
+- Provide a quick guide on handling damaged or oversprayed labels.
+- Distinguish training on the scanner SCN-11 from training on the tablet TAB-7R so users do not assume success with one implies success with the other.
+- Align refresher dates to the ATP calendar so digital workflow training is not treated as an extra burden.
+
+These changes eventually supported a total of 162 planned training hours in the workbook, including train-the-trainer time and second-shift support.
+
+4. RELATIONSHIP TO SCHEDULE
+
+Participants accepted that training improvements alone would not save the original pilot date if network segmentation remained unresolved. That issue sat outside the classroom. Still, the workshop notes make clear that a cleaner launch after a short delay would be better than a nominal on-time launch that required heavy workarounds. The later steering group minutes and workbook convert that sentiment into formal schedule language.
+
+5. WHY THESE NOTES MATTER
+
+A search for 'why did Harbor Scribe delay the pilot' might reasonably retrieve cybersecurity or schedule files. These workshop notes matter because they show that user readiness and training design were also part of the decision calculus. They are not the sole cause, but they are a supporting cause. A strong retrieval system should preserve that nuance rather than collapsing everything into one simplistic explanation.

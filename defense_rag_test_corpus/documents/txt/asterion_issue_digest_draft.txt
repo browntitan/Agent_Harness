@@ -1,0 +1,58 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Asterion Issue Digest Draft
+Date: 08 Jul 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Asterion ISR Payload Modernization
+DOCUMENT: Weekly Issue Digest (Engineering Planning Draft)
+CONTRACT: SYN-AV-28-1042
+PRIME: Talon Vector Defense
+WORKING DATE: 08 Jul 2028
+NOTE: This is a planning draft prepared before the formal monthly review. Several schedule and cost values were later updated in the final status package and in ECP-04 Rev C. Analysts should treat this file as useful but not authoritative for final dates.
+
+1. EXECUTIVE SNAPSHOT
+
+The Asterion ISR Payload Modernization team entered July with three coupled problem threads: supplier yield on the GBL-77C gimbal bearing ring, hot-day thermal margin on the PWR-19A power conditioner, and electromagnetic interference observed on the MXR-2140 harness path during bench run BR-19 at Mesa Array Lab. The immediate concern is not simply technical closure of any one issue, but the possibility that all three items converge on the same build window at the Redwood Integration Center. If that occurs, the team will consume remaining management reserve and may lose the original critical design review target of 14 Aug 2028.
+
+At the time of this draft, the control account managers were still working from the pre-change planning number of $47.80M total estimated cost to complete. That figure assumed a limited harness reroute and no structural redesign of the sensor tray latch stack-up. The July risk review already suggested that assumption was probably too optimistic, particularly if the thermal fix required an additional isolator or mass rebalance at the outer frame.
+
+2. OPEN ISSUE DETAIL
+
+Issue A-17 / Supplier Yield: North Coast Systems LLC reported average concentricity yield of 91.2 percent on the GBL-77C machining sequence across the last three pilot lots. The subcontract statement of work calls for statistical process control capable of sustaining Cpk of 1.33 or better on the critical bearing land. The supplier's local corrective actions—tool offset normalization and additional in-process measurement at operation 240—improved first-pass quality only marginally. Reworked rings meet print, but rework time is consuming float that had previously protected the first article build. Supplier management stated that all 36 first article rings remain deliverable in the quarter, but only if no further dimensional escape is found in anodize inspection.
+
+Issue A-21 / Harness EMI: Bench run BR-19 on the MXR-2140 recorded transient bus noise during gimbal slew commands. The problem appeared most strongly when the harness bundle crossed the power conditioner return path. Jonah Reed's team believes the issue is a routing problem rather than an equipment qualification issue; however, fixing the routing inside the existing tray leaves very little service loop and could complicate maintainability. The engineering recommendation in this draft is to study a clamp relocation and shield braid update before considering a wider mechanical redesign.
+
+Issue A-25 / Thermal Margin: The hot-day profile at +55 C left less than 2.0 C thermal margin on the PWR-19A mounting face. Thermal analysts flagged the risk because the hardware still lacks some of the worst-case cabling mass and because chamber data at Mesa Array Lab showed a stronger-than-modeled local hot spot near the forward latch. If no passive mitigation is found, the system may require a thermal isolator or revised latch stack-up.
+
+3. SCHEDULE ASSESSMENT (DRAFT VALUES)
+
+The baseline integrated schedule still shows CDR on 14 Aug 2028, engineering verification test entry on 04 Nov 2028, and first article lot 1 integration release in late January 2029. The team no longer believes those dates can all be preserved if the thermal fix spills into released drawings. The preliminary planning estimate discussed in the program review room was a 4 to 6 week movement on CDR and a comparable but not identical shift on EVT start. That estimate had not yet been approved through change control when this note was written.
+
+An important nuance is that the likely driver is not the thermal analysis itself. The likely driver is requalification of the latch and bracket stack once a new isolator thickness is introduced. The structures team warned that even a small change at the latch line could trigger updated mass properties, cable clearances, and one repeated vibration run. This is why the draft repeatedly points readers to the pending engineering change package rather than treating schedule movement as an isolated project control action.
+
+4. COST COMMENTARY (PLANNING ONLY)
+
+Control account managers identified three categories of probable growth. First, non-recurring engineering would increase because drawings, analyses, and qualification paperwork would need to be revised. Second, recurring unit content would increase if a new isolator and latch hardware were adopted. Third, supplier tooling support for North Coast Systems LLC might rise if the team decided to fund additional gauge work in order to stabilize the GBL-77C yield curve. The rough order estimate discussed in the room ranged from $1.4M to $1.9M above the pre-change planning total, but no board-approved figure existed yet.
+
+Because this file predates the approved change package, it still references the earlier planning total and contains wording such as 'likely growth' and 'planning wedge.' That makes the document intentionally useful for retrieval stress: it explains why the change was emerging, but it does not contain the final approved cost delta or the final dates that appeared later in the formal package.
+
+5. ACTIONS AND DEPENDENCIES
+
+Action 1: North Coast Systems LLC to provide a lot-by-lot summary of GBL-77C concentricity, scrap, and rework hours by 11 Jul 2028.
+Action 2: Electrical team to complete alternate harness route mock-up on the non-flight tray and document whether service loop can be maintained.
+Action 3: Thermal analyst to compare simple pad concept versus full isolator concept and provide recommendation to the change board.
+Action 4: Program controls to prepare a branch schedule showing the effect of moving CDR by 30, 43, and 50 calendar days.
+Action 5: Quality to confirm whether the potential latch redesign would require a delta first article inspection.
+
+6. ANALYST NOTES
+
+Readers should not confuse North Coast Systems LLC, the Asterion mechanical supplier, with Northcoast Signal Labs, a communications vendor used on Blue Mica. The names are similar by design and have already caused more than one misfiled email. Likewise, the Asterion acronym EVT means engineering verification test in this program; it does not mean embedded vehicle terminal, which appears in other tactical communications contexts.
+
+The practical takeaway from this draft is that the schedule pressure was visible before the formal board package existed. The draft does not answer the question 'what was finally approved,' but it does answer 'what conditions led the team to approve a later change.' That distinction is useful when evaluating retrieval systems that must separate draft planning language from final configuration-controlled numbers.
+
+7. ATTACHMENTS REFERENCED IN THIS DRAFT
+
+- Subtier Statement of Work Rev B to North Coast Systems LLC, dated 05 Apr 2028
+- Pending Engineering Change Proposal ECP-04 (later issued Rev C), target board week of 22 Jul 2028
+- Monthly Status Review package, to be issued 01 Aug 2028
+- Budget and schedule tracker workbook, current control account extracts as of 05 Jul 2028

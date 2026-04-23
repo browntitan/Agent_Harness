@@ -1,0 +1,32 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Ember Reach Source Selection Notes
+Date: 09 Dec 2028
+FOR EVALUATION USE ONLY
+
+PROGRAM: Ember Reach Radar Processing Module Procurement
+DOCUMENT: Source Selection Support Notes
+DATE: 09 Dec 2028
+PROCUREMENT: RPM-4402 successor source selection
+STATUS: Working notes supporting trade study
+
+1. CONTEXT
+
+The program is transitioning away from the incumbent packaging path associated with SUB-7, which is becoming increasingly difficult to source at acceptable lead times. The procurement team therefore compared Summit Circuits, Helion Micro Devices, and Halcyon Microdevices against a common set of requirements. The highest-level requirements were straightforward: minimum processing efficiency of 6.2 GOPS/W, shock survivability of 20 g, and initial lot lead time under 22 weeks. What made the decision harder was that the strongest technical package did not cleanly align with the strongest schedule posture.
+
+2. TRADE STUDY NOTES
+
+Summit Circuits produced the best integrated business case. Its technical proposal was not flawless, but it was credible and paired with the strongest near-term schedule. Helion Micro Devices offered an attractive thermal concept and the best lab data package, yet its lot lead time estimate stretched beyond the preferred window. Halcyon Microdevices benefited from incumbent familiarity but carried both cost and obsolescence baggage. The notes therefore repeatedly describe Summit as 'best value overall,' Helion as 'best pure technical paper,' and Halcyon as 'lowest transition friction but weakest strategic fit.'
+
+This wording is useful for evaluation because no single sentence simply says 'Summit wins because score highest.' A model has to synthesize technical, cost, and schedule language across the notes and workbook.
+
+3. WORKING SCORES
+
+Working overall scores used during the board prep were: Summit Circuits 86.2, Helion Micro Devices 83.4, and Halcyon Microdevices 79.1. These numbers were not meant to replace narrative judgment, but they summarized the board's weighting. Helion's score was dragged by schedule. Summit's score benefited from schedule realism and acceptable risk mitigation around the heat spreader path. Halcyon's score reflected the fact that familiarity with the old supply base could not overcome emerging obsolescence issues.
+
+4. RISK COMMENTARY
+
+The team remained cautious about thermal margin on the first Summit article using heat spreader HSK-12. That caution did not prevent selection, but it did drive the requirement for a fast corrective action loop if the first article exposed an issue. This note is important because later documents show exactly that outcome: the Summit hardware met processing throughput, but thermal behavior still needed a change to HSK-12B. The selection was therefore validated, not made risk-free.
+
+5. DECISION SUPPORT TAKEAWAY
+
+If a user asks which supplier looked strongest technically, the answer is Helion. If the user asks which supplier was selected on best value, the answer is Summit Circuits. If the user asks whether Summit already had zero technical concerns, the answer is no. This file is built to force those distinctions. It should be paired with the RFP overview, the procurement workbook, the first article test summary, and the supplier transition plan.

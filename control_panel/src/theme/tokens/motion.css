@@ -1,0 +1,23 @@
+:root {
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  --elev-0: none;
+  --elev-1: none;
+  --elev-2: 0 4px 16px rgba(0, 0, 0, 0.28), 0 0 0 1px var(--border-default);
+
+  --focus-ring: 0 0 0 2px var(--surface-canvas), 0 0 0 4px var(--border-focus);
+
+  /* Legacy alias retained while older rules still reference --shadow */
+  --shadow: var(--elev-2);
+}
+
+[data-theme="light"] {
+  --elev-1: none;
+  --elev-2: 0 4px 16px rgba(20, 24, 32, 0.10), 0 0 0 1px var(--border-default);
+}

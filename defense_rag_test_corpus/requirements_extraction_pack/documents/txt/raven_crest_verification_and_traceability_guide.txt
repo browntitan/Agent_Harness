@@ -1,0 +1,60 @@
+UNCLASSIFIED // SYNTHETIC TEST DATA
+Raven Crest Verification and Traceability Guide
+Revision: Rev A
+Date: 22 Mar 2031
+
+1. Purpose
+1.1 This guide explains how Raven Crest requirement identifiers are mapped into verification procedures, verification events, objective evidence packages, and program review artifacts. It is deliberately prose-heavy so that requirements extraction sees a realistic mixture of formal guidance and surrounding explanatory text.
+1.2 The guide references system, interface, cybersecurity, and subcontract requirement identifiers without restating every underlying requirement sentence. That restraint is intentional; in real programs, downstream trace documents often point to requirement IDs, clause numbers, and baseline revisions rather than recopied source text.
+
+2. Traceability Principles
+2.1.1 RC-VTG-01. Each verification row shall reference exactly one governing requirement identifier and one primary verification method.
+2.1.2 RC-VTG-02. Derived verification notes shall be clearly marked as supporting rationale rather than acceptance criteria.
+2.1.3 RC-VTG-03. Cross-reference tables shall retain prior-row identifiers when a requirement is reallocated to a lower configuration item.
+2.1.4 RC-VTG-04. Verification analysts shall identify any requirement statement that contains multiple mandatory operators and shall flag the row for quality review before procedure release.
+2.1.5 RC-VTG-05. Program offices should avoid copying full requirement text into every downstream worksheet because repetitive restatement often creates avoidable configuration churn.
+2.1.6 RC-VTG-06. Imported requirement rows shall preserve source document title, baseline revision, and clause number exactly as released in the controlling baseline.
+
+3. Verification Method Selection
+3.2.1 RC-VTG-07. Timing and throughput requirements shall be mapped to test or demonstration methods unless the program verification lead approves an analysis substitute.
+3.2.2 RC-VTG-08. Physical interface fit, labeling, and packaging characteristics shall be mapped to examination when direct inspection provides objective evidence.
+3.2.3 RC-VTG-09. Cybersecurity evidence packages are required to identify the exact software baseline, scan content, and unresolved finding posture used to support the assessment.
+3.2.4 RC-VTG-10. Requirements that depend on mission continuity under fault conditions shall be traced to event sequences that demonstrate fault injection and recovery.
+3.2.5 RC-VTG-11. Verification planners shall document any assumption that depends on facility limitations, instrumentation constraints, or approved mission-profile tailoring.
+3.2.6 RC-VTG-12. When a requirement references external interface timing, the verification package shall identify the companion interface clause or annex used for the event setup.
+
+4. Review Flow and Change Management
+4.1.1 RC-VTG-13. The verification matrix shall preserve the source document title, clause number, and baseline revision for each imported requirement identifier.
+4.1.2 RC-VTG-14. Review comments are required to record whether a disputed row concerns requirement wording, allocation, verification scope, or evidence sufficiency.
+4.1.3 RC-VTG-15. Closed review comments may not be deleted from the released verification record; they are required to remain visible for audit purposes.
+4.1.4 RC-VTG-16. Baseline updates shall trigger a traceability impact review before legacy procedures are reused for a new qualification event.
+4.1.5 RC-VTG-17. The verification lead shall record the disposition of every requirement row affected by a change package, waiver, or approved tailoring action.
+
+5. Evidence Packaging and Delivery
+5.1.1 RC-VTG-18. Objective evidence packages shall identify event configuration, witness roles, instrumentation set, and discrepancy status for the associated verification result.
+5.1.2 RC-VTG-19. Exported evidence bundles are required to retain hash values, source filenames, and generation timestamps for each constituent file.
+5.1.3 RC-VTG-20. Packaging notes may not replace missing objective evidence and are required to identify any gap that remains open at event closeout.
+5.1.4 RC-VTG-21. Every final verification package shall include an index showing where each supporting artifact can be located in the controlled repository.
+
+6. Discussion
+Verification teams frequently create helper notes, planning assumptions, dry-run observations, and witness reminders that should not be treated as acceptance requirements. For example, an event lead may write that a thermal test will begin at 0700 or that a witness should arrive early. Those planning statements matter, but they are not baseline requirements in the same sense as the numbered rows above. This document intentionally keeps that kind of prose near the numbered statements so your extractor has to distinguish true requirements from realistic neighboring text.
+Another common pattern in defense programs is that traceability guides mention the same requirement IDs many times while only occasionally restating a requirement verb. This file follows that pattern as well, which makes it useful for testing that corpus-wide “shall statement” extraction does not explode on references alone.
+
+7. Review Governance and Audit Readiness
+7.1.1 RC-VTG-22. Verification readiness reviews shall identify every requirement row that still depends on open discrepancies, pending waivers, or incomplete objective evidence.
+7.1.2 RC-VTG-23. Audit packages shall retain the final adjudicated comment history for each disputed trace row.
+7.1.3 RC-VTG-24. Read-ahead material for review boards shall distinguish between accepted evidence, provisional evidence, and planned future evidence.
+7.1.4 RC-VTG-25. The verification control log shall identify when a requirement row moved because of a baseline change rather than because of a verification-method decision.
+7.1.5 RC-VTG-26. Review facilitators are required to preserve attendance, voting, and disposition records for every formal verification readiness decision.
+7.1.6 RC-VTG-27. Matrix exports shall preserve stable row identifiers even when sort order, grouping, or display filters change between releases.
+
+The Raven Crest team uses this section to make sure traceability survives the full review life cycle rather than stopping at initial matrix population. In real programs, many traceability issues emerge when requirements are reallocated, verification windows move, or evidence is challenged late in the event sequence. The additional prose here is deliberate: the file should look and read like a working engineering guide, not like an artificially isolated list of atomic statements.
+
+8. Cross-Document Alignment Practices
+8.2.1 RC-VTG-28. References to subcontract work statements shall identify the governing task clause rather than a generalized meeting or report label.
+8.2.2 RC-VTG-29. References to interface requirements shall preserve the interface clause number and affected boundary description in the trace row narrative.
+8.2.3 RC-VTG-30. Imported cybersecurity rows are required to record whether the evidence package came from operational scans, sustainment scans, or accreditation support activities.
+8.2.4 RC-VTG-31. When multiple baselines mention the same operational outcome, the matrix shall identify the primary acceptance source and the supporting references separately.
+8.2.5 RC-VTG-32. Traceability analysts shall capture any mismatch between source-document terminology and event-procedure terminology before the procedure enters witness review.
+
+Cross-document alignment becomes especially important in contractor environments where specifications, interface annexes, support plans, and work statements evolve on slightly different clocks. Teams often assume these documents line up automatically, but in practice the naming, revision, and allocation details can drift in subtle ways. This guide therefore mixes mandatory control language with explanatory discussion so that corpus-wide extraction and human review can both see the difference between enforceable guidance and descriptive context.

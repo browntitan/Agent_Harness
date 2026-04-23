@@ -1,0 +1,101 @@
+review_id,customer_segment,region,product_line,channel,rating,reviews,expected_sentiment_hint,annotation_note
+REV-001,SMB,North,Core,Email,5,Lightning-fast checkout and zero issues so far.,positive,clear praise
+REV-002,Mid-Market,South,Analytics,Web,1,Support never replied and I lost a day of work.,negative,clear frustration
+REV-003,Enterprise,East,Automation,App,3,"It works, but only after the third refresh.",neutral,mixed experience
+REV-004,SMB,West,Billing,Partner,2,"Great, another update that moved every button I use.",negative,sarcasm
+REV-005,Mid-Market,Central,Core,Retail,4,Honestly pretty solid for a first release.,positive,mild praise
+REV-006,Enterprise,Enterprise,Analytics,Email,3,I cannot tell if this is brilliant or broken.,neutral,ambiguous
+REV-007,SMB,North,Automation,Web,5,Saved my team hours this week.,positive,workflow win
+REV-008,Mid-Market,South,Billing,App,1,Billing is a mess and the invoice export failed twice.,negative,billing pain
+REV-009,Enterprise,East,Core,Partner,3,"It is fine, I guess. Nothing special.",neutral,flat tone
+REV-010,SMB,West,Analytics,Retail,3,"The new dashboard looks nice, but reports are slower now.",neutral,mixed tradeoff
+REV-011,Mid-Market,Central,Automation,Email,5,Best onboarding experience we have had in years.,positive,strong praise
+REV-012,Enterprise,Enterprise,Billing,Web,2,"The product is okay, the documentation is not.",negative,docs complaint
+REV-013,SMB,North,Core,App,4,Not bad once you learn where everything lives.,positive,qualified praise
+REV-014,Mid-Market,South,Analytics,Partner,4,"I expected worse, so this is a pleasant surprise.",positive,surprised praise
+REV-015,Enterprise,East,Automation,Retail,,,,blank review
+REV-016,SMB,West,Billing,Email,5,The rollout was smooth and the data matched our old system.,positive,migration success
+REV-017,Mid-Market,Central,Core,Web,2,"Maybe it is user error, but I still cannot find the export button.",negative,confused frustration
+REV-018,Enterprise,Enterprise,Analytics,App,3,"Nothing crashed, nothing wowed me.",neutral,balanced
+REV-019,SMB,North,Automation,Partner,2,This solved one problem and created two new ones.,negative,tradeoff
+REV-020,Mid-Market,South,Billing,Retail,5,"Fast, clear, and exactly what we needed.",positive,strong praise
+REV-021,Enterprise,East,Core,Email,5,Lightning-fast checkout and zero issues so far.,positive,clear praise
+REV-022,SMB,West,Analytics,Web,1,Support never replied and I lost a day of work.,negative,clear frustration
+REV-023,Mid-Market,Central,Automation,App,3,"It works, but only after the third refresh.",neutral,mixed experience
+REV-024,Enterprise,Enterprise,Billing,Partner,2,"Great, another update that moved every button I use.",negative,sarcasm
+REV-025,SMB,North,Core,Retail,4,Honestly pretty solid for a first release.,positive,mild praise
+REV-026,Mid-Market,South,Analytics,Email,3,I cannot tell if this is brilliant or broken.,neutral,ambiguous
+REV-027,Enterprise,East,Automation,Web,5,Saved my team hours this week.,positive,workflow win
+REV-028,SMB,West,Billing,App,1,Billing is a mess and the invoice export failed twice.,negative,billing pain
+REV-029,Mid-Market,Central,Core,Partner,3,"It is fine, I guess. Nothing special.",neutral,flat tone
+REV-030,Enterprise,Enterprise,Analytics,Retail,3,"The new dashboard looks nice, but reports are slower now.",neutral,mixed tradeoff
+REV-031,SMB,North,Automation,Email,5,Best onboarding experience we have had in years.,positive,strong praise
+REV-032,Mid-Market,South,Billing,Web,2,"The product is okay, the documentation is not.",negative,docs complaint
+REV-033,Enterprise,East,Core,App,4,Not bad once you learn where everything lives.,positive,qualified praise
+REV-034,SMB,West,Analytics,Partner,4,"I expected worse, so this is a pleasant surprise.",positive,surprised praise
+REV-035,Mid-Market,Central,Automation,Retail,,,,blank review
+REV-036,Enterprise,Enterprise,Billing,Email,5,The rollout was smooth and the data matched our old system.,positive,migration success
+REV-037,SMB,North,Core,Web,2,"Maybe it is user error, but I still cannot find the export button.",negative,confused frustration
+REV-038,Mid-Market,South,Analytics,App,3,"Nothing crashed, nothing wowed me.",neutral,balanced
+REV-039,Enterprise,East,Automation,Partner,2,This solved one problem and created two new ones.,negative,tradeoff
+REV-040,SMB,West,Billing,Retail,5,"Fast, clear, and exactly what we needed.",positive,strong praise
+REV-041,Mid-Market,Central,Core,Email,5,Lightning-fast checkout and zero issues so far.,positive,clear praise
+REV-042,Enterprise,Enterprise,Analytics,Web,1,Support never replied and I lost a day of work.,negative,clear frustration
+REV-043,SMB,North,Automation,App,3,"It works, but only after the third refresh.",neutral,mixed experience
+REV-044,Mid-Market,South,Billing,Partner,2,"Great, another update that moved every button I use.",negative,sarcasm
+REV-045,Enterprise,East,Core,Retail,4,Honestly pretty solid for a first release.,positive,mild praise
+REV-046,SMB,West,Analytics,Email,3,I cannot tell if this is brilliant or broken.,neutral,ambiguous
+REV-047,Mid-Market,Central,Automation,Web,5,Saved my team hours this week.,positive,workflow win
+REV-048,Enterprise,Enterprise,Billing,App,1,Billing is a mess and the invoice export failed twice.,negative,billing pain
+REV-049,SMB,North,Core,Partner,3,"It is fine, I guess. Nothing special.",neutral,flat tone
+REV-050,Mid-Market,South,Analytics,Retail,3,"The new dashboard looks nice, but reports are slower now.",neutral,mixed tradeoff
+REV-051,Enterprise,East,Automation,Email,5,Best onboarding experience we have had in years.,positive,strong praise
+REV-052,SMB,West,Billing,Web,2,"The product is okay, the documentation is not.",negative,docs complaint
+REV-053,Mid-Market,Central,Core,App,4,Not bad once you learn where everything lives.,positive,qualified praise
+REV-054,Enterprise,Enterprise,Analytics,Partner,4,"I expected worse, so this is a pleasant surprise.",positive,surprised praise
+REV-055,SMB,North,Automation,Retail,,,,blank review
+REV-056,Mid-Market,South,Billing,Email,5,The rollout was smooth and the data matched our old system.,positive,migration success
+REV-057,Enterprise,East,Core,Web,2,"Maybe it is user error, but I still cannot find the export button.",negative,confused frustration
+REV-058,SMB,West,Analytics,App,3,"Nothing crashed, nothing wowed me.",neutral,balanced
+REV-059,Mid-Market,Central,Automation,Partner,2,This solved one problem and created two new ones.,negative,tradeoff
+REV-060,Enterprise,Enterprise,Billing,Retail,5,"Fast, clear, and exactly what we needed.",positive,strong praise
+REV-061,SMB,North,Core,Email,5,Lightning-fast checkout and zero issues so far.,positive,clear praise
+REV-062,Mid-Market,South,Analytics,Web,1,Support never replied and I lost a day of work.,negative,clear frustration
+REV-063,Enterprise,East,Automation,App,3,"It works, but only after the third refresh.",neutral,mixed experience
+REV-064,SMB,West,Billing,Partner,2,"Great, another update that moved every button I use.",negative,sarcasm
+REV-065,Mid-Market,Central,Core,Retail,4,Honestly pretty solid for a first release.,positive,mild praise
+REV-066,Enterprise,Enterprise,Analytics,Email,3,I cannot tell if this is brilliant or broken.,neutral,ambiguous
+REV-067,SMB,North,Automation,Web,5,Saved my team hours this week.,positive,workflow win
+REV-068,Mid-Market,South,Billing,App,1,Billing is a mess and the invoice export failed twice.,negative,billing pain
+REV-069,Enterprise,East,Core,Partner,3,"It is fine, I guess. Nothing special.",neutral,flat tone
+REV-070,SMB,West,Analytics,Retail,3,"The new dashboard looks nice, but reports are slower now.",neutral,mixed tradeoff
+REV-071,Mid-Market,Central,Automation,Email,5,Best onboarding experience we have had in years.,positive,strong praise
+REV-072,Enterprise,Enterprise,Billing,Web,2,"The product is okay, the documentation is not.",negative,docs complaint
+REV-073,SMB,North,Core,App,4,Not bad once you learn where everything lives.,positive,qualified praise
+REV-074,Mid-Market,South,Analytics,Partner,4,"I expected worse, so this is a pleasant surprise.",positive,surprised praise
+REV-075,Enterprise,East,Automation,Retail,,,,blank review
+REV-076,SMB,West,Billing,Email,5,The rollout was smooth and the data matched our old system.,positive,migration success
+REV-077,Mid-Market,Central,Core,Web,2,"Maybe it is user error, but I still cannot find the export button.",negative,confused frustration
+REV-078,Enterprise,Enterprise,Analytics,App,3,"Nothing crashed, nothing wowed me.",neutral,balanced
+REV-079,SMB,North,Automation,Partner,2,This solved one problem and created two new ones.,negative,tradeoff
+REV-080,Mid-Market,South,Billing,Retail,5,"Fast, clear, and exactly what we needed.",positive,strong praise
+REV-081,Enterprise,East,Core,Email,5,Lightning-fast checkout and zero issues so far.,positive,clear praise
+REV-082,SMB,West,Analytics,Web,1,Support never replied and I lost a day of work.,negative,clear frustration
+REV-083,Mid-Market,Central,Automation,App,3,"It works, but only after the third refresh.",neutral,mixed experience
+REV-084,Enterprise,Enterprise,Billing,Partner,2,"Great, another update that moved every button I use.",negative,sarcasm
+REV-085,SMB,North,Core,Retail,4,Honestly pretty solid for a first release.,positive,mild praise
+REV-086,Mid-Market,South,Analytics,Email,3,I cannot tell if this is brilliant or broken.,neutral,ambiguous
+REV-087,Enterprise,East,Automation,Web,5,Saved my team hours this week.,positive,workflow win
+REV-088,SMB,West,Billing,App,1,Billing is a mess and the invoice export failed twice.,negative,billing pain
+REV-089,Mid-Market,Central,Core,Partner,3,"It is fine, I guess. Nothing special.",neutral,flat tone
+REV-090,Enterprise,Enterprise,Analytics,Retail,3,"The new dashboard looks nice, but reports are slower now.",neutral,mixed tradeoff
+REV-091,SMB,North,Automation,Email,5,Best onboarding experience we have had in years.,positive,strong praise
+REV-092,Mid-Market,South,Billing,Web,2,"The product is okay, the documentation is not.",negative,docs complaint
+REV-093,Enterprise,East,Core,App,4,Not bad once you learn where everything lives.,positive,qualified praise
+REV-094,SMB,West,Analytics,Partner,4,"I expected worse, so this is a pleasant surprise.",positive,surprised praise
+REV-095,Mid-Market,Central,Automation,Retail,,,,blank review
+REV-096,Enterprise,Enterprise,Billing,Email,5,The rollout was smooth and the data matched our old system.,positive,migration success
+REV-097,SMB,North,Core,Web,2,"Maybe it is user error, but I still cannot find the export button.",negative,confused frustration
+REV-098,Mid-Market,South,Analytics,App,3,"Nothing crashed, nothing wowed me.",neutral,balanced
+REV-099,Enterprise,East,Automation,Partner,2,This solved one problem and created two new ones.,negative,tradeoff
+REV-100,SMB,West,Billing,Retail,5,"Fast, clear, and exactly what we needed.",positive,strong praise

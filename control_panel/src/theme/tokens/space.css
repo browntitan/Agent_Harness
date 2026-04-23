@@ -1,0 +1,26 @@
+:root {
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  --bp-compact: 1180px;
+  --bp-wide: 1400px;
+  --bp-ultrawide: 1680px;
+
+  --app-sidebar-width: 240px;
+  --app-header-height: 48px;
+  --app-content-max-width: 1360px;
+}

@@ -1,0 +1,127 @@
+/*
+ * Color tokens.
+ *
+ * Components reference role tokens only (surface/fg/border/status/brand).
+ * Palette hex values live in one place and feed the roles via data-theme.
+ *
+ * Alpha steps (brand/status) are pre-baked so components compose surfaces
+ * without inventing their own rgba() values.
+ */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface-canvas: #08090A;
+  --surface-sunken: #050506;
+  --surface-raised: #0E0F12;
+  --surface-overlay: #141519;
+
+  --fg-default: #EDEDED;
+  --fg-muted: #A1A1AA;
+  --fg-subtle: #71717A;
+  --fg-on-accent: #FFFFFF;
+  --fg-inverse: #1B2028;
+
+  --border-subtle: #1A1B20;
+  --border-default: #25262B;
+  --border-strong: #35363C;
+  --border-focus: #3291FF;
+
+  --brand-primary: #0070F3;
+  --brand-primary-hover: #3291FF;
+  --brand-primary-pressed: #0057C2;
+  --brand-primary-surface: rgba(0, 112, 243, 0.12);
+  --brand-primary-surface-strong: rgba(0, 112, 243, 0.20);
+  --brand-primary-border: rgba(0, 112, 243, 0.32);
+  --brand-accent: #56C6D9;
+  --brand-on-primary: #FFFFFF;
+
+  --status-ok: #4FB286;
+  --status-ok-surface: rgba(79, 178, 134, 0.12);
+  --status-ok-border: rgba(79, 178, 134, 0.28);
+
+  --status-warn: #D9A441;
+  --status-warn-surface: rgba(217, 164, 65, 0.12);
+  --status-warn-border: rgba(217, 164, 65, 0.28);
+
+  --status-danger: #D46A6A;
+  --status-danger-surface: rgba(212, 106, 106, 0.12);
+  --status-danger-border: rgba(212, 106, 106, 0.30);
+
+  --status-info: #7AA2E3;
+  --status-info-surface: rgba(122, 162, 227, 0.12);
+  --status-info-border: rgba(122, 162, 227, 0.28);
+
+  --overlay-scrim: rgba(0, 0, 0, 0.72);
+
+  /*
+   * Legacy aliases. Existing styles still reference these; we keep them
+   * until §3 migrates components to role tokens directly.
+   */
+  --obsidian: var(--surface-canvas);
+  --charcoal: var(--surface-sunken);
+  --charcoal-soft: var(--surface-raised);
+  --slate: var(--surface-raised);
+  --slate-soft: var(--surface-overlay);
+  --mist: var(--fg-default);
+  --mist-soft: var(--fg-muted);
+  --mist-muted: var(--fg-subtle);
+  --line: var(--border-subtle);
+  --line-strong: var(--border-default);
+  --accent: var(--brand-primary);
+  --accent-soft: var(--brand-primary-surface);
+  --ok: var(--status-ok);
+  --ok-soft: var(--status-ok-surface);
+  --warn: var(--status-warn);
+  --warn-soft: var(--status-warn-surface);
+  --danger: var(--status-danger);
+  --danger-soft: var(--status-danger-surface);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --surface-canvas: #F5F7FA;
+  --surface-sunken: #EEF1F5;
+  --surface-raised: #FFFFFF;
+  --surface-overlay: #FFFFFF;
+
+  --fg-default: #1B2028;
+  --fg-muted: #4B5362;
+  --fg-subtle: #6E7785;
+  --fg-on-accent: #FFFFFF;
+  --fg-inverse: #EDEDED;
+
+  --border-subtle: #E4E4E7;
+  --border-default: #D4D4D8;
+  --border-strong: #A1A1AA;
+  --border-focus: #0070F3;
+
+  --brand-primary: #0057C2;
+  --brand-primary-hover: #0070F3;
+  --brand-primary-pressed: #004BA3;
+  --brand-primary-surface: rgba(0, 87, 194, 0.10);
+  --brand-primary-surface-strong: rgba(0, 87, 194, 0.16);
+  --brand-primary-border: rgba(0, 87, 194, 0.26);
+  --brand-accent: #2B7F79;
+  --brand-on-primary: #FFFFFF;
+
+  --status-ok: #2E8C62;
+  --status-ok-surface: rgba(46, 140, 98, 0.10);
+  --status-ok-border: rgba(46, 140, 98, 0.26);
+
+  --status-warn: #9A6B15;
+  --status-warn-surface: rgba(154, 107, 21, 0.10);
+  --status-warn-border: rgba(154, 107, 21, 0.28);
+
+  --status-danger: #B24545;
+  --status-danger-surface: rgba(178, 69, 69, 0.10);
+  --status-danger-border: rgba(178, 69, 69, 0.26);
+
+  --status-info: #0057C2;
+  --status-info-surface: rgba(0, 87, 194, 0.10);
+  --status-info-border: rgba(0, 87, 194, 0.24);
+
+  --overlay-scrim: rgba(20, 24, 32, 0.48);
+}
