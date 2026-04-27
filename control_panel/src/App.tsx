@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { Search } from 'lucide-react'
 import { api, isApiError } from './api'
 import { buildArchitectureMapLayout } from './architectureLayout'
 import {
@@ -8,15 +9,19 @@ import {
   AppShell,
   CollapsibleSurfaceCard,
   ConfirmDialog,
+  DataTable,
   DetailTabs,
+  Dialog,
   EmptyState,
+  FilterChip,
   EntityList,
-  IconButton,
   JsonInspector,
+  Kbd,
+  Popover,
   SectionHeader,
-  SectionIcon,
   SectionTabs,
-  SidebarNav,
+  SegmentedControl,
+  Skeleton,
   StatCard,
   StatusBadge,
   SurfaceCard,
@@ -26,6 +31,16 @@ import {
 import { useTheme } from './theme/ThemeProvider'
 import { useDensity } from './theme/DensityProvider'
 import { statusHelp } from './statusCopy'
+import { RbacMatrix } from './sections/access/RbacMatrix'
+import { CommandPalette, type PaletteCommand } from './components/CommandPalette'
+import { ControlPanelTopNav } from './components/ControlPanelTopNav'
+import { ResourceSearch } from './components/ResourceSearch'
+import {
+  SECTION_META,
+  parseSectionFromPath,
+  sectionToPath,
+  type Section,
+} from './navigation'
 import type {
   AccessMembership,
   AccessPrincipal,
@@ -35,6 +50,7 @@ import type {
   AdminField,
   AdminOverview,
   ArchitectureActivity,
+  ArchitectureEdge,
   ArchitectureNode,
   ArchitectureSnapshot,
   CapabilitySectionStatus,
@@ -49,92 +65,10 @@ import type {
   GraphIndexRecord,
   GraphIndexRunRecord,
   GraphResearchTunePayload,
+  LangGraphExport,
   McpConnectionRecord,
+  UploadedFileSummary,
 } from './types'
-
-type Section = 'dashboard' | 'architecture' | 'config' | 'agents' | 'prompts' | 'collections' | 'graphs' | 'skills' | 'access' | 'mcp' | 'operations'
-
-const SECTION_META: Array<{
-  id: Section
-  label: string
-  eyebrow: string
-  description: string
-}> = [
-  {
-    id: 'dashboard',
-    label: 'Dashboard',
-    eyebrow: 'Executive Console',
-    description: 'Monitor the runtime posture, collection inventory, and recent operational activity at a glance.',
-  },
-  {
-    id: 'architecture',
-    label: 'Architecture',
-    eyebrow: 'System Map',
-    description: 'See the live routing model, active agent topology, and recent pathing activity as the runtime changes.',
-  },
-  {
-    id: 'config',
-    label: 'Config',
-    eyebrow: 'Runtime Controls',
-    description: 'Validate and apply live-safe environment changes without losing sight of current values or reload impact.',
-  },
-  {
-    id: 'agents',
-    label: 'Agents',
-    eyebrow: 'Agent Studio',
-    description: 'Edit agent overlays, inspect pinned skills and tool access, then reload definitions when you are ready.',
-  },
-  {
-    id: 'prompts',
-    label: 'Prompts',
-    eyebrow: 'Prompt Layers',
-    description: 'Work with base prompts and live overlays in a safer editor that makes the effective prompt obvious.',
-  },
-  {
-    id: 'collections',
-    label: 'Collections',
-    eyebrow: 'Knowledge Operations',
-    description: 'Create namespaces, ingest source files or folders, and inspect collection readiness without leaving the workspace.',
-  },
-  {
-    id: 'graphs',
-    label: 'Graphs',
-    eyebrow: 'Graph Workspace',
-    description: 'Admin-managed GraphRAG control plane for named graphs, build validation, prompt overrides, and graph-bound skill overlays.',
-  },
-  {
-    id: 'skills',
-    label: 'Skills',
-    eyebrow: 'Skill Library',
-    description: 'Preview relevance, create reusable skills, and control whether each skill is active or archived.',
-  },
-  {
-    id: 'access',
-    label: 'Access',
-    eyebrow: 'RBAC Workspace',
-    description: 'Manage email users, placeholder groups, roles, bindings, and effective access for collections, graphs, tools, and skill families.',
-  },
-  {
-    id: 'mcp',
-    label: 'MCP',
-    eyebrow: 'Plugin Tool Plane',
-    description: 'Connect Streamable HTTP MCP servers, refresh tool catalogs, and keep external tools behind the same runtime policies.',
-  },
-  {
-    id: 'operations',
-    label: 'Operations',
-    eyebrow: 'Ops Stream',
-    description: 'Review reload history, background job state, and audit activity with the technical payload tucked away.',
-  },
-]
-
-const SECTION_IDS: ReadonlySet<Section> = new Set(SECTION_META.map(s => s.id))
-const DEFAULT_SECTION: Section = 'dashboard'
-
-function parseSectionFromPath(pathname: string): Section {
-  const first = pathname.replace(/^\/+/, '').split('/')[0] ?? ''
-  return SECTION_IDS.has(first as Section) ? (first as Section) : DEFAULT_SECTION
-}
 
 function useSectionRoute(): [Section, (next: Section) => void] {
   const location = useLocation()
@@ -143,7 +77,7 @@ function useSectionRoute(): [Section, (next: Section) => void] {
   const setActive = useCallback(
     (next: Section) => {
       if (next === parseSectionFromPath(location.pathname)) return
-      navigate(`/${next}`)
+      navigate(sectionToPath(next))
     },
     [navigate, location.pathname],
   )
@@ -179,11 +113,11 @@ const ARCHITECTURE_LAYERS = [
   { id: 'services', label: 'Runtime Services' },
 ] as const
 
-type ArchitectureTab = 'map' | 'paths' | 'traffic'
+type ArchitectureTab = 'map' | 'agent-graph' | 'paths' | 'traffic'
 type AgentsTab = 'workspace' | 'catalog'
 type PromptsTab = 'edit' | 'compare'
 type CollectionsTab = 'workspace'
-type CollectionActionMode = 'host' | 'files' | 'folder' | 'sync'
+type CollectionActionMode = 'host' | 'sync'
 type GraphsTab = 'workspace' | 'runs'
 type GraphSourceMode = 'collection' | 'manual'
 type SkillsTab = 'editor' | 'preview'
@@ -236,6 +170,17 @@ function asString(value: unknown, fallback = ''): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return fallback
+}
+
+function configFieldName(field: AdminField): string {
+  const record = field as unknown as Record<string, unknown>
+  return asString(field.env_name || record.key || field.label, 'setting')
+}
+
+function matchesTextQuery(query: string, ...parts: unknown[]): boolean {
+  const normalized = query.trim().toLowerCase()
+  if (!normalized) return true
+  return parts.some(part => asString(part).toLowerCase().includes(normalized))
 }
 
 function asNumber(value: unknown): number | null {
@@ -300,7 +245,7 @@ function toneForStatus(value: unknown): 'neutral' | 'ok' | 'warning' | 'danger' 
   if (['ok', 'active', 'success', 'configured', 'ready'].includes(normalized)) return 'ok'
   if (['warning', 'pending', 'runtime_swap', 'insufficient_data', 'partial'].includes(normalized)) return 'warning'
   if (['failed', 'error', 'archived', 'disabled', 'blocked', 'flagged'].includes(normalized)) return 'danger'
-  if (['overlay active', 'overlay', 'live'].includes(normalized)) return 'accent'
+  if (['overlay active', 'overlay', 'live', 'preview'].includes(normalized)) return 'accent'
   return 'neutral'
 }
 
@@ -400,6 +345,25 @@ function nodeTone(node: ArchitectureNode | null): 'neutral' | 'ok' | 'warning' |
   return 'neutral'
 }
 
+function edgeTone(edge: ArchitectureEdge | null): 'neutral' | 'ok' | 'warning' | 'danger' | 'accent' {
+  if (!edge) return 'neutral'
+  if (edge.kind === 'routing_path') return 'accent'
+  if (edge.kind === 'delegation') return 'warning'
+  if (edge.kind === 'service_dependency') return 'ok'
+  return 'neutral'
+}
+
+function langGraphStatusTone(exportPayload: LangGraphExport | null | undefined): 'neutral' | 'ok' | 'warning' | 'danger' | 'accent' {
+  const status = asString(exportPayload?.status, 'unavailable').toLowerCase()
+  if (status === 'available') return 'ok'
+  if (status === 'error' || status === 'failed') return 'danger'
+  return 'warning'
+}
+
+function langGraphItemLabel(item: Record<string, unknown>): string {
+  return asString(item.name ?? item.id, 'node')
+}
+
 function formatSectionList(sectionIds: string[]): string {
   return sectionIds.map(humanizeKey).join(', ')
 }
@@ -416,7 +380,26 @@ const EMPTY_COLLECTION_STORAGE_PROFILE = {
 }
 
 function collectionStorageProfile(collection: CollectionSummary | null | undefined) {
-  return collection?.storage_profile ?? EMPTY_COLLECTION_STORAGE_PROFILE
+  const profile = asRecord(collection?.storage_profile)
+  if (!profile) return EMPTY_COLLECTION_STORAGE_PROFILE
+  return {
+    vector_store_backend: asString(profile.vector_store_backend ?? profile.vector_store, EMPTY_COLLECTION_STORAGE_PROFILE.vector_store_backend),
+    tables: asArray<string>(profile.tables ?? profile.table_names),
+    embeddings_provider: asString(profile.embeddings_provider ?? profile.embedding_provider),
+    embedding_model: asString(profile.embedding_model),
+    graph_embedding_model: asString(profile.graph_embedding_model),
+    configured_embedding_dim: asNumber(profile.configured_embedding_dim ?? profile.expected_embedding_dims) ?? 0,
+    actual_embedding_dims: asRecord(profile.actual_embedding_dims) as Record<string, number> ?? {},
+    mismatch_warnings: asArray<string>(profile.mismatch_warnings),
+  }
+}
+
+function collectionStatusSummary(collection: CollectionSummary | null | undefined) {
+  const status = asRecord(collection?.status)
+  return {
+    ready: Boolean(status?.ready),
+    reason: asString(status?.reason, 'unknown'),
+  }
 }
 
 function buildCompatibilityBanner(
@@ -522,6 +505,46 @@ export default function App() {
     try { await pendingConfirm.run() }
     finally { setConfirmLoading(false); setPendingConfirm(null) }
   }, [pendingConfirm])
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [configDiffOpen, setConfigDiffOpen] = useState(false)
+  const [auditRange, setAuditRange] = useState<'24h' | '7d' | '30d' | 'all'>('all')
+
+  const paletteCommands: PaletteCommand[] = useMemo(() => {
+    const cmds: PaletteCommand[] = []
+    for (const section of SECTION_META) {
+      cmds.push({
+        id: `nav:${section.id}`,
+        label: `Go to ${section.label}`,
+        hint: section.eyebrow,
+        group: 'Navigate',
+        keywords: [section.label, section.eyebrow, section.id],
+        run: () => setActive(section.id),
+      })
+    }
+    cmds.push({
+      id: 'action:lock',
+      label: 'Lock session',
+      group: 'Actions',
+      keywords: ['logout', 'sign out', 'token'],
+      run: () => setToken(''),
+    })
+    cmds.push({
+      id: 'action:theme',
+      label: theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme',
+      group: 'Actions',
+      keywords: ['theme', 'dark', 'light', 'appearance'],
+      run: () => toggleTheme(),
+    })
+    cmds.push({
+      id: 'action:density',
+      label: density === 'comfortable' ? 'Switch to compact density' : 'Switch to comfortable density',
+      group: 'Actions',
+      keywords: ['density', 'compact', 'spacing'],
+      run: () => toggleDensity(),
+    })
+    return cmds
+  }, [setActive, setToken, toggleTheme, toggleDensity, theme, density])
   const [error, setError] = useState('')
   const [compatibilityChecked, setCompatibilityChecked] = useState(false)
   const [compatibility, setCompatibility] = useState<ControlPanelCapabilities | null>(null)
@@ -533,22 +556,27 @@ export default function App() {
   const [architectureRefreshing, setArchitectureRefreshing] = useState(false)
   const [architectureTab, setArchitectureTab] = useSessionStringState<ArchitectureTab>('control-panel-ui-architecture-tab', 'map')
   const [selectedArchitectureNodeId, setSelectedArchitectureNodeId] = useState('')
+  const [selectedArchitectureEdgeId, setSelectedArchitectureEdgeId] = useState('')
   const [selectedArchitecturePathId, setSelectedArchitecturePathId] = useState('')
   const [configFields, setConfigFields] = useState<AdminField[]>([])
   const [configEffective, setConfigEffective] = useState<Record<string, string>>({})
   const [configChanges, setConfigChanges] = useState<Record<string, string>>({})
   const [configPreview, setConfigPreview] = useState<ConfigValidationResult | null>(null)
   const [activeConfigGroup, setActiveConfigGroup] = useState('')
+  const [settingsSearch, setSettingsSearch] = useSessionStringState<string>('control-panel-ui-settings-search', '')
   const [agentsPayload, setAgentsPayload] = useState<{ agents: Array<Record<string, unknown>>; tools: Array<Record<string, unknown>> } | null>(null)
   const [selectedAgent, setSelectedAgent] = useState('')
+  const [agentSearch, setAgentSearch] = useSessionStringState<string>('control-panel-ui-agent-search', '')
   const [agentDetail, setAgentDetail] = useState<Record<string, unknown> | null>(null)
   const [agentForm, setAgentForm] = useState<Record<string, unknown>>({})
   const [prompts, setPrompts] = useState<Array<Record<string, unknown>>>([])
   const [selectedPrompt, setSelectedPrompt] = useState('')
+  const [promptSearch, setPromptSearch] = useSessionStringState<string>('control-panel-ui-prompt-search', '')
   const [promptDetail, setPromptDetail] = useState<Record<string, unknown> | null>(null)
   const [promptDraft, setPromptDraft] = useState('')
   const [collections, setCollections] = useState<CollectionSummary[]>([])
   const [selectedCollection, setSelectedCollection] = useState('')
+  const [collectionSearch, setCollectionSearch] = useSessionStringState<string>('control-panel-ui-collection-search', '')
   const [collectionDraft, setCollectionDraft] = useState('')
   const [collectionDetail, setCollectionDetail] = useState<CollectionSummary | null>(null)
   const [collectionActivity, setCollectionActivity] = useState<CollectionOperationResult | Record<string, unknown> | null>(null)
@@ -559,8 +587,16 @@ export default function App() {
   const [docDetail, setDocDetail] = useState<Record<string, unknown> | null>(null)
   const [collectionHealth, setCollectionHealth] = useState<CollectionHealthReport | null>(null)
   const [pathDraft, setPathDraft] = useState('')
+  const [metadataProfile, setMetadataProfile] = useSessionStringState<string>('control-panel-ui-metadata-profile', 'auto')
+  const [indexPreview, setIndexPreview] = useSessionBooleanState('control-panel-ui-index-preview', false)
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFileSummary[]>([])
+  const [uploadSearch, setUploadSearch] = useSessionStringState<string>('control-panel-ui-upload-search', '')
+  const [selectedUploadDoc, setSelectedUploadDoc] = useState('')
+  const [uploadDocDetail, setUploadDocDetail] = useState<Record<string, unknown> | null>(null)
+  const [uploadActivity, setUploadActivity] = useState<CollectionOperationResult | Record<string, unknown> | null>(null)
   const [graphs, setGraphs] = useState<GraphIndexRecord[]>([])
   const [selectedGraph, setSelectedGraph] = useState('')
+  const [graphSearch, setGraphSearch] = useSessionStringState<string>('control-panel-ui-graph-search', '')
   const [graphDetail, setGraphDetail] = useState<GraphDetailPayload | null>(null)
   const [graphValidation, setGraphValidation] = useState<Record<string, unknown> | null>(null)
   const [graphRuns, setGraphRuns] = useState<GraphIndexRunRecord[]>([])
@@ -580,6 +616,7 @@ export default function App() {
   const [graphTuneRunning, setGraphTuneRunning] = useState(false)
   const [skills, setSkills] = useState<Array<Record<string, unknown>>>([])
   const [selectedSkill, setSelectedSkill] = useState('')
+  const [skillSearch, setSkillSearch] = useSessionStringState<string>('control-panel-ui-skill-search', '')
   const [skillDetail, setSkillDetail] = useState<Record<string, unknown> | null>(null)
   const [skillEditor, setSkillEditor] = useState('')
   const [skillPreviewQuery, setSkillPreviewQuery] = useState('')
@@ -595,6 +632,7 @@ export default function App() {
   const [effectiveAccess, setEffectiveAccess] = useState<EffectiveAccessPayload | null>(null)
   const [mcpConnections, setMcpConnections] = useState<McpConnectionRecord[]>([])
   const [selectedMcpConnection, setSelectedMcpConnection] = useState('')
+  const [mcpSearch, setMcpSearch] = useSessionStringState<string>('control-panel-ui-mcp-search', '')
   const [mcpDraftName, setMcpDraftName] = useState('')
   const [mcpDraftUrl, setMcpDraftUrl] = useState('')
   const [mcpDraftSecret, setMcpDraftSecret] = useState('')
@@ -630,14 +668,29 @@ export default function App() {
   const [promptSummaryOpen, setPromptSummaryOpen] = useSessionBooleanState('control-panel-ui-prompt-summary-open', !isCompactViewport())
   const [collectionInspectorOpen, setCollectionInspectorOpen] = useSessionBooleanState('control-panel-ui-collection-inspector-open', false)
   const [collectionViewerOpen, setCollectionViewerOpen] = useSessionBooleanState('control-panel-ui-collection-viewer-open', !isCompactViewport())
+  const [uploadViewerOpen, setUploadViewerOpen] = useSessionBooleanState('control-panel-ui-upload-viewer-open', !isCompactViewport())
   const [graphInspectorOpen, setGraphInspectorOpen] = useSessionBooleanState('control-panel-ui-graph-inspector-open', !isCompactViewport())
   const [skillSummaryOpen, setSkillSummaryOpen] = useSessionBooleanState('control-panel-ui-skill-summary-open', !isCompactViewport())
   const uploadFilesInputRef = useRef<HTMLInputElement | null>(null)
   const uploadFolderInputRef = useRef<HTMLInputElement | null>(null)
-  const graphUploadFilesInputRef = useRef<HTMLInputElement | null>(null)
-  const graphUploadFolderInputRef = useRef<HTMLInputElement | null>(null)
 
   const groupedConfigFields = useMemo(() => groupFields(configFields), [configFields])
+  const filteredConfigGroups = useMemo(() => {
+    const query = settingsSearch.trim().toLowerCase()
+    if (!query) return groupedConfigFields
+    return groupedConfigFields
+      .map(([group, fields]) => {
+        const groupMatches = group.toLowerCase().includes(query)
+        const matchingFields = fields.filter(field => {
+          return groupMatches
+            || asString(field.label).toLowerCase().includes(query)
+            || configFieldName(field).toLowerCase().includes(query)
+            || asString(field.description).toLowerCase().includes(query)
+        })
+        return [group, matchingFields] as [string, AdminField[]]
+      })
+      .filter(([, fields]) => fields.length > 0)
+  }, [groupedConfigFields, settingsSearch])
   const activeMeta = SECTION_META.find(item => item.id === active) ?? SECTION_META[0]
   const activeSectionSupport = compatibility?.sections?.[active] ?? null
   const activeSectionSupported = activeSectionSupport?.supported ?? true
@@ -650,10 +703,28 @@ export default function App() {
   const unsupportedSectionMessage = !activeSectionSupported
     ? buildUnsupportedSectionMessage(active, activeSectionSupport, compatibilitySource)
     : null
-  const visibleConfigGroup = groupedConfigFields.find(([group]) => group === activeConfigGroup) ?? groupedConfigFields[0] ?? null
+  const visibleConfigGroup = filteredConfigGroups.find(([group]) => group === activeConfigGroup) ?? filteredConfigGroups[0] ?? null
   const architectureNodeMap = useMemo(() => new Map((architecture?.nodes ?? []).map(node => [node.id, node])), [architecture])
+  const architectureEdgeMap = useMemo(() => new Map((architecture?.edges ?? []).map(edge => [edge.id, edge])), [architecture])
   const selectedArchitectureNode = architectureNodeMap.get(selectedArchitectureNodeId) ?? null
+  const selectedArchitectureEdge = architectureEdgeMap.get(selectedArchitectureEdgeId) ?? null
   const selectedArchitecturePath = (architecture?.canonical_paths ?? []).find(path => path.id === selectedArchitecturePathId) ?? null
+  const langGraphExport = architecture?.langgraph ?? null
+  const langGraphNodes = asArray<Record<string, unknown>>(langGraphExport?.nodes)
+  const langGraphEdges = asArray<Record<string, unknown>>(langGraphExport?.edges)
+  const langGraphWarnings = asArray<string>(langGraphExport?.warnings)
+  const architectureGraphStats = useMemo(() => {
+    const nodes = architecture?.nodes ?? []
+    const edges = architecture?.edges ?? []
+    return {
+      agents: nodes.filter(node => node.kind === 'agent').length,
+      services: nodes.filter(node => node.kind === 'service').length,
+      routingEdges: edges.filter(edge => edge.kind === 'routing_path').length,
+      delegations: edges.filter(edge => edge.kind === 'delegation').length,
+      serviceLinks: edges.filter(edge => edge.kind === 'service_dependency').length,
+      totalEdges: edges.length,
+    }
+  }, [architecture])
   const highlightedArchitectureEdgeIds = useMemo(() => {
     if (selectedArchitecturePath?.edge_ids?.length) return new Set(selectedArchitecturePath.edge_ids)
     if (!selectedArchitectureNodeId) return new Set<string>()
@@ -671,6 +742,22 @@ export default function App() {
   const lastReload = (operations?.last_reload as Record<string, unknown> | undefined)
     ?? (overview?.last_reload as Record<string, unknown> | undefined)
     ?? null
+  const environmentLabel = (import.meta.env.VITE_ENVIRONMENT as string | undefined)?.toLowerCase() || 'local'
+  const environmentTone: 'neutral' | 'info' | 'warn' | 'danger' =
+    environmentLabel === 'prod' || environmentLabel === 'production' ? 'danger'
+    : environmentLabel === 'staging' ? 'warn'
+    : environmentLabel === 'dev' || environmentLabel === 'development' ? 'info'
+    : 'neutral'
+  const reloadStatusValue = asString(lastReload?.status, '').toLowerCase()
+  const healthPulseTone: 'ok' | 'warn' | 'danger' =
+    reloadStatusValue === 'failed' || reloadStatusValue === 'error' || reloadStatusValue === 'offline' ? 'danger'
+    : reloadStatusValue === 'degraded' || reloadStatusValue === 'warning' || reloadStatusValue === 'healthy_with_overrides' ? 'warn'
+    : 'ok'
+  const healthPulseLabel = healthPulseTone === 'ok' ? 'healthy' : healthPulseTone === 'warn' ? 'degraded' : 'offline'
+  const healthPulseTooltip = lastReload?.timestamp
+    ? `Backend ${healthPulseLabel} • last checked ${formatTimestamp(lastReload.timestamp)}`
+    : `Backend ${healthPulseLabel}`
+  const isMacPlatform = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform)
   const auditEvents = asArray<Record<string, unknown>>(operations?.audit_events ?? overview?.audit_events)
   const jobs = asArray<Record<string, unknown>>(operations?.jobs ?? overview?.jobs)
   const schedulerSummary = asRecord(operations?.scheduler)
@@ -687,6 +774,11 @@ export default function App() {
   const documentRecord = (docDetail?.document as Record<string, unknown> | undefined) ?? null
   const extractedContent = asString((docDetail?.extracted_content as Record<string, unknown> | undefined)?.content)
   const rawContent = asString((docDetail?.raw_source as Record<string, unknown> | undefined)?.content)
+  const docMetadataSummary = asRecord(docDetail?.metadata_summary) ?? {}
+  const uploadDocumentRecord = (uploadDocDetail?.document as Record<string, unknown> | undefined) ?? null
+  const uploadExtractedContent = asString((uploadDocDetail?.extracted_content as Record<string, unknown> | undefined)?.content)
+  const uploadRawContent = asString((uploadDocDetail?.raw_source as Record<string, unknown> | undefined)?.content)
+  const uploadDocMetadataSummary = asRecord(uploadDocDetail?.metadata_summary) ?? {}
   const documentSourceTypes = useMemo(
     () => uniqueList(collectionDocs.map(doc => asString(doc.source_type)).filter(Boolean)),
     [collectionDocs],
@@ -700,11 +792,81 @@ export default function App() {
       return matchesSearch && matchesSource
     })
   }, [collectionDocs, documentSearch, documentSourceFilter])
+  const filteredAgents = useMemo(() => {
+    return (agentsPayload?.agents ?? []).filter(agent => matchesTextQuery(
+      agentSearch,
+      agent.name,
+      agent.prompt_file,
+      agent.description,
+      agent.mode,
+    ))
+  }, [agentsPayload, agentSearch])
+  const filteredPrompts = useMemo(() => {
+    return prompts.filter(prompt => matchesTextQuery(
+      promptSearch,
+      prompt.prompt_file,
+      prompt.kind,
+      Boolean(prompt.overlay_active) ? 'overlay active' : 'base only',
+    ))
+  }, [prompts, promptSearch])
+  const filteredCollections = useMemo(() => {
+    return collections.filter(collection => matchesTextQuery(
+      collectionSearch,
+      collection.collection_id,
+      collection.status?.reason,
+      collection.maintenance_policy,
+    ))
+  }, [collections, collectionSearch])
+  const filteredUploadedFiles = useMemo(() => {
+    return uploadedFiles.filter(file => matchesTextQuery(
+      uploadSearch,
+      file.title,
+      file.source_display_path,
+      file.source_path,
+      file.collection_id,
+    ))
+  }, [uploadedFiles, uploadSearch])
+  const filteredGraphs = useMemo(() => {
+    return graphs.filter(graph => matchesTextQuery(
+      graphSearch,
+      graph.graph_id,
+      graph.display_name,
+      graph.collection_id,
+      graph.status,
+    ))
+  }, [graphs, graphSearch])
+  const filteredSkills = useMemo(() => {
+    return skills.filter(skill => matchesTextQuery(
+      skillSearch,
+      skill.skill_id,
+      skill.name,
+      skill.description,
+      skill.status,
+      skill.agent_scope,
+    ))
+  }, [skills, skillSearch])
+  const filteredMcpConnections = useMemo(() => {
+    return mcpConnections.filter(connection => matchesTextQuery(
+      mcpSearch,
+      connection.display_name,
+      connection.connection_slug,
+      connection.server_url,
+      connection.status,
+      connection.visibility,
+    ))
+  }, [mcpConnections, mcpSearch])
   const collectionActivityRecord = asRecord(collectionActivity)
   const collectionActivitySummary = asRecord(collectionActivityRecord?.summary)
+  const collectionMetadataSummary = asRecord(collectionActivityRecord?.metadata_summary) ?? {}
   const collectionActivityFiles = asArray<Record<string, unknown>>(collectionActivityRecord?.files)
   const collectionActivityExceptions = collectionActivityFiles.filter(item => asString(item.outcome) !== 'ingested')
   const collectionActivityStatus = asString(collectionActivityRecord?.status)
+  const uploadActivityRecord = asRecord(uploadActivity)
+  const uploadActivitySummary = asRecord(uploadActivityRecord?.summary)
+  const uploadMetadataSummary = asRecord(uploadActivityRecord?.metadata_summary) ?? {}
+  const uploadActivityFiles = asArray<Record<string, unknown>>(uploadActivityRecord?.files)
+  const uploadActivityExceptions = uploadActivityFiles.filter(item => asString(item.outcome) !== 'ingested')
+  const uploadActivityStatus = asString(uploadActivityRecord?.status)
   const graphBuildDocCount = graphSourceMode === 'collection' ? graphCollectionDocs.length : graphSelectedDocIds.length
   const graphTuneCoverage = asRecord(graphTuneResult?.coverage)
   const graphTuneCorpusProfile = asRecord(graphTuneResult?.corpus_profile)
@@ -756,10 +918,20 @@ export default function App() {
       highlightedNodeIds: highlightedArchitectureNodeIds,
     })
   }, [architecture, highlightedArchitectureEdgeIds, highlightedArchitectureNodeIds])
+  const architectureFullGraphLayout = useMemo(() => {
+    return buildArchitectureMapLayout({
+      layers: ARCHITECTURE_LAYERS,
+      nodes: architecture?.nodes ?? [],
+      edges: architecture?.edges ?? [],
+      highlightedEdgeIds: new Set<string>(),
+      highlightedNodeIds: new Set<string>(),
+    })
+  }, [architecture])
 
   function collectionOutcomeTone(outcome: string): 'neutral' | 'ok' | 'warning' | 'danger' | 'accent' {
     if (outcome === 'ingested') return 'ok'
     if (outcome === 'already_indexed') return 'neutral'
+    if (outcome === 'previewed') return 'accent'
     if (outcome === 'skipped') return 'warning'
     if (outcome === 'failed') return 'danger'
     return 'neutral'
@@ -803,9 +975,25 @@ export default function App() {
     return nextDocId
   }
 
+  function applyUploadedFiles(nextUploads: UploadedFileSummary[], preferredDocId = ''): string {
+    setUploadedFiles(nextUploads)
+    const candidate = asString(preferredDocId || selectedUploadDoc)
+    const nextDocId = nextUploads.some(document => document.doc_id === candidate)
+      ? candidate
+      : asString(nextUploads[0]?.doc_id)
+    setSelectedUploadDoc(nextDocId)
+    if (!nextDocId) setUploadDocDetail(null)
+    return nextDocId
+  }
+
   async function refreshCollections(preferredCollectionId = ''): Promise<string> {
     const payload = await api.listCollections(token)
     return applyCollections(payload.collections, preferredCollectionId)
+  }
+
+  async function refreshUploadedFiles(preferredDocId = ''): Promise<string> {
+    const payload = await api.listUploadedFiles(token)
+    return applyUploadedFiles(payload.uploads, preferredDocId)
   }
 
   async function refreshCollectionDetail(collectionId: string): Promise<CollectionSummary | null> {
@@ -895,8 +1083,10 @@ export default function App() {
   function applyArchitectureSnapshot(snapshot: ArchitectureSnapshot) {
     setArchitecture(snapshot)
     const nodeIds = new Set(snapshot.nodes.map(node => node.id))
+    const edgeIds = new Set(snapshot.edges.map(edge => edge.id))
     const pathIds = new Set(snapshot.canonical_paths.map(path => path.id))
     setSelectedArchitectureNodeId(current => (current && nodeIds.has(current) ? current : snapshot.nodes[0]?.id ?? ''))
+    setSelectedArchitectureEdgeId(current => (current && edgeIds.has(current) ? current : ''))
     setSelectedArchitecturePathId(current => (current && pathIds.has(current) ? current : snapshot.canonical_paths[0]?.id ?? ''))
   }
 
@@ -1009,6 +1199,26 @@ export default function App() {
   }, [token])
 
   useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen(prev => !prev)
+        return
+      }
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const target = e.target as HTMLElement | null
+        const tag = target?.tagName
+        const editable = target?.isContentEditable
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable) return
+        e.preventDefault()
+        setShortcutsOpen(prev => !prev)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  useEffect(() => {
     setError('')
     if (!token) return
     if (!compatibilityChecked) return
@@ -1053,6 +1263,11 @@ export default function App() {
     if (active === 'collections') {
       void api.listCollections(token).then(payload => {
         applyCollections(payload.collections)
+      }).catch(err => setError(getMessage(err)))
+    }
+    if (active === 'uploads') {
+      void api.listUploadedFiles(token).then(payload => {
+        applyUploadedFiles(payload.uploads)
       }).catch(err => setError(getMessage(err)))
     }
     if (active === 'graphs') {
@@ -1153,6 +1368,15 @@ export default function App() {
   useEffect(() => {
     if (selectedDoc) setCollectionViewerOpen(true)
   }, [selectedDoc, setCollectionViewerOpen])
+
+  useEffect(() => {
+    if (!token || active !== 'uploads' || !selectedUploadDoc) return
+    void api.getUploadedFile(token, selectedUploadDoc).then(setUploadDocDetail).catch(err => setError(getMessage(err)))
+  }, [active, selectedUploadDoc, token])
+
+  useEffect(() => {
+    if (selectedUploadDoc) setUploadViewerOpen(true)
+  }, [selectedUploadDoc, setUploadViewerOpen])
 
   useEffect(() => {
     if (!token || active !== 'skills' || !selectedSkill) return
@@ -1378,7 +1602,13 @@ export default function App() {
       return
     }
     try {
-      const result = await api.ingestPaths(token, collectionId, pathDraft.split('\n').map(item => item.trim()).filter(Boolean))
+      const result = await api.ingestPaths(
+        token,
+        collectionId,
+        pathDraft.split('\n').map(item => item.trim()).filter(Boolean),
+        metadataProfile,
+        indexPreview,
+      )
       applyCollectionSelection(collectionId)
       await refreshCollectionWorkspace(collectionId)
       setCollectionActivity(result)
@@ -1388,26 +1618,61 @@ export default function App() {
     }
   }
 
-  async function handleUpload(files: FileList | File[] | null) {
+  async function handleUploadedFilesUpload(files: FileList | File[] | null) {
     if (!files || files.length === 0) return
-    const collectionId = normalizeCollectionId(selectedCollection || collectionDraft)
-    if (!collectionId) {
-      setError('Choose a collection ID first.')
-      return
-    }
     const fileArray = Array.isArray(files) ? files : Array.from(files)
     const relativePaths = fileArray.map(file => {
       const relativePath = asString((file as File & { webkitRelativePath?: string }).webkitRelativePath)
       return relativePath || file.name
     })
     try {
-      const result = await api.uploadFiles(token, collectionId, fileArray, relativePaths)
-      applyCollectionSelection(collectionId)
-      await refreshCollectionWorkspace(collectionId)
-      setCollectionActivity(result)
+      const result = await api.uploadUploadedFiles(token, fileArray, relativePaths, '', metadataProfile, indexPreview)
+      const preferredDocId = asString(asArray<string>(result.doc_ids)[0])
+      await refreshUploadedFiles(preferredDocId)
+      setUploadActivity(result)
       setError('')
     } catch (err) {
       setError(getMessage(err))
+    }
+  }
+
+  async function handleReindexUploadedFile() {
+    if (!selectedUploadDoc) return
+    try {
+      const result = await api.reindexUploadedFile(token, selectedUploadDoc)
+      const ingestedIds = Array.isArray(result.ingested_doc_ids) ? result.ingested_doc_ids : []
+      const preferredDocId = asString(ingestedIds[0])
+      const nextDocId = await refreshUploadedFiles(preferredDocId)
+      if (nextDocId) {
+        const detail = await api.getUploadedFile(token, nextDocId)
+        setUploadDocDetail(detail)
+      } else {
+        setUploadDocDetail(null)
+      }
+      setError('')
+      notifyOk('Uploaded file reindexed', selectedUploadDoc)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Upload reindex failed', err)
+    }
+  }
+
+  async function handleDeleteUploadedFile() {
+    if (!selectedUploadDoc) return
+    try {
+      await api.deleteUploadedFile(token, selectedUploadDoc)
+      const nextDocId = await refreshUploadedFiles()
+      if (nextDocId) {
+        const detail = await api.getUploadedFile(token, nextDocId)
+        setUploadDocDetail(detail)
+      } else {
+        setUploadDocDetail(null)
+      }
+      setError('')
+      notifyOk('Uploaded file deleted')
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Upload delete failed', err)
     }
   }
 
@@ -1499,32 +1764,6 @@ export default function App() {
     } catch (err) {
       setError(getMessage(err))
       notifyError('Delete collection failed', err)
-    }
-  }
-
-  async function handleGraphUpload(files: FileList | File[] | null) {
-    if (!files || files.length === 0) return
-    const collectionId = normalizeCollectionId(graphCollectionId)
-    if (!collectionId) {
-      setError('Choose a graph collection first.')
-      return
-    }
-    const fileArray = Array.isArray(files) ? files : Array.from(files)
-    const relativePaths = fileArray.map(file => {
-      const relativePath = asString((file as File & { webkitRelativePath?: string }).webkitRelativePath)
-      return relativePath || file.name
-    })
-    try {
-      const result = await api.uploadFiles(token, collectionId, fileArray, relativePaths)
-      await refreshCollections(collectionId)
-      await refreshGraphCollectionDocs(collectionId)
-      const uploadedDocIds = asArray<string>(result.doc_ids).map(String)
-      if (uploadedDocIds.length > 0) {
-        setGraphSelectedDocIds(current => uniqueList([...current, ...uploadedDocIds]))
-      }
-      setError('')
-    } catch (err) {
-      setError(getMessage(err))
     }
   }
 
@@ -1984,17 +2223,72 @@ export default function App() {
     }
   }
 
-  const sectionToolbar = active === 'config' && groupedConfigFields.length > 0 ? (
-    <SectionTabs
-      tabs={groupedConfigFields.map(([group]) => ({ id: group, label: group }))}
-      active={visibleConfigGroup?.[0] ?? groupedConfigFields[0]?.[0] ?? ''}
-      onChange={group => setActiveConfigGroup(group)}
-      ariaLabel="Config groups"
+  const sectionCounts = useMemo(() => {
+    const counts = new Map<Section, number>()
+    counts.set('agents', agentsPayload?.agents.length ?? 0)
+    counts.set('prompts', prompts.length)
+    counts.set('collections', collections.length)
+    counts.set('uploads', uploadedFiles.length)
+    counts.set('graphs', graphs.length)
+    counts.set('skills', skills.length)
+    counts.set('access', accessPrincipals.length)
+    counts.set('mcp', mcpConnections.length)
+    counts.set('operations', jobs.length)
+    return counts
+  }, [
+    accessPrincipals.length,
+    agentsPayload?.agents.length,
+    collections.length,
+    graphs.length,
+    jobs.length,
+    mcpConnections.length,
+    prompts.length,
+    skills.length,
+    uploadedFiles.length,
+  ])
+
+  const primaryNav = (
+    <ControlPanelTopNav
+      active={active}
+      onSelect={setActive}
+      sectionCounts={sectionCounts}
+      unsupportedSectionIds={unsupportedSectionIds}
+      theme={theme}
+      density={density}
+      onOpenPalette={() => setPaletteOpen(true)}
+      onToggleTheme={toggleTheme}
+      onToggleDensity={toggleDensity}
+      onLock={() => setToken('')}
     />
+  )
+
+  const sectionToolbar = active === 'config' && groupedConfigFields.length > 0 ? (
+    <div className="settings-toolbar">
+      <label className="settings-search" aria-label="Search settings">
+        <Search size={14} strokeWidth={2} aria-hidden="true" />
+        <input
+          value={settingsSearch}
+          onChange={event => setSettingsSearch(event.target.value)}
+          placeholder="Search settings"
+        />
+        {settingsSearch && (
+          <button type="button" onClick={() => setSettingsSearch('')} aria-label="Clear settings search">
+            ×
+          </button>
+        )}
+      </label>
+      <SectionTabs
+        tabs={filteredConfigGroups.map(([group]) => ({ id: group, label: group }))}
+        active={visibleConfigGroup?.[0] ?? filteredConfigGroups[0]?.[0] ?? ''}
+        onChange={group => setActiveConfigGroup(group)}
+        ariaLabel="Config groups"
+      />
+    </div>
   ) : active === 'architecture' ? (
     <SectionTabs
       tabs={[
         { id: 'map', label: 'Map' },
+        { id: 'agent-graph', label: 'Agent Graph' },
         { id: 'paths', label: 'Routing Paths' },
         { id: 'traffic', label: 'Live Traffic' },
       ]}
@@ -2099,82 +2393,8 @@ export default function App() {
 
   return (
     <AppShell
-      className={active === 'agents' || active === 'prompts' || active === 'collections' || active === 'graphs' || active === 'skills' || active === 'access' || active === 'mcp' ? 'app-shell-studio' : undefined}
-      sidebar={(
-        <SidebarNav
-          brand={(
-            <div className="brand-block">
-              <span className="section-eyebrow">Agentic RAG</span>
-              <h1>Control Panel</h1>
-              <p>Local admin workspace for runtime controls, assets, and agent behavior.</p>
-            </div>
-          )}
-          items={SECTION_META.map(section => {
-            const unsupported = unsupportedSectionIds.includes(section.id)
-            let count: number | undefined
-            if (section.id === 'collections') count = collections.length
-            else if (section.id === 'graphs') count = graphs.length
-            else if (section.id === 'skills') count = skills.length
-            else if (section.id === 'operations') count = jobs.length
-            return {
-              id: section.id,
-              label: section.label,
-              description: section.eyebrow,
-              icon: <SectionIcon kind={section.id} />,
-              warning: unsupported,
-              badge: unsupported
-                ? <StatusBadge tone="warning">Unsupported</StatusBadge>
-                : typeof count === 'number' && count > 0
-                  ? <span className="nav-count">{count.toLocaleString()}</span>
-                  : undefined,
-            }
-          })}
-          active={active}
-          onSelect={id => setActive(id as Section)}
-          footer={(
-            <>
-              <div className="sidebar-status">
-                <StatusBadge tone="accent">Local admin</StatusBadge>
-                {lastReload && <StatusBadge tone={toneForStatus(lastReload.status)}>{asString(lastReload.status, 'idle')}</StatusBadge>}
-              </div>
-              <div className="sidebar-footer-actions">
-                <IconButton
-                  aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-                  title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-                  onClick={toggleTheme}
-                >
-                  {theme === 'dark' ? (
-                    <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true">
-                      <path d="M10 2.5a.75.75 0 0 1 .75.75v1.25a.75.75 0 0 1-1.5 0V3.25A.75.75 0 0 1 10 2.5m0 12a.75.75 0 0 1 .75.75v1.25a.75.75 0 0 1-1.5 0v-1.25a.75.75 0 0 1 .75-.75M3.25 10a.75.75 0 0 1 .75-.75h1.25a.75.75 0 0 1 0 1.5H4a.75.75 0 0 1-.75-.75m11.5 0a.75.75 0 0 1 .75-.75H16.75a.75.75 0 0 1 0 1.5H15.5a.75.75 0 0 1-.75-.75m-9-4.75a.75.75 0 0 1 1.06 0l.89.89a.75.75 0 0 1-1.06 1.06l-.89-.89a.75.75 0 0 1 0-1.06m8.24 8.24a.75.75 0 0 1 1.06 0l.89.89a.75.75 0 1 1-1.06 1.06l-.89-.89a.75.75 0 0 1 0-1.06m0-8.24a.75.75 0 0 1 0 1.06l-.89.89a.75.75 0 1 1-1.06-1.06l.89-.89a.75.75 0 0 1 1.06 0M5.25 13.49a.75.75 0 0 1 0 1.06l-.89.89a.75.75 0 1 1-1.06-1.06l.89-.89a.75.75 0 0 1 1.06 0M10 6.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true">
-                      <path d="M10.5 2.75a.75.75 0 0 0-1.18-.61 7 7 0 1 0 8.54 8.54.75.75 0 0 0-.61-1.18 5.5 5.5 0 0 1-6.75-6.75" />
-                    </svg>
-                  )}
-                </IconButton>
-                <IconButton
-                  aria-label={density === 'comfortable' ? 'Switch to compact density' : 'Switch to comfortable density'}
-                  title={density === 'comfortable' ? 'Switch to compact density' : 'Switch to comfortable density'}
-                  aria-pressed={density === 'compact'}
-                  onClick={toggleDensity}
-                >
-                  {density === 'comfortable' ? (
-                    <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true">
-                      <path d="M3.75 4a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5zm0 5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5zm0 5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5z" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true">
-                      <path d="M3.75 3.5a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5zm0 3a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5zm0 3a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5zm0 3a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5zm0 3a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5z" />
-                    </svg>
-                  )}
-                </IconButton>
-                <ActionButton tone="ghost" onClick={() => setToken('')}>Lock</ActionButton>
-              </div>
-            </>
-          )}
-        />
-      )}
+      className={active === 'agents' || active === 'prompts' || active === 'collections' || active === 'uploads' || active === 'graphs' || active === 'skills' || active === 'access' || active === 'mcp' ? 'app-shell-studio' : undefined}
+      topNav={primaryNav}
       toolbar={sectionToolbar}
       header={(
         <SectionHeader
@@ -2192,6 +2412,28 @@ export default function App() {
                   {architectureRefreshing ? 'Retrying...' : 'Retry'}
                 </ActionButton>
               )}
+              <Tooltip content={`Environment: ${environmentLabel}`}>
+                <span className={`env-pill env-pill-${environmentTone}`} aria-label={`Environment ${environmentLabel}`}>
+                  <span className="env-pill-dot" aria-hidden="true" />
+                  {environmentLabel}
+                </span>
+              </Tooltip>
+              <Tooltip content={healthPulseTooltip}>
+                <span className={`health-pulse health-pulse-${healthPulseTone}`} aria-label={`Backend status ${healthPulseLabel}`} role="status">
+                  <span className="health-pulse-core" aria-hidden="true" />
+                </span>
+              </Tooltip>
+              <Tooltip content="Open command palette">
+                <button
+                  type="button"
+                  className="cmdk-hint"
+                  onClick={() => setPaletteOpen(true)}
+                  aria-label="Open command palette"
+                >
+                  <Kbd>{isMacPlatform ? '⌘' : 'Ctrl'}</Kbd>
+                  <Kbd>K</Kbd>
+                </button>
+              </Tooltip>
               {overview?.status && <StatusBadge tone={toneForStatus(overview.status)}>{asString(overview.status)}</StatusBadge>}
               {lastReload?.reason && <StatusBadge tone="neutral">{asString(lastReload.reason)}</StatusBadge>}
               {lastReload?.timestamp && <StatusBadge tone="accent">{formatTimestamp(lastReload.timestamp)}</StatusBadge>}
@@ -2230,6 +2472,20 @@ export default function App() {
             </div>
           )}
         </SurfaceCard>
+      ) : active === 'dashboard' && !overview ? (
+        <div className="content-stack">
+          <SurfaceCard title="Runtime" subtitle="High-signal overview of the live environment, providers, models, and resource counts.">
+            <div className="stat-grid">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="stat-card">
+                  <Skeleton width="40%" height={12} />
+                  <Skeleton width="60%" height={24} />
+                  <Skeleton width="80%" height={10} />
+                </div>
+              ))}
+            </div>
+          </SurfaceCard>
+        </div>
       ) : active === 'dashboard' && overview && (
         <div className="content-stack">
           <SurfaceCard title="Runtime" subtitle="High-signal overview of the live environment, providers, models, and resource counts.">
@@ -2257,6 +2513,51 @@ export default function App() {
             </div>
             <JsonInspector label="Technical details" value={overview} />
           </SurfaceCard>
+
+          {(() => {
+            const failedJobs = jobs.filter(j => {
+              const state = asString(j.scheduler_state || j.status).toLowerCase()
+              return state === 'failed' || state === 'error'
+            })
+            const reloadFailed = asString(lastReload?.status, '').toLowerCase() === 'failed'
+            const attentionItems: Array<{ key: string; title: string; detail: string; tone: 'danger' | 'warn'; onClick?: () => void }> = []
+            if (reloadFailed) {
+              attentionItems.push({
+                key: 'reload',
+                title: 'Last reload failed',
+                detail: asString(lastReload?.error, asString(lastReload?.reason, 'See operations for details')),
+                tone: 'danger',
+                onClick: () => setActive('operations'),
+              })
+            }
+            failedJobs.slice(0, 4).forEach((job, i) => {
+              attentionItems.push({
+                key: `job-${i}`,
+                title: `Job failed: ${asString(job.agent_name, asString(job.job_id, 'job'))}`,
+                detail: asString(job.error, 'Check job details in Operations'),
+                tone: 'danger',
+                onClick: () => setActive('operations'),
+              })
+            })
+            if (attentionItems.length === 0) return null
+            return (
+              <SurfaceCard title="Needs attention" subtitle="Failures and degraded states surfaced here while they persist.">
+                <ul className="attention-list">
+                  {attentionItems.map(item => (
+                    <li key={item.key} className={`attention-item attention-item-${item.tone}`}>
+                      <div>
+                        <strong>{item.title}</strong>
+                        <p className="muted-copy">{item.detail}</p>
+                      </div>
+                      {item.onClick && (
+                        <ActionButton tone="ghost" onClick={item.onClick}>Investigate</ActionButton>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </SurfaceCard>
+            )
+          })()}
 
           <div className="dashboard-grid">
             <CollapsibleSurfaceCard
@@ -2444,6 +2745,7 @@ export default function App() {
                           }}
                           onClick={() => {
                             setSelectedArchitectureNodeId(node.id)
+                            setSelectedArchitectureEdgeId('')
                             setSelectedArchitecturePathId('')
                           }}
                         >
@@ -2559,6 +2861,300 @@ export default function App() {
             </div>
           )}
 
+          {architectureTab === 'agent-graph' && (
+            <div className="architecture-agent-graph">
+              <SurfaceCard
+                className="architecture-map-card architecture-agent-graph-card"
+                title="Agent Graph Overview"
+                subtitle="All runtime nodes and edges are shown together. Select a node or edge to inspect the registry metadata behind it."
+              >
+                <div className="architecture-agent-graph-stats">
+                  <div className="meta-chip">
+                    <span>Agents</span>
+                    <strong>{formatWholeNumber(architectureGraphStats.agents)}</strong>
+                  </div>
+                  <div className="meta-chip">
+                    <span>Services</span>
+                    <strong>{formatWholeNumber(architectureGraphStats.services)}</strong>
+                  </div>
+                  <div className="meta-chip">
+                    <span>Routing Edges</span>
+                    <strong>{formatWholeNumber(architectureGraphStats.routingEdges)}</strong>
+                  </div>
+                  <div className="meta-chip">
+                    <span>Delegations</span>
+                    <strong>{formatWholeNumber(architectureGraphStats.delegations)}</strong>
+                  </div>
+                  <div className="meta-chip">
+                    <span>Service Links</span>
+                    <strong>{formatWholeNumber(architectureGraphStats.serviceLinks)}</strong>
+                  </div>
+                </div>
+                <div className="architecture-legend">
+                  <StatusBadge tone="accent">Route</StatusBadge>
+                  <span>Router to agent</span>
+                  <StatusBadge tone="warning">Delegate</StatusBadge>
+                  <span>Agent handoff</span>
+                  <StatusBadge tone="ok">Service</StatusBadge>
+                  <span>Shared runtime dependency</span>
+                </div>
+                <div className="architecture-scroll">
+                  <div
+                    className="architecture-map-canvas architecture-agent-graph-canvas"
+                    style={{ width: `${architectureFullGraphLayout.width}px`, height: `${architectureFullGraphLayout.height}px` }}
+                  >
+                    <svg
+                      className="architecture-map-svg"
+                      viewBox={`0 0 ${architectureFullGraphLayout.width} ${architectureFullGraphLayout.height}`}
+                      aria-label="Agent graph edges"
+                    >
+                      {architectureFullGraphLayout.lanes.map(lane => (
+                        <g key={lane.id}>
+                          <rect
+                            x={lane.x}
+                            y={lane.y}
+                            width={lane.width}
+                            height={lane.height}
+                            rx={10}
+                            className="architecture-lane"
+                          />
+                          <text x={lane.x + 18} y={40} className="architecture-lane-label">
+                            {lane.label}
+                          </text>
+                        </g>
+                      ))}
+                      {architectureFullGraphLayout.edges.map(edge => {
+                        const selected = selectedArchitectureEdgeId === edge.id
+                        return (
+                          <path
+                            key={edge.id}
+                            d={edge.path}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Inspect edge ${edge.label || edge.id}`}
+                            data-edge-id={edge.id}
+                            data-edge-layer={edge.layer}
+                            data-edge-highlighted={selected ? 'true' : 'false'}
+                            className={[
+                              'architecture-edge',
+                              edge.kind === 'routing_path' ? 'architecture-edge-routing' : '',
+                              selected ? 'architecture-edge-selected' : '',
+                            ].filter(Boolean).join(' ')}
+                            onClick={() => {
+                              setSelectedArchitectureEdgeId(edge.id)
+                              setSelectedArchitectureNodeId('')
+                              setSelectedArchitecturePathId('')
+                            }}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                setSelectedArchitectureEdgeId(edge.id)
+                                setSelectedArchitectureNodeId('')
+                                setSelectedArchitecturePathId('')
+                              }
+                            }}
+                          />
+                        )
+                      })}
+                    </svg>
+                    {architectureFullGraphLayout.nodes.map(node => {
+                      const selected = selectedArchitectureNodeId === node.id
+                      return (
+                        <button
+                          key={node.id}
+                          type="button"
+                          aria-label={node.label}
+                          className={[
+                            'architecture-node',
+                            `architecture-node-${node.kind}`,
+                            selected ? 'architecture-node-selected' : '',
+                          ].filter(Boolean).join(' ')}
+                          style={{
+                            left: `${node.x}px`,
+                            top: `${node.y}px`,
+                            width: `${node.width}px`,
+                            height: `${node.height}px`,
+                          }}
+                          onClick={() => {
+                            setSelectedArchitectureNodeId(node.id)
+                            setSelectedArchitectureEdgeId('')
+                            setSelectedArchitecturePathId('')
+                          }}
+                        >
+                          <span className="architecture-node-label">{node.label}</span>
+                          <span className="architecture-node-meta">
+                            {node.kind === 'agent' ? (node.mode || node.role_kind || 'agent') : node.kind}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              </SurfaceCard>
+
+              <div className="content-stack architecture-agent-graph-side">
+                <SurfaceCard
+                  title={selectedArchitectureEdge ? 'Edge Inspector' : selectedArchitectureNode ? 'Node Inspector' : 'Graph Inspector'}
+                  subtitle="Focused metadata for the selected graph element."
+                >
+                  {selectedArchitectureEdge ? (
+                    <>
+                      <div className="badge-cluster">
+                        <StatusBadge tone={edgeTone(selectedArchitectureEdge)}>{humanizeKey(selectedArchitectureEdge.kind)}</StatusBadge>
+                        {selectedArchitectureEdge.emphasis && (
+                          <StatusBadge tone={selectedArchitectureEdge.emphasis === 'high' ? 'accent' : 'neutral'}>
+                            {humanizeKey(selectedArchitectureEdge.emphasis)}
+                          </StatusBadge>
+                        )}
+                      </div>
+                      <div className="summary-list">
+                        <div className="summary-row">
+                          <span>Label</span>
+                          <strong>{selectedArchitectureEdge.label || selectedArchitectureEdge.id}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>Source</span>
+                          <strong>{architectureNodeMap.get(selectedArchitectureEdge.source)?.label || selectedArchitectureEdge.source}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>Target</span>
+                          <strong>{architectureNodeMap.get(selectedArchitectureEdge.target)?.label || selectedArchitectureEdge.target}</strong>
+                        </div>
+                      </div>
+                      <JsonInspector label="Edge details" value={selectedArchitectureEdge} />
+                    </>
+                  ) : selectedArchitectureNode ? (
+                    <>
+                      <div className="badge-cluster">
+                        <StatusBadge tone={nodeTone(selectedArchitectureNode)}>{selectedArchitectureNode.kind}</StatusBadge>
+                        {asArray<string>(selectedArchitectureNode.badges).map(badge => (
+                          <StatusBadge key={badge} tone="neutral">{badge}</StatusBadge>
+                        ))}
+                      </div>
+                      <div className="summary-list">
+                        <div className="summary-row">
+                          <span>Label</span>
+                          <strong>{selectedArchitectureNode.label}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>Status</span>
+                          <StatusBadge tone={toneForStatus(selectedArchitectureNode.status)}>{selectedArchitectureNode.status}</StatusBadge>
+                        </div>
+                        <div className="summary-row">
+                          <span>Description</span>
+                          <strong>{selectedArchitectureNode.description || 'No description provided.'}</strong>
+                        </div>
+                        {selectedArchitectureNode.allowed_tools && (
+                          <div className="summary-row">
+                            <span>Tool Access</span>
+                            <strong>{shortList(selectedArchitectureNode.allowed_tools)}</strong>
+                          </div>
+                        )}
+                        {selectedArchitectureNode.allowed_worker_agents && (
+                          <div className="summary-row">
+                            <span>Worker Agents</span>
+                            <strong>{shortList(selectedArchitectureNode.allowed_worker_agents)}</strong>
+                          </div>
+                        )}
+                      </div>
+                      <JsonInspector label="Node details" value={selectedArchitectureNode} />
+                    </>
+                  ) : (
+                    <EmptyState title="Select a graph element" body="Choose a node or edge in the graph to inspect its live registry metadata." />
+                  )}
+                </SurfaceCard>
+
+                <SurfaceCard
+                  title="LangGraph Export"
+                  subtitle="Compiled ReAct graph metadata for the selected default agent, exported without invoking the agent."
+                  actions={(
+                    <StatusBadge tone={langGraphStatusTone(langGraphExport)}>
+                      {humanizeKey(asString(langGraphExport?.status, 'unavailable'))}
+                    </StatusBadge>
+                  )}
+                >
+                  {asString(langGraphExport?.status).toLowerCase() === 'available' ? (
+                    <>
+                      <div className="summary-list">
+                        <div className="summary-row">
+                          <span>Agent</span>
+                          <strong>{asString(langGraphExport?.agent_name, 'default')}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>LangGraph Nodes</span>
+                          <strong>{formatWholeNumber(langGraphNodes.length)}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>LangGraph Edges</span>
+                          <strong>{formatWholeNumber(langGraphEdges.length)}</strong>
+                        </div>
+                        {langGraphExport?.generated_at && (
+                          <div className="summary-row">
+                            <span>Generated</span>
+                            <strong>{formatTimestamp(langGraphExport.generated_at)}</strong>
+                          </div>
+                        )}
+                      </div>
+
+                      {langGraphWarnings.length > 0 && (
+                        <div className="inline-alert inline-alert-warning">
+                          <span>Export notes</span>
+                          <strong>{langGraphWarnings.join(' | ')}</strong>
+                        </div>
+                      )}
+
+                      <DetailTabs
+                        tabs={[
+                          {
+                            id: 'nodes',
+                            label: 'Nodes',
+                            content: (
+                              <div className="langgraph-mini-list">
+                                {langGraphNodes.map((node, index) => (
+                                  <div key={`${asString(node.id, 'node')}-${index}`} className="meta-chip">
+                                    <span>{langGraphItemLabel(node)}</span>
+                                    <strong>{asString(node.data_type, 'node')}</strong>
+                                  </div>
+                                ))}
+                              </div>
+                            ),
+                          },
+                          {
+                            id: 'edges',
+                            label: 'Edges',
+                            content: (
+                              <div className="langgraph-mini-list">
+                                {langGraphEdges.map((edge, index) => (
+                                  <div key={`${asString(edge.id, 'edge')}-${index}`} className="meta-chip">
+                                    <span>{asString(edge.source, 'source')} {'->'} {asString(edge.target, 'target')}</span>
+                                    <strong>{Boolean(edge.conditional) ? 'Conditional' : 'Direct'}</strong>
+                                  </div>
+                                ))}
+                              </div>
+                            ),
+                          },
+                          {
+                            id: 'mermaid',
+                            label: 'Mermaid',
+                            content: <div className="code-panel langgraph-mermaid-source">{asString(langGraphExport?.mermaid, 'No Mermaid source returned.')}</div>,
+                          },
+                        ]}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <EmptyState
+                        title="LangGraph export unavailable"
+                        body={langGraphWarnings[0] || 'The native graph still reflects the live registry, but this runtime could not export a compiled LangGraph view.'}
+                      />
+                      {langGraphExport && <JsonInspector label="Export payload" value={langGraphExport} />}
+                    </>
+                  )}
+                </SurfaceCard>
+              </div>
+            </div>
+          )}
+
           {architectureTab === 'paths' && (
             <div className="architecture-path-grid">
               {(architecture.canonical_paths ?? []).map(path => (
@@ -2582,6 +3178,7 @@ export default function App() {
                       onClick={() => {
                         setSelectedArchitecturePathId(path.id)
                         setSelectedArchitectureNodeId('')
+                        setSelectedArchitectureEdgeId('')
                         setArchitectureTab('map')
                       }}
                     >
@@ -2818,20 +3415,39 @@ export default function App() {
 
       {active === 'config' && (
         <div className="content-stack">
+          {Object.keys(configChanges).filter(k => configChanges[k] !== '').length > 0 && (
+            <div className="config-ribbon" role="status" aria-live="polite">
+              <div className="config-ribbon-body">
+                <strong>{Object.keys(configChanges).filter(k => configChanges[k] !== '').length} unsaved {Object.keys(configChanges).filter(k => configChanges[k] !== '').length === 1 ? 'change' : 'changes'}</strong>
+                <span className="muted-copy">Validate or apply to update the runtime config.</span>
+              </div>
+              <div className="config-ribbon-actions">
+                <ActionButton tone="ghost" onClick={() => setConfigDiffOpen(true)}>Preview diff</ActionButton>
+                <ActionButton tone="ghost" onClick={() => askConfirm({
+                  title: 'Discard unsaved changes?',
+                  description: 'All drafted values will be cleared. Applied values in the runtime are not affected.',
+                  confirmLabel: 'Discard',
+                  run: () => { setConfigChanges({}); notifyOk('Unsaved changes discarded') },
+                })}>Discard</ActionButton>
+                <ActionButton tone="primary" onClick={() => void handleConfigApply()}>Apply now</ActionButton>
+              </div>
+            </div>
+          )}
           <div className="card-grid">
-            {visibleConfigGroup && (
+            {visibleConfigGroup ? (
               <SurfaceCard key={visibleConfigGroup[0]} title={visibleConfigGroup[0]} subtitle="Review the live value, make a draft change, then validate before applying.">
                 <div className="field-stack">
                   {visibleConfigGroup[1].map(field => {
-                    const draftValue = configChanges[field.env_name] ?? ''
-                    const currentValue = configEffective[field.env_name] ?? field.value
+                    const fieldName = configFieldName(field)
+                    const draftValue = configChanges[fieldName] ?? ''
+                    const currentValue = configEffective[fieldName] ?? field.value
                     const changed = draftValue !== ''
                     const sliderDraftValue = changed
                       ? draftValue
                       : asString(currentValue, asString(field.min_value ?? 0))
                     return (
                       <div
-                        key={field.env_name}
+                        key={fieldName}
                         className={[
                           'config-row',
                           changed ? 'config-row-changed' : '',
@@ -2840,7 +3456,7 @@ export default function App() {
                       >
                         <div className="config-head">
                           <div>
-                            <label className="config-label" htmlFor={field.env_name}>{field.label}</label>
+                            <label className="config-label" htmlFor={fieldName}>{field.label}</label>
                             <p className="muted-copy">{field.description}</p>
                           </div>
                           <div className="badge-cluster">
@@ -2880,14 +3496,14 @@ export default function App() {
                                   <span className="muted-copy">0-100</span>
                                 </div>
                                 <input
-                                  id={field.env_name}
+                                  id={fieldName}
                                   aria-label={field.label}
                                   type="range"
                                   min={field.min_value ?? 0}
                                   max={field.max_value ?? 100}
                                   step={field.step ?? 1}
                                   value={asNumber(sliderDraftValue) ?? field.min_value ?? 0}
-                                  onChange={event => setConfigChanges(current => ({ ...current, [field.env_name]: event.target.value }))}
+                                  onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
                                 />
                                 <div className="slider-scale" aria-hidden="true">
                                   <span>0</span>
@@ -2902,20 +3518,20 @@ export default function App() {
                               </div>
                             ) : field.kind === 'enum' ? (
                               <select
-                                id={field.env_name}
+                                id={fieldName}
                                 aria-label={field.label}
                                 value={draftValue}
-                                onChange={event => setConfigChanges(current => ({ ...current, [field.env_name]: event.target.value }))}
+                                onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
                               >
                                 <option value="">No change</option>
                                 {field.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
                               </select>
                             ) : field.kind === 'bool' ? (
                               <select
-                                id={field.env_name}
+                                id={fieldName}
                                 aria-label={field.label}
                                 value={draftValue}
-                                onChange={event => setConfigChanges(current => ({ ...current, [field.env_name]: event.target.value }))}
+                                onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
                               >
                                 <option value="">No change</option>
                                 <option value="true">true</option>
@@ -2923,11 +3539,11 @@ export default function App() {
                               </select>
                             ) : (
                               <input
-                                id={field.env_name}
+                                id={fieldName}
                                 aria-label={field.label}
                                 type={field.secret ? 'password' : 'text'}
                                 value={draftValue}
-                                onChange={event => setConfigChanges(current => ({ ...current, [field.env_name]: event.target.value }))}
+                                onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
                                 placeholder={field.secret && field.is_configured ? 'configured' : 'Set new value'}
                               />
                             )}
@@ -2937,6 +3553,10 @@ export default function App() {
                     )
                   })}
                 </div>
+              </SurfaceCard>
+            ) : (
+              <SurfaceCard title="No settings match" subtitle="Try another setting name, environment variable, provider, or capability.">
+                <EmptyState title="No settings found" body="The current search filters out every settings group." />
               </SurfaceCard>
             )}
           </div>
@@ -2984,6 +3604,42 @@ export default function App() {
               <EmptyState title="No preview yet" body="Validate or apply a draft change to open a readable diff and reload summary here." />
             )}
           </CollapsibleSurfaceCard>
+          <Dialog
+            open={configDiffOpen}
+            onClose={() => setConfigDiffOpen(false)}
+            title="Unsaved config changes"
+            description="Preview the pending draft values before applying."
+            size="md"
+            footer={(
+              <>
+                <ActionButton tone="ghost" onClick={() => setConfigDiffOpen(false)}>Close</ActionButton>
+                <ActionButton tone="primary" onClick={() => { setConfigDiffOpen(false); void handleConfigApply() }}>Apply now</ActionButton>
+              </>
+            )}
+          >
+            {Object.keys(configChanges).filter(k => configChanges[k] !== '').length === 0 ? (
+              <EmptyState title="No unsaved changes" body="Drafted values will show up here with a before/after diff." />
+            ) : (
+              <div className="diff-list">
+                {Object.entries(configChanges).filter(([, v]) => v !== '').map(([key, newValue]) => {
+                  const before = asString(configEffective[key] ?? '', '—')
+                  return (
+                    <div key={key} className="diff-row">
+                      <div>
+                        <strong>{humanizeKey(key)}</strong>
+                        <p className="muted-copy"><code>{key}</code></p>
+                      </div>
+                      <div className="diff-values">
+                        <code>{before}</code>
+                        <span className="diff-arrow" aria-hidden="true">→</span>
+                        <code>{newValue}</code>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </Dialog>
         </div>
       )}
 
@@ -2991,9 +3647,10 @@ export default function App() {
         agentsTab === 'workspace' ? (
           <div className="studio-layout agent-studio">
             <SurfaceCard className="selection-rail agent-rail" title="Available Agents" subtitle="Choose which agent overlay you want to inspect or edit.">
+              <ResourceSearch value={agentSearch} onChange={setAgentSearch} placeholder="Search agents" />
               <EntityList
                 variant="rail"
-                items={agentsPayload.agents}
+                items={filteredAgents}
                 selectedKey={selectedAgent}
                 getKey={agent => asString(agent.name)}
                 getLabel={agent => asString(agent.name)}
@@ -3133,9 +3790,10 @@ export default function App() {
         promptsTab === 'edit' ? (
           <div className="studio-layout prompt-edit-layout">
             <SurfaceCard className="selection-rail prompt-rail" title="Prompt Files" subtitle="Pick a prompt to edit. Overlays take precedence on the next turn without a full runtime reload.">
+              <ResourceSearch value={promptSearch} onChange={setPromptSearch} placeholder="Search prompts" />
               <EntityList
                 variant="rail"
-                items={prompts}
+                items={filteredPrompts}
                 selectedKey={selectedPrompt}
                 getKey={prompt => asString(prompt.prompt_file)}
                 getLabel={prompt => asString(prompt.prompt_file)}
@@ -3183,9 +3841,10 @@ export default function App() {
         ) : (
           <div className="studio-layout prompt-compare-layout">
             <SurfaceCard className="selection-rail prompt-rail" title="Prompt Files" subtitle="Choose which prompt snapshot you want to compare.">
+              <ResourceSearch value={promptSearch} onChange={setPromptSearch} placeholder="Search prompts" />
               <EntityList
                 variant="rail"
-                items={prompts}
+                items={filteredPrompts}
                 selectedKey={selectedPrompt}
                 getKey={prompt => asString(prompt.prompt_file)}
                 getLabel={prompt => asString(prompt.prompt_file)}
@@ -3266,6 +3925,7 @@ export default function App() {
       {active === 'collections' && (
         <div className="workspace-grid workspace-grid-collections">
           <SurfaceCard className="selection-rail collection-rail" title="Collections" subtitle="Pick a namespace, keep empty collections visible, and switch the workspace without juggling multiple panels.">
+            <ResourceSearch value={collectionSearch} onChange={setCollectionSearch} placeholder="Search knowledge" />
             <label className="field">
               <span>Available Collections</span>
               <select
@@ -3274,7 +3934,7 @@ export default function App() {
                 onChange={event => applyCollectionSelection(event.target.value)}
               >
                 <option value="">Choose a collection</option>
-                {collections.map(collection => (
+                {filteredCollections.map(collection => (
                   <option key={collection.collection_id} value={collection.collection_id}>
                     {collection.collection_id}
                   </option>
@@ -3314,8 +3974,8 @@ export default function App() {
                 {selectedCollectionMeta ? 'Cataloged' : 'Draft'}
               </StatusBadge>
               {selectedCollectionMeta && (
-                <StatusBadge tone={selectedCollectionMeta.status.ready ? 'ok' : 'warning'}>
-                  {selectedCollectionMeta.status.ready ? 'Ready' : humanizeKey(selectedCollectionMeta.status.reason)}
+                <StatusBadge tone={collectionStatusSummary(selectedCollectionMeta).ready ? 'ok' : 'warning'}>
+                  {collectionStatusSummary(selectedCollectionMeta).ready ? 'Ready' : humanizeKey(collectionStatusSummary(selectedCollectionMeta).reason)}
                 </StatusBadge>
               )}
               {selectedCollectionMeta && <StatusBadge tone="accent">{selectedCollectionMeta.document_count} docs</StatusBadge>}
@@ -3349,8 +4009,8 @@ export default function App() {
                 getDescription={collection => formatTimestamp(collection.latest_ingested_at || collection.updated_at)}
                 getMeta={collection => (
                   <>
-                    <StatusBadge tone={collection.status.ready ? 'ok' : 'warning'}>
-                      {collection.status.ready ? 'Ready' : humanizeKey(collection.status.reason)}
+                    <StatusBadge tone={collectionStatusSummary(collection).ready ? 'ok' : 'warning'}>
+                      {collectionStatusSummary(collection).ready ? 'Ready' : humanizeKey(collectionStatusSummary(collection).reason)}
                     </StatusBadge>
                     <span>{collection.document_count} docs</span>
                     <span>{collection.graph_count} graphs</span>
@@ -3360,7 +4020,7 @@ export default function App() {
                 onSelect={collection => applyCollectionSelection(collection.collection_id)}
               />
             ) : (
-              <EmptyState title="No collections yet" body="Create a collection, then use the workspace to ingest files, folders, host paths, or KB content." />
+              <EmptyState title="No collections yet" body="Create a collection, then use the workspace to ingest host paths or sync configured KB content." />
             )}
           </SurfaceCard>
 
@@ -3368,46 +4028,15 @@ export default function App() {
             <SurfaceCard
               className="collection-workspace-card"
               title="Add Documents"
-              subtitle="Upload files, upload a folder, ingest a host path, or sync configured sources into the selected collection."
+              subtitle="Ingest host paths or sync configured sources into the selected knowledge collection."
             >
-              <input
-                ref={uploadFilesInputRef}
-                aria-label="Upload Files Input"
-                type="file"
-                multiple
-                className="visually-hidden"
-                tabIndex={-1}
-                onChange={event => {
-                  void handleUpload(event.target.files)
-                  event.currentTarget.value = ''
-                }}
-              />
-              <input
-                ref={node => {
-                  uploadFolderInputRef.current = node
-                  if (node) {
-                    node.setAttribute('webkitdirectory', '')
-                    node.setAttribute('directory', '')
-                  }
-                }}
-                aria-label="Upload Folder Input"
-                type="file"
-                multiple
-                className="visually-hidden"
-                tabIndex={-1}
-                onChange={event => {
-                  void handleUpload(event.target.files)
-                  event.currentTarget.value = ''
-                }}
-              />
-
               <div className="badge-cluster">
                 <StatusBadge tone={selectedCollectionMeta ? 'accent' : 'neutral'}>
                   {selectedCollectionMeta?.collection_id || normalizeCollectionId(collectionDraft) || 'No collection selected'}
                 </StatusBadge>
                 {selectedCollectionMeta && (
-                  <StatusBadge tone={selectedCollectionMeta.status.ready ? 'ok' : 'warning'}>
-                    {selectedCollectionMeta.status.ready ? 'Ready' : humanizeKey(selectedCollectionMeta.status.reason)}
+                  <StatusBadge tone={collectionStatusSummary(selectedCollectionMeta).ready ? 'ok' : 'warning'}>
+                    {collectionStatusSummary(selectedCollectionMeta).ready ? 'Ready' : humanizeKey(collectionStatusSummary(selectedCollectionMeta).reason)}
                   </StatusBadge>
                 )}
                 {Boolean(collectionActivityStatus) && (
@@ -3450,17 +4079,15 @@ export default function App() {
               <SectionTabs
                 tabs={[
                   { id: 'host', label: 'Ingest Host Path' },
-                  { id: 'files', label: 'Upload Files' },
-                  { id: 'folder', label: 'Upload Folder' },
                   { id: 'sync', label: 'Sync Configured Sources' },
                 ]}
-                active={collectionAction}
+                active={collectionAction === 'sync' ? 'sync' : 'host'}
                 onChange={value => setCollectionAction(value as CollectionActionMode)}
                 ariaLabel="Collection actions"
                 className="collection-action-tabs"
               />
 
-              {collectionAction === 'host' && (
+              {(collectionAction !== 'sync') && (
                 <div className="collection-action-panel">
                   <label className="field">
                     <span>Host Paths</span>
@@ -3472,30 +4099,32 @@ export default function App() {
                       placeholder={'/absolute/path/to/file.csv\n/absolute/path/to/folder'}
                     />
                   </label>
+                  <div className="form-grid form-grid-compact">
+                    <label className="field">
+                      <span>Indexing Profile</span>
+                      <select value={metadataProfile} onChange={event => setMetadataProfile(event.target.value)}>
+                        <option value="auto">Auto</option>
+                        <option value="deterministic">Deterministic</option>
+                        <option value="basic">Basic</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </label>
+                    <label className="checkbox-card">
+                      <input
+                        type="checkbox"
+                        checked={indexPreview}
+                        onChange={event => setIndexPreview(event.target.checked)}
+                      />
+                      <span className="checkbox-copy">
+                        <strong>Preview only</strong>
+                        <span>Inspect metadata before writing documents.</span>
+                      </span>
+                    </label>
+                  </div>
                   <div className="collection-action-copy">
                     <p>Use this for deterministic local ingest when you want the workspace to preserve folder-relative display paths.</p>
                     <ActionButton tone="primary" onClick={() => void handlePathIngest()}>Ingest Host Paths</ActionButton>
                   </div>
-                </div>
-              )}
-
-              {collectionAction === 'files' && (
-                <div className="collection-action-panel collection-action-panel-compact">
-                  <div className="collection-action-copy">
-                    <strong>Upload individual files</strong>
-                    <p>Choose a set of files from your machine and index them into the selected collection.</p>
-                  </div>
-                  <ActionButton tone="secondary" onClick={() => uploadFilesInputRef.current?.click()}>Upload Files</ActionButton>
-                </div>
-              )}
-
-              {collectionAction === 'folder' && (
-                <div className="collection-action-panel collection-action-panel-compact">
-                  <div className="collection-action-copy">
-                    <strong>Upload a folder</strong>
-                    <p>Folder-relative paths are preserved so repeated filenames stay readable in the document list.</p>
-                  </div>
-                  <ActionButton tone="secondary" onClick={() => uploadFolderInputRef.current?.click()}>Upload Folder</ActionButton>
                 </div>
               )}
 
@@ -3537,6 +4166,14 @@ export default function App() {
                       <span>Collection</span>
                       <strong>{asString(collectionActivityRecord?.collection_id, selectedCollection)}</strong>
                     </div>
+                    {Object.keys(collectionMetadataSummary).length > 0 && (
+                      <div className="summary-row">
+                        <span>Metadata</span>
+                        <strong>
+                          {asString(collectionMetadataSummary.document_count, '0')} docs | {asString(collectionMetadataSummary.chunk_count, '0')} chunks | {asString(collectionMetadataSummary.metadata_profile, metadataProfile)}
+                        </strong>
+                      </div>
+                    )}
                     {'created' in (collectionActivityRecord ?? {}) && (
                       <div className="summary-row">
                         <span>Create Result</span>
@@ -3615,6 +4252,34 @@ export default function App() {
                 <StatusBadge tone="accent">{collectionDocs.length} total</StatusBadge>
               </div>
 
+              {documentSourceTypes.length > 0 && (
+                <div className="doc-filter-chips">
+                  <button
+                    type="button"
+                    className="filter-chip-btn"
+                    onClick={() => setDocumentSourceFilter('all')}
+                    aria-pressed={documentSourceFilter === 'all'}
+                  >
+                    <FilterChip label="All sources" tone={documentSourceFilter === 'all' ? 'accent' : 'neutral'} />
+                  </button>
+                  {documentSourceTypes.map(sourceType => {
+                    const count = collectionDocs.filter(d => asString(d.source_type) === sourceType).length
+                    const active = documentSourceFilter === sourceType
+                    return (
+                      <button
+                        key={sourceType}
+                        type="button"
+                        className="filter-chip-btn"
+                        onClick={() => setDocumentSourceFilter(active ? 'all' : sourceType)}
+                        aria-pressed={active}
+                      >
+                        <FilterChip label={sourceType} count={count} tone={active ? 'accent' : 'neutral'} />
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+
               {filteredCollectionDocs.length > 0 ? (
                 <EntityList
                   items={filteredCollectionDocs}
@@ -3631,7 +4296,7 @@ export default function App() {
                   onSelect={doc => setSelectedDoc(asString(doc.doc_id))}
                 />
               ) : (
-                <EmptyState title="No documents match yet" body="Create the collection and ingest files, folders, host paths, or KB content to populate the document workspace." />
+                <EmptyState title="No documents match yet" body="Create the collection and ingest host paths or sync configured KB content to populate the document workspace." />
               )}
             </SurfaceCard>
 
@@ -3712,6 +4377,18 @@ export default function App() {
                               <span>Structure Type</span>
                               <strong>{asString(documentRecord.doc_structure_type, 'Unknown')}</strong>
                             </div>
+                            {Object.keys(docMetadataSummary).length > 0 && (
+                              <div className="summary-row">
+                                <span>Indexing Profile</span>
+                                <strong>{asString(docMetadataSummary.metadata_profile, 'auto')}</strong>
+                              </div>
+                            )}
+                            {Object.keys(docMetadataSummary).length > 0 && (
+                              <div className="summary-row">
+                                <span>Tags</span>
+                                <strong>{asArray<string>(docMetadataSummary.tags).slice(0, 6).join(', ') || 'None'}</strong>
+                              </div>
+                            )}
                             <div className="summary-row">
                               <span>Collection</span>
                               <strong>{asString(documentRecord.collection_id, 'Unknown')}</strong>
@@ -3862,6 +4539,283 @@ export default function App() {
         </div>
       )}
 
+      {active === 'uploads' && (
+        <div className="workspace-grid workspace-grid-collections">
+          <SurfaceCard className="selection-rail collection-rail" title="Uploaded Files" subtitle="Chat and ad hoc uploads are kept separate from knowledge collections.">
+            <ResourceSearch value={uploadSearch} onChange={setUploadSearch} placeholder="Search uploads" />
+            <div className="badge-cluster">
+              <StatusBadge tone="accent">{uploadedFiles.length} uploads</StatusBadge>
+              <StatusBadge tone="neutral">{filteredUploadedFiles.length} shown</StatusBadge>
+            </div>
+            {filteredUploadedFiles.length > 0 ? (
+              <EntityList
+                variant="rail"
+                items={filteredUploadedFiles}
+                selectedKey={selectedUploadDoc}
+                getKey={file => file.doc_id}
+                getLabel={file => file.title}
+                getDescription={file => file.source_display_path || file.source_path}
+                getMeta={file => (
+                  <>
+                    <StatusBadge tone="neutral">{file.collection_id}</StatusBadge>
+                    <span>{file.num_chunks} chunks</span>
+                  </>
+                )}
+                onSelect={file => setSelectedUploadDoc(file.doc_id)}
+              />
+            ) : (
+              <EmptyState title="No uploaded files" body="Files uploaded through chat or this workspace will appear here instead of in knowledge collections." />
+            )}
+          </SurfaceCard>
+
+          <div className="content-stack collection-main-stack">
+            <SurfaceCard
+              className="collection-workspace-card"
+              title="Add Uploaded Files"
+              subtitle="Index files as upload-scoped evidence without adding them to a knowledge collection."
+            >
+              <input
+                ref={uploadFilesInputRef}
+                aria-label="Upload Files Input"
+                type="file"
+                multiple
+                className="visually-hidden"
+                tabIndex={-1}
+                onChange={event => {
+                  void handleUploadedFilesUpload(event.target.files)
+                  event.currentTarget.value = ''
+                }}
+              />
+              <input
+                ref={node => {
+                  uploadFolderInputRef.current = node
+                  if (node) {
+                    node.setAttribute('webkitdirectory', '')
+                    node.setAttribute('directory', '')
+                  }
+                }}
+                aria-label="Upload Folder Input"
+                type="file"
+                multiple
+                className="visually-hidden"
+                tabIndex={-1}
+                onChange={event => {
+                  void handleUploadedFilesUpload(event.target.files)
+                  event.currentTarget.value = ''
+                }}
+              />
+
+              <div className="badge-cluster">
+                <StatusBadge tone="accent">Upload scope</StatusBadge>
+                {Boolean(uploadActivityStatus) && (
+                  <StatusBadge tone={toneForStatus(uploadActivityStatus)}>
+                    {humanizeKey(uploadActivityStatus)}
+                  </StatusBadge>
+                )}
+              </div>
+
+              <div className="supported-type-strip" aria-label="Supported upload document types">
+                <span>Supported Types</span>
+                {SUPPORTED_DOCUMENT_TYPES.map(type => (
+                  <StatusBadge key={type} tone="neutral">{type}</StatusBadge>
+                ))}
+              </div>
+
+              <div className="collection-action-panel collection-action-panel-compact">
+                <div className="collection-action-copy">
+                  <strong>Upload evidence files</strong>
+                  <p>Uploaded files stay in upload scope and no longer increase knowledge collection document counts.</p>
+                </div>
+                <label className="field">
+                  <span>Indexing Profile</span>
+                  <select value={metadataProfile} onChange={event => setMetadataProfile(event.target.value)}>
+                    <option value="auto">Auto</option>
+                    <option value="deterministic">Deterministic</option>
+                    <option value="basic">Basic</option>
+                    <option value="off">Off</option>
+                  </select>
+                </label>
+                <label className="checkbox-card">
+                  <input
+                    type="checkbox"
+                    checked={indexPreview}
+                    onChange={event => setIndexPreview(event.target.checked)}
+                  />
+                  <span className="checkbox-copy">
+                    <strong>Preview only</strong>
+                    <span>Inspect metadata before writing documents.</span>
+                  </span>
+                </label>
+                <div className="inline-action-pair">
+                  <ActionButton tone="secondary" onClick={() => uploadFilesInputRef.current?.click()}>Upload Files</ActionButton>
+                  <ActionButton tone="ghost" onClick={() => uploadFolderInputRef.current?.click()}>Upload Folder</ActionButton>
+                </div>
+              </div>
+
+              {uploadActivity ? (
+                <div className="preview-card collection-result-card">
+                  <div className="badge-cluster">
+                    <StatusBadge tone={toneForStatus(uploadActivityRecord?.status)}>
+                      {uploadActivityStatus ? humanizeKey(uploadActivityStatus) : 'Latest result'}
+                    </StatusBadge>
+                    <StatusBadge tone="accent">
+                      {asString(uploadActivitySummary?.ingested_count, asString(uploadActivityRecord?.ingested_count, '0'))} ingested
+                    </StatusBadge>
+                    {'summary' in (uploadActivityRecord ?? {}) && (
+                      <>
+                        <StatusBadge tone="neutral">{asString(uploadActivitySummary?.resolved_count, '0')} processed</StatusBadge>
+                        {Number(uploadActivitySummary?.already_indexed_count ?? 0) > 0 && (
+                          <StatusBadge tone="neutral">{asString(uploadActivitySummary?.already_indexed_count, '0')} already indexed</StatusBadge>
+                        )}
+                        <StatusBadge tone="warning">{asString(uploadActivitySummary?.skipped_count, '0')} skipped</StatusBadge>
+                        <StatusBadge tone={asString(uploadActivitySummary?.failed_count, '0') === '0' ? 'neutral' : 'danger'}>
+                          {asString(uploadActivitySummary?.failed_count, '0')} failed
+                        </StatusBadge>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="summary-list">
+                    <div className="summary-row">
+                      <span>Upload Collection</span>
+                      <strong>{asString(uploadActivityRecord?.collection_id, 'control-panel-uploads')}</strong>
+                    </div>
+                    {Object.keys(uploadMetadataSummary).length > 0 && (
+                      <div className="summary-row">
+                        <span>Metadata</span>
+                        <strong>
+                          {asString(uploadMetadataSummary.document_count, '0')} docs | {asString(uploadMetadataSummary.chunk_count, '0')} chunks | {asString(uploadMetadataSummary.metadata_profile, metadataProfile)}
+                        </strong>
+                      </div>
+                    )}
+                  </div>
+
+                  {uploadActivityExceptions.length > 0 && (
+                    <div className="collection-result-list">
+                      {uploadActivityExceptions.slice(0, 6).map(item => {
+                        const displayPath = asString(item.display_path, asString(item.filename, 'Unknown file'))
+                        return (
+                          <div key={`${displayPath}-${asString(item.outcome)}-${asString(item.error)}`} className="meta-chip">
+                            <span>{displayPath}</span>
+                            <StatusBadge tone={collectionOutcomeTone(asString(item.outcome))}>
+                              {humanizeKey(asString(item.outcome, 'unknown'))}
+                            </StatusBadge>
+                            {asString(item.error) && <span>{asString(item.error)}</span>}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <EmptyState title="No recent upload action" body="Upload files here and the latest result will stay visible above the viewer." />
+              )}
+            </SurfaceCard>
+
+            <CollapsibleSurfaceCard
+              title="Uploaded File Viewer"
+              subtitle="Inspect extracted content, source metadata, and upload collection IDs without mixing these files into KB collections."
+              actions={(
+                <>
+                  <ActionButton tone="ghost" onClick={() => void handleReindexUploadedFile()} disabled={!selectedUploadDoc}>Reindex</ActionButton>
+                  <ActionButton
+                    tone="destructive"
+                    onClick={() => askConfirm({
+                      title: 'Delete this uploaded file?',
+                      description: `Permanently remove "${asString(uploadDocumentRecord?.title) || selectedUploadDoc}".`,
+                      confirmLabel: 'Delete',
+                      run: handleDeleteUploadedFile,
+                    })}
+                    disabled={!selectedUploadDoc}
+                  >
+                    Delete
+                  </ActionButton>
+                </>
+              )}
+              open={uploadViewerOpen}
+              onToggle={() => setUploadViewerOpen(!uploadViewerOpen)}
+            >
+              {uploadDocDetail && uploadDocumentRecord ? (
+                <>
+                  <div className="summary-list">
+                    <div className="summary-row">
+                      <span>Title</span>
+                      <strong>{asString(uploadDocumentRecord.title, 'Untitled')}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Display Path</span>
+                      <strong>{asString(uploadDocumentRecord.source_display_path || uploadDocumentRecord.source_path, 'Unknown')}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Upload Collection</span>
+                      <strong>{asString(uploadDocumentRecord.collection_id, 'Unknown')}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Chunk Count</span>
+                      <strong>{asString((uploadDocDetail.extracted_content as Record<string, unknown> | undefined)?.chunk_count, '0')}</strong>
+                    </div>
+                  </div>
+                  <DetailTabs
+                    key={selectedUploadDoc}
+                    tabs={[
+                      {
+                        id: 'extracted',
+                        label: 'Extracted',
+                        content: <div className="code-panel">{uploadExtractedContent || 'No extracted content available.'}</div>,
+                      },
+                      {
+                        id: 'raw',
+                        label: 'Raw',
+                        content: <div className="code-panel">{uploadRawContent || 'No raw source is available for this uploaded file.'}</div>,
+                      },
+                      {
+                        id: 'metadata',
+                        label: 'Metadata',
+                        content: (
+                          <div className="summary-list">
+                            <div className="summary-row">
+                              <span>Source Path</span>
+                              <strong>{asString(uploadDocumentRecord.source_path, 'Unknown')}</strong>
+                            </div>
+                            <div className="summary-row">
+                              <span>File Type</span>
+                              <strong>{asString(uploadDocumentRecord.file_type, 'Unknown')}</strong>
+                            </div>
+                            <div className="summary-row">
+                              <span>Structure Type</span>
+                              <strong>{asString(uploadDocumentRecord.doc_structure_type, 'Unknown')}</strong>
+                            </div>
+                            {Object.keys(uploadDocMetadataSummary).length > 0 && (
+                              <div className="summary-row">
+                                <span>Indexing Profile</span>
+                                <strong>{asString(uploadDocMetadataSummary.metadata_profile, 'auto')}</strong>
+                              </div>
+                            )}
+                            {Object.keys(uploadDocMetadataSummary).length > 0 && (
+                              <div className="summary-row">
+                                <span>Tags</span>
+                                <strong>{asArray<string>(uploadDocMetadataSummary.tags).slice(0, 6).join(', ') || 'None'}</strong>
+                              </div>
+                            )}
+                            <div className="summary-row">
+                              <span>Source</span>
+                              <strong>{asString(uploadDocumentRecord.source_type, 'upload')}</strong>
+                            </div>
+                          </div>
+                        ),
+                      },
+                    ]}
+                  />
+                  <JsonInspector label="Technical details" value={uploadDocDetail} />
+                </>
+              ) : (
+                <EmptyState title="Choose an uploaded file" body="Selecting an upload reveals extracted content, raw source, and metadata for troubleshooting." />
+              )}
+            </CollapsibleSurfaceCard>
+          </div>
+        </div>
+      )}
+
       {active === 'skills' && (
         skillsTab === 'editor' ? (
           <div className="studio-layout skill-editor-layout">
@@ -3873,10 +4827,11 @@ export default function App() {
               <div className="rail-actions">
                 <ActionButton tone="secondary" onClick={startNewSkillDraft}>New Skill</ActionButton>
               </div>
+              <ResourceSearch value={skillSearch} onChange={setSkillSearch} placeholder="Search skills" />
               {skills.length > 0 ? (
                 <EntityList
                   variant="rail"
-                  items={skills}
+                  items={filteredSkills}
                   selectedKey={selectedSkill}
                   getKey={skill => asString(skill.skill_id)}
                   getLabel={skill => asString(skill.name, asString(skill.skill_id))}
@@ -4121,10 +5076,11 @@ export default function App() {
                   New Graph
                 </ActionButton>
               </ActionBar>
+              <ResourceSearch value={graphSearch} onChange={setGraphSearch} placeholder="Search graphs" />
               {graphs.length > 0 ? (
                 <EntityList
                   variant="rail"
-                  items={graphs}
+                  items={filteredGraphs}
                   selectedKey={selectedGraph}
                   getKey={graph => graph.graph_id}
                   getLabel={graph => graph.display_name || graph.graph_id}
@@ -4149,38 +5105,8 @@ export default function App() {
             <div className="content-stack">
               <SurfaceCard
                 title="Graph Workspace"
-                subtitle="Select a collection, upload or choose source documents, then save the draft before validating and building the GraphRAG project."
+                subtitle="Select a knowledge collection or choose indexed KB documents, then save the draft before validating and building the GraphRAG project."
               >
-                <input
-                  ref={graphUploadFilesInputRef}
-                  aria-label="Graph Source Files Input"
-                  type="file"
-                  multiple
-                  className="visually-hidden"
-                  tabIndex={-1}
-                  onChange={event => {
-                    void handleGraphUpload(event.target.files)
-                    event.currentTarget.value = ''
-                  }}
-                />
-                <input
-                  ref={node => {
-                    graphUploadFolderInputRef.current = node
-                    if (node) {
-                      node.setAttribute('webkitdirectory', '')
-                      node.setAttribute('directory', '')
-                    }
-                  }}
-                  aria-label="Graph Source Folder Input"
-                  type="file"
-                  multiple
-                  className="visually-hidden"
-                  tabIndex={-1}
-                  onChange={event => {
-                    void handleGraphUpload(event.target.files)
-                    event.currentTarget.value = ''
-                  }}
-                />
                 <div className="form-grid form-grid-compact">
                   <label className="field">
                     <span>Display Name</span>
@@ -4215,25 +5141,6 @@ export default function App() {
                       ))}
                     </select>
                   </label>
-                  <div className="field">
-                    <span>Upload To Collection</span>
-                    <div className="inline-action-pair">
-                      <ActionButton
-                        tone="secondary"
-                        disabled={!graphCollectionId}
-                        onClick={() => graphUploadFilesInputRef.current?.click()}
-                      >
-                        Upload Files
-                      </ActionButton>
-                      <ActionButton
-                        tone="ghost"
-                        disabled={!graphCollectionId}
-                        onClick={() => graphUploadFolderInputRef.current?.click()}
-                      >
-                        Upload Folder
-                      </ActionButton>
-                    </div>
-                  </div>
                 </div>
 
                 <div className="field-stack">
@@ -4282,7 +5189,7 @@ export default function App() {
                           </label>
                         )
                       }) : (
-                        <EmptyState title="No documents in this collection" body="Upload files here or use the Collections workspace first, then come back to build the graph from indexed documents." />
+                        <EmptyState title="No documents in this collection" body="Use the Collections workspace to ingest KB documents, then come back to build the graph from indexed documents." />
                       )}
                     </div>
                     )}
@@ -4885,35 +5792,82 @@ export default function App() {
               <ActionBar>
                 <ActionButton tone="secondary" onClick={() => void handleCreatePermission()}>Add Permission</ActionButton>
               </ActionBar>
-              {accessPermissions.length > 0 ? (
-                <div className="timeline-list">
-                  {accessPermissions.map(permission => (
-                    <article key={permission.permission_id} className="timeline-item">
-                      <div className="timeline-dot" aria-hidden="true" />
-                      <div>
-                        <strong>{accessRoles.find(role => role.role_id === permission.role_id)?.name || permission.role_id}</strong>
-                        <p>{accessResourceLabel(permission.resource_type)} • {permission.action}</p>
-                        <span>{permission.resource_selector}</span>
-                      </div>
-                      <ActionButton
-                        tone="destructive"
-                        onClick={() => askConfirm({
-                          title: 'Remove this permission?',
-                          description: 'The role will lose this grant. Effective access for bound principals will narrow.',
-                          confirmLabel: 'Remove',
-                          run: () => api.deleteAccessPermission(token, permission.permission_id)
-                            .then(() => { notifyOk('Permission removed'); return refreshAccessData() })
-                            .catch(err => { notifyError('Remove permission failed', err); setError(getMessage(err)) }),
-                        })}
-                      >
-                        Remove
-                      </ActionButton>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="No permissions yet" body="Permissions define what each role can use or manage in the runtime." />
-              )}
+              <DataTable<AccessRolePermission>
+                ariaLabel="Permissions"
+                rows={accessPermissions}
+                rowKey={permission => permission.permission_id}
+                columns={[
+                  {
+                    key: 'role',
+                    header: 'Role',
+                    sortable: true,
+                    accessor: permission => accessRoles.find(role => role.role_id === permission.role_id)?.name || permission.role_id,
+                    render: permission => (
+                      <strong>{accessRoles.find(role => role.role_id === permission.role_id)?.name || permission.role_id}</strong>
+                    ),
+                  },
+                  {
+                    key: 'resource_type',
+                    header: 'Resource',
+                    sortable: true,
+                    accessor: permission => accessResourceLabel(permission.resource_type),
+                    render: permission => accessResourceLabel(permission.resource_type),
+                  },
+                  {
+                    key: 'action',
+                    header: 'Action',
+                    sortable: true,
+                    accessor: permission => permission.action,
+                    render: permission => (
+                      <StatusBadge tone={permission.action === 'manage' ? 'accent' : 'neutral'}>
+                        {permission.action}
+                      </StatusBadge>
+                    ),
+                  },
+                  {
+                    key: 'selector',
+                    header: 'Selector',
+                    sortable: true,
+                    accessor: permission => permission.resource_selector,
+                    render: permission => <code>{permission.resource_selector || '*'}</code>,
+                  },
+                ]}
+                rowActions={permission => [
+                  {
+                    label: 'Copy permission ID',
+                    onSelect: () => {
+                      void navigator.clipboard?.writeText(permission.permission_id)
+                      notifyOk('Permission ID copied')
+                    },
+                  },
+                  {
+                    label: 'Remove permission',
+                    tone: 'danger',
+                    onSelect: () => askConfirm({
+                      title: 'Remove this permission?',
+                      description: 'The role will lose this grant. Effective access for bound principals will narrow.',
+                      confirmLabel: 'Remove',
+                      run: () => api.deleteAccessPermission(token, permission.permission_id)
+                        .then(() => { notifyOk('Permission removed'); return refreshAccessData() })
+                        .catch(err => { notifyError('Remove permission failed', err); setError(getMessage(err)) }),
+                    }),
+                  },
+                ]}
+                emptyState={<EmptyState title="No permissions yet" body="Permissions define what each role can use or manage in the runtime." />}
+              />
+            </SurfaceCard>
+
+            <SurfaceCard
+              title="Access Matrix"
+              subtitle="Who has access to what, at a glance. Click a cell for the source of the grant."
+              className="rbac-matrix-card"
+            >
+              <RbacMatrix
+                principals={accessPrincipals}
+                roles={accessRoles}
+                bindings={accessBindings}
+                permissions={accessPermissions}
+              />
             </SurfaceCard>
 
             <SurfaceCard title="Effective Access" subtitle="Preview the resolved principal graph and effective grants for any email before testing in OpenWebUI.">
@@ -4979,10 +5933,11 @@ export default function App() {
                 <ActionButton tone="primary" onClick={() => void handleCreateMcpConnection()}>Add MCP</ActionButton>
                 <ActionButton tone="secondary" onClick={() => void refreshMcpData(selectedMcpConnection)}>Refresh List</ActionButton>
               </ActionBar>
+              <ResourceSearch value={mcpSearch} onChange={setMcpSearch} placeholder="Search tools" />
 
               {mcpConnections.length > 0 ? (
                 <EntityList
-                  items={mcpConnections}
+                  items={filteredMcpConnections}
                   selectedKey={selectedMcpConnection}
                   getKey={connection => connection.connection_id}
                   getLabel={connection => connection.display_name || connection.connection_slug}
@@ -5249,26 +6204,97 @@ export default function App() {
 
           {operationsTab === 'audit' && (
             <SurfaceCard title="Audit Stream" subtitle="Recent operator-visible events, with reasons and changed keys called out up front.">
-              {auditEvents.length > 0 ? (
-                <div className="timeline-list">
-                  {auditEvents.map((event, index) => (
-                    <article key={`${asString(event.action)}-${index}`} className="timeline-item">
-                      <div className="timeline-dot" aria-hidden="true" />
-                      <div>
-                        <div className="tool-card-head">
-                          <strong>{asString(event.action, 'event')}</strong>
-                          <StatusBadge tone="neutral">{formatTimestamp(event.timestamp)}</StatusBadge>
-                        </div>
-                        <p>{asString(event.actor, 'system')}</p>
-                        <span>{shortList(asArray<string>(event.changed_keys))}</span>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="No audit events yet" body="Apply config, reload agents, or ingest content to start filling the audit stream." />
-              )}
-              {operations && <JsonInspector label="Technical details" value={operations} />}
+              <div className="audit-toolbar">
+                <SegmentedControl<'24h' | '7d' | '30d' | 'all'>
+                  size="sm"
+                  ariaLabel="Audit date range"
+                  value={auditRange}
+                  onChange={setAuditRange}
+                  options={[
+                    { value: '24h', label: 'Last 24h' },
+                    { value: '7d', label: 'Last 7d' },
+                    { value: '30d', label: 'Last 30d' },
+                    { value: 'all', label: 'All' },
+                  ]}
+                />
+              </div>
+              {(() => {
+                const now = Date.now()
+                const cutoffMs = auditRange === '24h' ? 24 * 3600 * 1000
+                  : auditRange === '7d' ? 7 * 24 * 3600 * 1000
+                  : auditRange === '30d' ? 30 * 24 * 3600 * 1000
+                  : null
+                const filtered = cutoffMs === null
+                  ? auditEvents
+                  : auditEvents.filter(event => {
+                    const ts = Date.parse(asString(event.timestamp, ''))
+                    return Number.isFinite(ts) && (now - ts) <= cutoffMs
+                  })
+                return (
+                  <DataTable<Record<string, unknown>>
+                    ariaLabel="Audit events"
+                    rows={filtered}
+                    rowKey={(event) => `${asString(event.action)}-${asString(event.timestamp)}-${asString(event.actor)}`}
+                    pageSize={25}
+                    columns={[
+                      {
+                        key: 'timestamp',
+                        header: 'Timestamp',
+                        sortable: true,
+                        accessor: event => asString(event.timestamp),
+                        render: event => <span className="tabular-nums">{formatTimestamp(event.timestamp)}</span>,
+                      },
+                      {
+                        key: 'actor',
+                        header: 'Actor',
+                        sortable: true,
+                        accessor: event => asString(event.actor, 'system'),
+                        render: event => <StatusBadge tone="neutral">{asString(event.actor, 'system')}</StatusBadge>,
+                      },
+                      {
+                        key: 'action',
+                        header: 'Action',
+                        sortable: true,
+                        accessor: event => asString(event.action),
+                        render: event => <strong>{asString(event.action, 'event')}</strong>,
+                      },
+                      {
+                        key: 'changed_keys',
+                        header: 'Changed keys',
+                        render: event => <span>{shortList(asArray<string>(event.changed_keys)) || '—'}</span>,
+                      },
+                      {
+                        key: 'details',
+                        header: '',
+                        width: 80,
+                        align: 'right',
+                        render: event => (
+                          <Popover
+                            ariaLabel="Audit event details"
+                            trigger={({ toggle, ref }) => (
+                              <button
+                                type="button"
+                                ref={el => ref(el)}
+                                onClick={toggle}
+                                className="icon-btn icon-btn-ghost"
+                                aria-label="Show audit event details"
+                              >
+                                Details
+                              </button>
+                            )}
+                          >
+                            <div className="audit-popover">
+                              <strong>{asString(event.action, 'event')}</strong>
+                              <JsonInspector label="Payload" value={event} />
+                            </div>
+                          </Popover>
+                        ),
+                      },
+                    ]}
+                    emptyState={<EmptyState title="No audit events" body={auditRange === 'all' ? 'Apply config, reload agents, or ingest content to start filling the audit stream.' : 'Nothing matches the selected time range.'} />}
+                  />
+                )
+              })()}
             </SurfaceCard>
           )}
         </div>
@@ -5283,6 +6309,46 @@ export default function App() {
         onCancel={() => { if (!confirmLoading) setPendingConfirm(null) }}
         onConfirm={handleConfirmRun}
       />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={paletteCommands}
+      />
+      <Dialog
+        open={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
+        title="Keyboard shortcuts"
+        description="All keyboard commands available in the control panel."
+        size="md"
+        footer={<ActionButton tone="ghost" onClick={() => setShortcutsOpen(false)}>Close</ActionButton>}
+      >
+        <div className="shortcuts-groups">
+          <section>
+            <h4>Navigation</h4>
+            <dl className="shortcuts-list">
+              <div><dt>Open command palette</dt><dd><Kbd>{isMacPlatform ? '⌘' : 'Ctrl'}</Kbd><Kbd>K</Kbd></dd></div>
+              <div><dt>Keyboard shortcuts</dt><dd><Kbd>?</Kbd></dd></div>
+              <div><dt>Close dialog / menu</dt><dd><Kbd>Esc</Kbd></dd></div>
+            </dl>
+          </section>
+          <section>
+            <h4>Command palette</h4>
+            <dl className="shortcuts-list">
+              <div><dt>Move selection</dt><dd><Kbd>↑</Kbd><Kbd>↓</Kbd></dd></div>
+              <div><dt>Run selected</dt><dd><Kbd>↵</Kbd></dd></div>
+              <div><dt>Close palette</dt><dd><Kbd>Esc</Kbd></dd></div>
+            </dl>
+          </section>
+          <section>
+            <h4>Tables &amp; menus</h4>
+            <dl className="shortcuts-list">
+              <div><dt>Move focus</dt><dd><Kbd>Tab</Kbd></dd></div>
+              <div><dt>Activate control</dt><dd><Kbd>Space</Kbd> / <Kbd>↵</Kbd></dd></div>
+              <div><dt>Navigate menu items</dt><dd><Kbd>↑</Kbd><Kbd>↓</Kbd></dd></div>
+            </dl>
+          </section>
+        </div>
+      </Dialog>
     </AppShell>
   )
 }

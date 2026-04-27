@@ -588,6 +588,7 @@ class MicrosoftGraphRagBackend(GraphBackendBase):
                 limit=limit,
                 doc_ids=doc_ids,
                 text_unit_doc_map=bundle.text_unit_doc_map(),
+                source_lookup=bundle.source_lookup(),
             )
         if not results:
             results = search_artifact_rows(

@@ -5,6 +5,7 @@ from typing import Any, Sequence
 from agentic_chatbot_next.authz import access_summary_allowed_ids, access_summary_allows, access_summary_authz_enabled
 from agentic_chatbot_next.rag.hints import (
     RagExecutionHints,
+    apply_answer_contract_override,
     apply_bounded_synthesis_override,
     coerce_rag_execution_hints,
     infer_rag_execution_hints,
@@ -119,6 +120,7 @@ def resolve_rag_execution_hints(
     coverage_goal: str = "",
     result_mode: str = "",
     controller_hints: dict[str, Any] | None = None,
+    answer_contract: Any | None = None,
 ) -> RagExecutionHints:
     heuristic = infer_rag_execution_hints(query, skill_queries=skill_queries)
     explicit = coerce_rag_execution_hints(
@@ -136,6 +138,12 @@ def resolve_rag_execution_hints(
 
     if settings is None or stores is None or session is None or not hasattr(stores, "skill_store"):
         merged = merge_rag_execution_hints(explicit, heuristic)
+        merged = apply_answer_contract_override(
+            merged,
+            answer_contract=answer_contract,
+            heuristic=heuristic,
+            explicit=explicit,
+        )
         if has_explicit_override:
             return merged
         return apply_bounded_synthesis_override(merged, query=query, skill_queries=skill_queries)
@@ -147,6 +155,12 @@ def resolve_rag_execution_hints(
     )
     if not skill_query.strip():
         merged = merge_rag_execution_hints(explicit, heuristic)
+        merged = apply_answer_contract_override(
+            merged,
+            answer_contract=answer_contract,
+            heuristic=heuristic,
+            explicit=explicit,
+        )
         if has_explicit_override:
             return merged
         return apply_bounded_synthesis_override(merged, query=query, skill_queries=skill_queries)
@@ -188,6 +202,12 @@ def resolve_rag_execution_hints(
         )
     except Exception:
         merged = merge_rag_execution_hints(explicit, heuristic)
+        merged = apply_answer_contract_override(
+            merged,
+            answer_contract=answer_contract,
+            heuristic=heuristic,
+            explicit=explicit,
+        )
         if has_explicit_override:
             return merged
         return apply_bounded_synthesis_override(merged, query=query, skill_queries=skill_queries)
@@ -209,6 +229,12 @@ def resolve_rag_execution_hints(
         )
 
     merged = merge_rag_execution_hints(explicit, skill_hints, heuristic)
+    merged = apply_answer_contract_override(
+        merged,
+        answer_contract=answer_contract,
+        heuristic=heuristic,
+        explicit=explicit,
+    )
     if has_explicit_override:
         return merged
     return apply_bounded_synthesis_override(merged, query=query, skill_queries=skill_queries)

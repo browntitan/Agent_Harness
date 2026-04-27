@@ -18,6 +18,14 @@ index a44756f..0cc3ed8 100644
 +			: null;
 +	};
 +
++	const isToolStatus = (status: any): boolean => {
++		return status?.agentic_tool_call?.version === 1;
++	};
++
++	const latestNonToolStatus = (history: any[] = []) => {
++		return [...history].reverse().find((status) => !isToolStatus(status)) ?? null;
++	};
++
 +	const isNewerStatus = (incoming: any, current: any): boolean => {
 +		if (!current) {
 +			return true;
@@ -78,7 +86,7 @@ index a44756f..0cc3ed8 100644
 -						message.statusHistory = [data];
 +					const history = Array.isArray(message?.statusHistory) ? message.statusHistory : [];
 +					message.statusHistory = upsertStatusHistory(history, data);
-+					if (isNewerStatus(data, message?.currentStatus)) {
++					if (!isToolStatus(data) && isNewerStatus(data, message?.currentStatus)) {
 +						message.currentStatus = data;
  					}
  				} else if (type === 'chat:completion') {
@@ -88,7 +96,7 @@ index a44756f..0cc3ed8 100644
  				(status) => status.action !== 'knowledge_search'
  			);
 +			responseMessage.currentStatus =
-+				responseMessage.statusHistory.at(-1) ?? responseMessage.currentStatus ?? null;
++				latestNonToolStatus(responseMessage.statusHistory) ?? responseMessage.currentStatus ?? null;
  		}
  
  		history.messages[responseMessage.id] = responseMessage;
@@ -124,6 +132,7 @@ index ab3bc89..55e3378 100644
 +					snapshot_timestamp_ms?: number;
 +				};
 +			};
++			agentic_tool_call?: Record<string, unknown>;
  		}[];
 +		currentStatus?: {
 +			done: boolean;
@@ -155,6 +164,7 @@ index ab3bc89..55e3378 100644
 +					snapshot_timestamp_ms?: number;
 +				};
 +			};
++			agentic_tool_call?: Record<string, unknown>;
 +		};
  		status?: {
  			done: boolean;
@@ -183,6 +193,7 @@ index ab3bc89..55e3378 100644
 +					snapshot_timestamp_ms?: number;
 +				};
 +			};
++			agentic_tool_call?: Record<string, unknown>;
  		};
  		done: boolean;
  		error?: boolean | { content: string };
@@ -211,37 +222,271 @@ diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory.svel
 index 5aaf774..aba6604 100644
 --- a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory.svelte
 +++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory.svelte
-@@ -4,6 +4,7 @@
+@@ -1,66 +1,85 @@
+ <script>
+ 	import { getContext } from 'svelte';
+ 	const i18n = getContext('i18n');
  
  	import StatusItem from './StatusHistory/StatusItem.svelte';
++	import ToolCallStack from './StatusHistory/ToolCallStack.svelte';
  	export let statusHistory = [];
 +	export let currentStatus = null;
  	export let expand = false;
  
  	let showHistory = true;
-@@ -17,8 +18,12 @@
+ 
+ 	$: if (expand) {
+ 		showHistory = true;
+ 	} else {
+ 		showHistory = false;
+ 	}
+ 
  	let history = [];
  	let status = null;
++	let visibleHistory = [];
++	let toolStatuses = [];
++	const isToolStatus = (status) => status?.agentic_tool_call?.version === 1;
++	const latestNonToolStatus = (items = []) =>
++		[...items].reverse().find((status) => !isToolStatus(status)) ?? null;
  
 -	$: if (history && history.length > 0) {
-+	$: if (currentStatus) {
+-		status = history.at(-1);
++	$: visibleHistory = (history ?? []).filter((status) => !isToolStatus(status));
++	$: toolStatuses = (history ?? []).filter((status) => isToolStatus(status));
++	$: if (currentStatus && !isToolStatus(currentStatus)) {
 +		status = currentStatus;
-+	} else if (history && history.length > 0) {
- 		status = history.at(-1);
++	} else if (visibleHistory && visibleHistory.length > 0) {
++		status = latestNonToolStatus(visibleHistory);
 +	} else {
 +		status = null;
  	}
  
  	$: if (
-@@ -29,7 +34,7 @@
+ 		statusHistory.length !== history.length ||
+ 		JSON.stringify(statusHistory) !== JSON.stringify(history)
+ 	) {
+ 		history = statusHistory;
  	}
  </script>
  
 -{#if history && history.length > 0}
-+{#if status}
++{#if status || toolStatuses.length > 0}
  	{#if status?.hidden !== true}
  		<div class="text-sm flex flex-col w-full">
- 			<button
+-			<button
+-				class="w-full"
+-				aria-label={$i18n.t('Toggle status history')}
+-				aria-expanded={showHistory}
+-				on:click={() => {
+-					showHistory = !showHistory;
+-				}}
+-			>
+-				<div class="flex items-start gap-2">
+-					<StatusItem {status} />
+-				</div>
+-			</button>
++			{#if status}
++				<button
++					class="w-full"
++					aria-label={$i18n.t('Toggle status history')}
++					aria-expanded={showHistory}
++					on:click={() => {
++						showHistory = !showHistory;
++					}}
++				>
++					<div class="flex items-start gap-2">
++						<StatusItem {status} />
++					</div>
++				</button>
++			{/if}
++
++			<ToolCallStack {toolStatuses} />
+ 
+ 			{#if showHistory}
+ 				<div class="flex flex-row">
+-					{#if history.length > 1}
++					{#if visibleHistory.length > 1}
+ 						<div class="w-full">
+-							{#each history as status, idx}
++							{#each visibleHistory as status, idx}
+ 								<div class="flex items-stretch gap-2 mb-1">
+ 									<div class=" ">
+ 										<div class="pt-3 px-1 mb-1.5">
+ 											<span class="relative flex size-1.5 rounded-full justify-center items-center">
+ 												<span
+ 													class="relative inline-flex size-1.5 rounded-full bg-gray-500 dark:bg-gray-400"
+ 												></span>
+ 											</span>
+ 										</div>
+-										{#if idx !== history.length - 1}
++										{#if idx !== visibleHistory.length - 1}
+ 											<div
+ 												class="w-[0.5px] ml-[6.5px] h-[calc(100%-14px)] bg-gray-300 dark:bg-gray-700"
+ 											/>
+ 										{/if}
+diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte
+new file mode 100644
+index 0000000..2b95f0a
+--- /dev/null
++++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte
+@@ -0,0 +1,144 @@
++<script>
++	export let toolStatuses = [];
++
++	let copiedKey = '';
++
++	const toolCall = (status) => status?.agentic_tool_call ?? {};
++	const toolKey = (status, index) =>
++		status?.status_id ?? toolCall(status)?.tool_call_id ?? `tool-${index}`;
++
++	const compact = (value, fallback = '') => {
++		if (value === null || value === undefined || value === '') {
++			return fallback;
++		}
++		if (typeof value === 'string') {
++			return value;
++		}
++		try {
++			return JSON.stringify(value, null, 2);
++		} catch {
++			return String(value);
++		}
++	};
++
++	const oneLine = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
++
++	const formatDuration = (value) => {
++		if (typeof value !== 'number' || !Number.isFinite(value)) {
++			return '';
++		}
++		if (value < 1000) {
++			return `${Math.max(0, Math.floor(value))}ms`;
++		}
++		return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
++	};
++
++	const statusLabel = (tool) => {
++		const status = String(tool?.status ?? '').toLowerCase();
++		if (status === 'running') {
++			return 'Running';
++		}
++		if (status === 'error') {
++			return 'Failed';
++		}
++		return 'Completed';
++	};
++
++	const statusClasses = (tool) => {
++		const status = String(tool?.status ?? '').toLowerCase();
++		if (status === 'error') {
++			return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200';
++		}
++		if (status === 'running') {
++			return 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/30 dark:text-sky-200';
++		}
++		return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-200';
++	};
++
++	const copyPayload = async (payload, key) => {
++		if (typeof navigator === 'undefined' || !navigator.clipboard) {
++			return;
++		}
++		await navigator.clipboard.writeText(compact(payload));
++		copiedKey = key;
++		window.setTimeout(() => {
++			if (copiedKey === key) {
++				copiedKey = '';
++			}
++		}, 1400);
++	};
++</script>
++
++{#if toolStatuses && toolStatuses.length > 0}
++	<div
++		class="mt-1 flex w-full flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-slate-50/70 p-2 dark:border-slate-800 dark:bg-slate-950/40"
++	>
++		<div class="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
++			Tool calls
++		</div>
++
++		{#each toolStatuses as toolStatus, idx (toolKey(toolStatus, idx))}
++			{@const tool = toolCall(toolStatus)}
++			{@const key = toolKey(toolStatus, idx)}
++			<details
++				class="group rounded-lg border border-slate-200 bg-white text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
++				open={tool?.status === 'running'}
++			>
++				<summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
++					<div class="min-w-0">
++						<div class="flex min-w-0 items-center gap-2">
++							<span class="truncate text-xs font-semibold">{tool?.tool_name ?? 'tool'}</span>
++							<span
++								class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold {statusClasses(tool)}"
++							>
++								{statusLabel(tool)}
++							</span>
++						</div>
++						<div class="truncate text-[11px] text-slate-500 dark:text-slate-400">
++							{oneLine(tool?.output_preview || tool?.error || tool?.input_preview || '')}
++						</div>
++					</div>
++					<div class="flex shrink-0 items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
++						{#if formatDuration(tool?.duration_ms)}
++							<span>{formatDuration(tool.duration_ms)}</span>
++						{/if}
++						<span class="transition group-open:rotate-90">&rsaquo;</span>
++					</div>
++				</summary>
++
++				<div class="flex flex-col gap-2 border-t border-slate-100 px-3 py-2 dark:border-slate-800">
++					{#if tool?.input_preview}
++						<div class="rounded-md bg-slate-50 p-2 dark:bg-slate-900">
++							<div class="mb-1 flex items-center justify-between gap-2">
++								<div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
++									Input
++								</div>
++								<button
++									type="button"
++									class="rounded border border-slate-200 px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
++									on:click|preventDefault|stopPropagation={() =>
++										copyPayload(tool?.input ?? tool?.input_preview, `${key}:input`)}
++								>
++									{copiedKey === `${key}:input` ? 'Copied' : 'Copy'}
++								</button>
++							</div>
++							<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5">{compact(tool?.input, tool?.input_preview)}</pre>
++						</div>
++					{/if}
++
++					{#if tool?.output_preview || tool?.error}
++						<div class="rounded-md bg-slate-50 p-2 dark:bg-slate-900">
++							<div class="mb-1 flex items-center justify-between gap-2">
++								<div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
++									{tool?.error ? 'Error' : 'Output'}
++								</div>
++								<button
++									type="button"
++									class="rounded border border-slate-200 px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
++									on:click|preventDefault|stopPropagation={() =>
++										copyPayload(tool?.error ?? tool?.output ?? tool?.output_preview, `${key}:output`)}
++								>
++									{copiedKey === `${key}:output` ? 'Copied' : 'Copy'}
++								</button>
++							</div>
++							<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5">{compact(tool?.error ?? tool?.output, tool?.output_preview)}</pre>
++						</div>
++					{/if}
++
++					{#if tool?.truncated}
++						<div class="text-[11px] text-amber-700 dark:text-amber-300">
++							Payload truncated. Full trace reference: {tool?.source_event_id}
++						</div>
++					{/if}
++				</div>
++			</details>
++		{/each}
++	</div>
++{/if}
 diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte
 index da234b6..4582f65 100644
 --- a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte

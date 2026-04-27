@@ -13,6 +13,8 @@ class Citation:
     location: str
     snippet: str
     collection_id: str = ""
+    url: str = ""
+    source_path: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -27,6 +29,8 @@ class Citation:
             location=str(raw.get("location") or ""),
             snippet=str(raw.get("snippet") or ""),
             collection_id=str(raw.get("collection_id") or ""),
+            url=str(raw.get("url") or ""),
+            source_path=str(raw.get("source_path") or ""),
         )
 
 
@@ -52,6 +56,10 @@ class RetrievalSummary:
     claim_ledger: Dict[str, Any] = field(default_factory=dict)
     verified_hops: List[str] = field(default_factory=list)
     retrieval_verification: Dict[str, Any] = field(default_factory=dict)
+    stage_timings_ms: Dict[str, float] = field(default_factory=dict)
+    budget_ms: int = 0
+    budget_exhausted: bool = False
+    slow_stages: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -87,6 +95,14 @@ class RetrievalSummary:
             claim_ledger=dict(raw.get("claim_ledger") or {}),
             verified_hops=[str(item) for item in (raw.get("verified_hops") or []) if str(item)],
             retrieval_verification=dict(raw.get("retrieval_verification") or {}),
+            stage_timings_ms={
+                str(key): float(value or 0.0)
+                for key, value in dict(raw.get("stage_timings_ms") or {}).items()
+                if str(key)
+            },
+            budget_ms=int(raw.get("budget_ms") or 0),
+            budget_exhausted=bool(raw.get("budget_exhausted", False)),
+            slow_stages=[str(item) for item in (raw.get("slow_stages") or []) if str(item)],
         )
 
 

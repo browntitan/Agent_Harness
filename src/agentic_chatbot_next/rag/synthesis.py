@@ -13,6 +13,30 @@ from agentic_chatbot_next.runtime.clarification import (
 )
 from agentic_chatbot_next.utils.json_utils import coerce_float, extract_json
 
+_EXTRACTIVE_STOPWORDS = {
+    "about",
+    "answer",
+    "briefly",
+    "cite",
+    "citations",
+    "does",
+    "fact",
+    "for",
+    "from",
+    "knowledge",
+    "search",
+    "source",
+    "sources",
+    "that",
+    "the",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+}
+
 
 def _answer_claims_missing_evidence(answer: str, warnings: Sequence[str]) -> bool:
     haystack = " ".join([answer, *warnings]).lower()
@@ -243,6 +267,82 @@ def _fallback_grounded_answer(question: str, evidence_docs: Sequence[Document], 
         "followups": _fallback_followups(question, source_titles),
         "warnings": [warning],
         "confidence_hint": 0.45 if used_citation_ids else 0.25,
+    }
+
+
+def _extractive_terms(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[A-Za-z0-9_]{3,}", str(value or "").casefold())
+        if token not in _EXTRACTIVE_STOPWORDS
+    }
+
+
+def _best_extractive_sentence(question: str, doc: Document) -> tuple[float, str]:
+    question_terms = _extractive_terms(question)
+    title_terms = _extractive_terms(
+        " ".join(
+            str((doc.metadata or {}).get(key) or "")
+            for key in ("title", "source_path", "section_title", "sheet_name", "cell_range")
+        )
+    )
+    text = " ".join(str(doc.page_content or "").split())
+    candidates = [item.strip() for item in re.split(r"(?<=[.!?])\s+|\n+", text) if item.strip()]
+    if not candidates and text:
+        candidates = [text]
+    best_score = 0.0
+    best_sentence = ""
+    for sentence in candidates[:24]:
+        sentence_terms = _extractive_terms(sentence)
+        overlap = len(question_terms & sentence_terms)
+        title_overlap = len(question_terms & title_terms)
+        value_bonus = 1 if re.search(r"\b(?:\d+(?:\.\d+)?%?|\$[\d,.]+|[A-Z][A-Za-z0-9_-]{2,})\b", sentence) else 0
+        score = float(overlap * 2 + title_overlap + value_bonus)
+        if score > best_score:
+            best_score = score
+            best_sentence = sentence
+    if not best_sentence:
+        best_sentence = _best_summary_snippet(text)
+    return best_score, best_sentence[:320]
+
+
+def build_extractive_grounded_answer(
+    question: str,
+    evidence_docs: Sequence[Document],
+    *,
+    warning: str = "BUDGET_EXTRACTIVE_FALLBACK",
+) -> Dict[str, Any]:
+    docs = _prepare_synthesis_docs(question, evidence_docs, limit=6)
+    ranked: list[tuple[float, Document, str]] = []
+    for doc in docs:
+        score, sentence = _best_extractive_sentence(question, doc)
+        if not sentence:
+            continue
+        metadata = doc.metadata or {}
+        score += float(metadata.get("_adaptive_score") or 0.0) * 0.05
+        score += _title_overlap_score(question, doc) * 0.5
+        ranked.append((score, doc, sentence))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    used_citation_ids: list[str] = []
+    lines: list[str] = []
+    for _score, doc, sentence in ranked[:3]:
+        citation_id = str((doc.metadata or {}).get("chunk_id") or "").strip()
+        if not citation_id:
+            continue
+        if citation_id in used_citation_ids:
+            continue
+        suffix = f" ({citation_id})"
+        lines.append(f"{sentence}{suffix}")
+        used_citation_ids.append(citation_id)
+    if not used_citation_ids:
+        return _fallback_grounded_answer(question, docs, warning=warning)
+    answer = lines[0] if len(lines) == 1 else "\n".join(f"- {line}" for line in lines)
+    return {
+        "answer": answer,
+        "used_citation_ids": used_citation_ids,
+        "followups": [],
+        "warnings": [warning],
+        "confidence_hint": 0.55,
     }
 
 

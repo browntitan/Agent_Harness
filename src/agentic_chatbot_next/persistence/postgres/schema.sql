@@ -196,7 +196,15 @@ CREATE TABLE IF NOT EXISTS documents (
     file_type          TEXT,                    -- 'pdf' | 'txt' | 'md' | 'docx'
     doc_structure_type TEXT DEFAULT 'general',  -- see chunk_type values below
     source_display_path TEXT DEFAULT '',
-    source_identity    TEXT DEFAULT ''
+    source_identity    TEXT DEFAULT '',
+    source_metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_uri         TEXT DEFAULT '',
+    source_storage_backend TEXT DEFAULT 'local',
+    source_object_bucket TEXT DEFAULT '',
+    source_object_key  TEXT DEFAULT '',
+    source_etag        TEXT DEFAULT '',
+    source_size_bytes  BIGINT DEFAULT 0,
+    source_content_type TEXT DEFAULT ''
 );
 
 -- Backfill / migrate existing databases created before tenant_id.
@@ -220,6 +228,30 @@ SET source_identity = COALESCE(NULLIF(source_path, ''), title)
 WHERE source_identity IS NULL OR source_identity = '';
 ALTER TABLE documents ALTER COLUMN source_identity SET DEFAULT '';
 ALTER TABLE documents ALTER COLUMN source_identity SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_metadata JSONB;
+UPDATE documents SET source_metadata = '{}'::jsonb WHERE source_metadata IS NULL;
+ALTER TABLE documents ALTER COLUMN source_metadata SET DEFAULT '{}'::jsonb;
+ALTER TABLE documents ALTER COLUMN source_metadata SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_uri TEXT DEFAULT '';
+UPDATE documents
+SET source_uri = CASE
+    WHEN source_path LIKE '%://%' THEN source_path
+    ELSE 'file://' || COALESCE(source_path, '')
+END
+WHERE (source_uri IS NULL OR source_uri = '') AND COALESCE(source_path, '') <> '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_storage_backend TEXT DEFAULT 'local';
+UPDATE documents
+SET source_storage_backend = CASE
+    WHEN source_uri LIKE 's3://%' THEN 's3'
+    WHEN source_uri LIKE 'az://%' OR source_uri LIKE 'abfs://%' THEN 'azure_blob'
+    ELSE 'local'
+END
+WHERE source_storage_backend IS NULL OR source_storage_backend = '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_object_bucket TEXT DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_object_key TEXT DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_etag TEXT DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_size_bytes BIGINT DEFAULT 0;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_content_type TEXT DEFAULT '';
 
 ALTER TABLE collections ADD COLUMN IF NOT EXISTS maintenance_policy TEXT;
 UPDATE collections
@@ -310,6 +342,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     cell_range     TEXT,
     content        TEXT NOT NULL,
     embedding      vector(__EMBEDDING_DIM__),
+    metadata_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
     ts             tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     chunk_type     TEXT DEFAULT 'general'
 );
@@ -331,6 +364,10 @@ ALTER TABLE chunks ADD COLUMN IF NOT EXISTS sheet_name TEXT;
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS row_start INTEGER;
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS row_end INTEGER;
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS cell_range TEXT;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata_json JSONB;
+UPDATE chunks SET metadata_json = '{}'::jsonb WHERE metadata_json IS NULL;
+ALTER TABLE chunks ALTER COLUMN metadata_json SET DEFAULT '{}'::jsonb;
+ALTER TABLE chunks ALTER COLUMN metadata_json SET NOT NULL;
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS chunks_doc_id_idx
@@ -358,6 +395,9 @@ CREATE INDEX IF NOT EXISTS chunks_clause_number_idx
     ON chunks(tenant_id, doc_id, clause_number)
     WHERE clause_number IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS chunks_metadata_json_gin_idx
+    ON chunks USING GIN(metadata_json);
+
 -- ------------------------------------------------------------
 -- requirement_statements: persisted statement-level requirement inventory
 -- ------------------------------------------------------------
@@ -380,10 +420,31 @@ CREATE TABLE IF NOT EXISTS requirement_statements (
     char_start                 INTEGER NOT NULL DEFAULT 0,
     char_end                   INTEGER NOT NULL DEFAULT 0,
     multi_requirement          BOOLEAN NOT NULL DEFAULT FALSE,
-    extractor_version          TEXT NOT NULL DEFAULT 'requirements_v1',
+    source_excerpt             TEXT NOT NULL DEFAULT '',
+    source_structure           TEXT NOT NULL DEFAULT '',
+    binding_strength           TEXT NOT NULL DEFAULT '',
+    confidence                 DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    risk_label                 TEXT NOT NULL DEFAULT '',
+    risk_rationale             TEXT NOT NULL DEFAULT '',
+    dedupe_group_id            TEXT NOT NULL DEFAULT '',
+    duplicate_count            INTEGER NOT NULL DEFAULT 1,
+    merged_chunk_ids           TEXT NOT NULL DEFAULT '',
+    merged_source_locations    TEXT NOT NULL DEFAULT '',
+    extractor_version          TEXT NOT NULL DEFAULT 'requirements_v2',
     extractor_mode             TEXT NOT NULL DEFAULT 'mandatory',
     created_at                 TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS source_excerpt TEXT NOT NULL DEFAULT '';
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS source_structure TEXT NOT NULL DEFAULT '';
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS binding_strength TEXT NOT NULL DEFAULT '';
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS risk_label TEXT NOT NULL DEFAULT '';
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS risk_rationale TEXT NOT NULL DEFAULT '';
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS dedupe_group_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS duplicate_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS merged_chunk_ids TEXT NOT NULL DEFAULT '';
+ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS merged_source_locations TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS requirement_statements_tenant_doc_idx
     ON requirement_statements(tenant_id, doc_id, statement_index);
@@ -729,6 +790,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS memory_tenant_session_key_uniq
 
 CREATE INDEX IF NOT EXISTS memory_tenant_session_idx
     ON memory(tenant_id, session_id);
+
+-- ------------------------------------------------------------
+-- per-user capability toggles
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS capability_profiles (
+    tenant_id       TEXT NOT NULL DEFAULT 'local-dev',
+    user_id         TEXT NOT NULL,
+    profile_json    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (tenant_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS capability_profiles_updated_idx
+    ON capability_profiles(tenant_id, updated_at DESC);
 
 -- ------------------------------------------------------------
 -- managed memory v2: typed hybrid memory records, observations, episodes

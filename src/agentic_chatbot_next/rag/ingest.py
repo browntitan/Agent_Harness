@@ -22,6 +22,14 @@ from agentic_chatbot_next.rag.requirements import (
     build_requirement_statement_records,
     supports_requirements_extraction,
 )
+from agentic_chatbot_next.rag.metadata_extractor import (
+    INDEX_METADATA_VERSION,
+    DocumentIndexMetadata,
+    build_chunk_index_metadata,
+    build_document_index_metadata,
+    normalize_metadata_profile,
+    summarize_index_metadata,
+)
 from agentic_chatbot_next.rag.structure_detector import (
     PROCESS_FLOW_PATTERN,
     REQUIREMENT_PATTERN,
@@ -1240,12 +1248,20 @@ def _load_documents(path: Path, settings: Settings) -> List[Document]:
     return TextLoader(str(path), encoding="utf-8", autodetect_encoding=True).load()
 
 
+def _chunk_size(settings: Settings) -> int:
+    return int(getattr(settings, "chunk_size", 900) or 900)
+
+
+def _chunk_overlap(settings: Settings) -> int:
+    return int(getattr(settings, "chunk_overlap", 150) or 150)
+
+
 def _general_split(settings: Settings, docs: List[Document]) -> List[Document]:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
+        chunk_size=_chunk_size(settings),
+        chunk_overlap=_chunk_overlap(settings),
         add_start_index=True,
     )
     return splitter.split_documents(docs)
@@ -1265,8 +1281,8 @@ def _split_with_structure(
             chunks.extend(
                 clause_split(
                     doc,
-                    max_clause_chars=settings.chunk_size * 2,
-                    overlap_chars=settings.chunk_overlap,
+                    max_clause_chars=_chunk_size(settings) * 2,
+                    overlap_chars=_chunk_overlap(settings),
                 )
             )
     else:
@@ -1287,6 +1303,7 @@ def _build_chunk_records(
     doc_id: str,
     *,
     collection_id: str,
+    document_index_metadata: DocumentIndexMetadata | dict[str, Any] | None = None,
 ) -> List[ChunkRecord]:
     records: List[ChunkRecord] = []
     seen_indices: set[int] = set()
@@ -1301,9 +1318,20 @@ def _build_chunk_records(
             while chunk_index in seen_indices:
                 chunk_index += 1
         seen_indices.add(chunk_index)
+        chunk_id = f"{doc_id}#chunk{chunk_index:04d}"
+        chunk_metadata = (
+            build_chunk_index_metadata(
+                chunk,
+                chunk_id=chunk_id,
+                chunk_index=chunk_index,
+                document_metadata=document_index_metadata,
+            ).to_dict()
+            if document_index_metadata is not None
+            else {}
+        )
         records.append(
             ChunkRecord(
-                chunk_id=f"{doc_id}#chunk{chunk_index:04d}",
+                chunk_id=chunk_id,
                 doc_id=doc_id,
                 collection_id=collection_id,
                 chunk_index=chunk_index,
@@ -1316,10 +1344,35 @@ def _build_chunk_records(
                 row_start=metadata.get("row_start"),
                 row_end=metadata.get("row_end"),
                 cell_range=metadata.get("cell_range") or None,
+                metadata_json=chunk_metadata,
+                embedding_text=_metadata_embedding_text(chunk.page_content, chunk_metadata),
                 embedding=None,
             )
         )
     return records
+
+
+def _metadata_embedding_text(content: str, metadata: dict[str, Any]) -> str:
+    if not metadata or str(metadata.get("metadata_profile") or "") == "off":
+        return content
+    location = dict(metadata.get("location") or {})
+    parts: list[str] = []
+    for label, value in (
+        ("type", metadata.get("document_type")),
+        ("chunk", metadata.get("chunk_type")),
+        ("tags", ", ".join(str(tag) for tag in list(metadata.get("tags") or [])[:6])),
+        ("section", " > ".join(str(item) for item in list(metadata.get("section_path") or [])[:4])),
+        ("clause", location.get("clause_number")),
+        ("page", location.get("page_number")),
+        ("sheet", location.get("sheet_name")),
+        ("cells", location.get("cell_range")),
+    ):
+        text = str(value or "").strip()
+        if text:
+            parts.append(f"{label}: {text}")
+    if not parts:
+        return content
+    return f"[index metadata] {' | '.join(parts)}\n\n{content}"
 
 
 def _document_record_from_value(record: Any) -> DocumentRecord:
@@ -1337,6 +1390,14 @@ def _document_record_from_value(record: Any) -> DocumentRecord:
         doc_structure_type=str(getattr(record, "doc_structure_type", "") or "general"),
         source_display_path=str(getattr(record, "source_display_path", "") or ""),
         source_identity=str(getattr(record, "source_identity", "") or ""),
+        source_metadata=dict(getattr(record, "source_metadata", {}) or {}),
+        source_uri=str(getattr(record, "source_uri", "") or ""),
+        source_storage_backend=str(getattr(record, "source_storage_backend", "") or ""),
+        source_object_bucket=str(getattr(record, "source_object_bucket", "") or ""),
+        source_object_key=str(getattr(record, "source_object_key", "") or ""),
+        source_etag=str(getattr(record, "source_etag", "") or ""),
+        source_size_bytes=int(getattr(record, "source_size_bytes", 0) or 0),
+        source_content_type=str(getattr(record, "source_content_type", "") or ""),
     )
 
 
@@ -1452,6 +1513,88 @@ def _expand_ingest_paths(paths: Iterable[Path]) -> List[Path]:
     return resolved
 
 
+def _record_index_metadata_matches(record: Any, *, metadata_profile: str) -> bool:
+    profile = normalize_metadata_profile(metadata_profile)
+    source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    index_metadata = source_metadata.get("index_metadata")
+    if not isinstance(index_metadata, dict):
+        return False
+    return (
+        str(index_metadata.get("extractor_version") or "") == INDEX_METADATA_VERSION
+        and str(index_metadata.get("metadata_profile") or "") == profile
+    )
+
+
+def preview_path_index_metadata(
+    settings: Settings,
+    path: Path,
+    *,
+    metadata_profile: str = "auto",
+    metadata_enrichment: str = "deterministic",
+    source_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return deterministic indexing metadata for a path without writing records."""
+    resolved_path = Path(path).expanduser().resolve()
+    raw_docs = _load_documents(resolved_path, settings)
+    if not raw_docs:
+        return {
+            "path": str(resolved_path),
+            "title": resolved_path.name,
+            "metadata_summary": summarize_index_metadata([], metadata_profile=metadata_profile).to_dict(),
+            "document_metadata": {},
+            "chunk_count": 0,
+            "warnings": ["No extractable content was found."],
+        }
+    for doc in raw_docs:
+        doc.metadata = {
+            **(doc.metadata or {}),
+            "title": resolved_path.name,
+            "source_path": str(resolved_path),
+            "file_type": resolved_path.suffix.lstrip(".").lower(),
+        }
+    full_text = " ".join(doc.page_content for doc in raw_docs)
+    structure = detect_structure(full_text)
+    document_metadata = build_document_index_metadata(
+        path=resolved_path,
+        raw_docs=raw_docs,
+        structure=structure,
+        metadata_profile=metadata_profile,
+        metadata_enrichment=metadata_enrichment,
+        source_metadata=source_metadata,
+    )
+    chunks = _split_with_structure(settings, raw_docs, structure)
+    chunk_metadata = [
+        build_chunk_index_metadata(
+            chunk,
+            chunk_id=f"preview#chunk{index:04d}",
+            chunk_index=index,
+            document_metadata=document_metadata,
+        )
+        for index, chunk in enumerate(chunks[:500])
+    ]
+    return {
+        "path": str(resolved_path),
+        "title": resolved_path.name,
+        "document_metadata": document_metadata.to_dict(),
+        "metadata_summary": summarize_index_metadata(
+            [document_metadata],
+            chunk_metadata,
+            metadata_profile=metadata_profile,
+        ).to_dict(),
+        "chunk_count": len(chunks),
+        "preview_chunks": [
+            {
+                "chunk_index": index,
+                "chunk_type": str((chunk.metadata or {}).get("chunk_type") or "general"),
+                "section_title": str((chunk.metadata or {}).get("section_title") or ""),
+                "text_preview": str(chunk.page_content or "")[:500],
+            }
+            for index, chunk in enumerate(chunks[:20])
+        ],
+        "warnings": list(document_metadata.warnings),
+    }
+
+
 def ingest_paths(
     settings: Settings,
     stores: KnowledgeStores,
@@ -1462,15 +1605,14 @@ def ingest_paths(
     collection_id: str | None = None,
     source_display_paths: dict[str, str] | None = None,
     source_identities: dict[str, str] | None = None,
+    source_metadata_by_path: dict[str, dict[str, Any]] | None = None,
+    metadata_profile: str = "auto",
+    metadata_enrichment: str = "deterministic",
 ) -> List[str]:
-    object_store_backend = str(getattr(settings, "object_store_backend", "local")).lower()
-    if object_store_backend != "local":
-        raise NotImplementedError(
-            f"OBJECT_STORE_BACKEND={object_store_backend!r} is not implemented for ingest yet."
-        )
-
     ingested_doc_ids: List[str] = []
     effective_collection_id = collection_id or getattr(settings, "default_collection_id", "default")
+    normalized_metadata_profile = normalize_metadata_profile(metadata_profile)
+    normalized_metadata_enrichment = str(metadata_enrichment or "deterministic").strip().lower() or "deterministic"
     if getattr(stores, "collection_store", None) is not None:
         stores.collection_store.ensure_collection(
             tenant_id=tenant_id,
@@ -1495,10 +1637,15 @@ def ingest_paths(
     configured_paths_by_title = _configured_paths_by_title(settings) if source_type == "kb" else {}
     resolved_display_paths = _resolve_path_overrides(source_display_paths)
     resolved_source_identities = _resolve_path_overrides(source_identities)
+    resolved_source_metadata = {
+        str(Path(key).expanduser().resolve()): dict(value or {})
+        for key, value in dict(source_metadata_by_path or {}).items()
+        if str(key).strip() and isinstance(value, dict)
+    }
     for path in _expand_ingest_paths(paths):
         file_hash = _file_hash(path)
         title = path.name
-        source_key = str(path)
+        source_key = str(path.resolve())
         source_display_path = resolved_display_paths.get(source_key) or title
         provided_source_identity = resolved_source_identities.get(source_key) or ""
         candidate_identity = resolve_candidate_source_identity(
@@ -1507,6 +1654,21 @@ def ingest_paths(
             configured_paths_by_title=configured_paths_by_title,
             source_identity=provided_source_identity,
         )
+        source_metadata = {
+            **dict(resolved_source_metadata.get(source_key) or {}),
+            "source_display_path": source_display_path,
+            "source_identity": candidate_identity,
+        }
+        blob_ref = source_metadata.get("blob_ref") if isinstance(source_metadata.get("blob_ref"), dict) else {}
+        source_uri = str(source_metadata.get("source_uri") or blob_ref.get("uri") or "").strip()
+        source_storage_backend = str(blob_ref.get("backend") or "").strip()
+        if not source_storage_backend:
+            source_storage_backend = "local"
+        stored_source_path = str(path)
+        if source_uri and source_storage_backend != "local":
+            stored_source_path = source_uri
+        elif source_storage_backend == "local" and blob_ref.get("key"):
+            stored_source_path = str(blob_ref.get("key") or path)
         same_source_records = [
             record
             for record in existing_records
@@ -1529,12 +1691,13 @@ def ingest_paths(
                 if str(getattr(item, "doc_id", "") or "") != str(getattr(record, "doc_id", "") or "")
             ]
         if active_existing is not None and str(getattr(active_existing, "content_hash", "") or "") == file_hash:
-            _sync_requirement_inventory_for_document(
-                stores,
-                _document_record_from_value(active_existing),
-                tenant_id=tenant_id,
-            )
-            continue
+            if _record_index_metadata_matches(active_existing, metadata_profile=normalized_metadata_profile):
+                _sync_requirement_inventory_for_document(
+                    stores,
+                    _document_record_from_value(active_existing),
+                    tenant_id=tenant_id,
+                )
+                continue
         doc_id = make_doc_id(
             source_type=source_type,
             source_identity=candidate_identity,
@@ -1555,23 +1718,44 @@ def ingest_paths(
                 if str(getattr(item, "doc_id", "") or "") != str(getattr(active_existing, "doc_id", "") or "")
             ]
 
+        full_text = " ".join(doc.page_content for doc in raw_docs)
+        structure = detect_structure(full_text)
+        document_index_metadata = build_document_index_metadata(
+            path=path,
+            raw_docs=raw_docs,
+            structure=structure,
+            metadata_profile=normalized_metadata_profile,
+            metadata_enrichment=normalized_metadata_enrichment,
+            source_metadata=source_metadata,
+        )
+        source_metadata = {
+            **source_metadata,
+            "metadata_profile": document_index_metadata.metadata_profile,
+            "metadata_enrichment": document_index_metadata.metadata_enrichment,
+            "metadata_extractor_version": document_index_metadata.extractor_version,
+            "index_metadata": document_index_metadata.to_dict(),
+        }
         for doc in raw_docs:
             doc.metadata = {
                 **(doc.metadata or {}),
                 "doc_id": doc_id,
                 "title": title,
                 "source_type": source_type,
-                "source_path": str(path),
+                "source_path": stored_source_path,
                 "source_display_path": source_display_path,
                 "source_identity": candidate_identity,
+                "source_metadata": source_metadata,
                 "collection_id": effective_collection_id,
                 "file_type": path.suffix.lstrip(".").lower(),
             }
 
-        full_text = " ".join(doc.page_content for doc in raw_docs)
-        structure = detect_structure(full_text)
         chunks = _split_with_structure(settings, raw_docs, structure)
-        chunk_records = _build_chunk_records(chunks, doc_id, collection_id=effective_collection_id)
+        chunk_records = _build_chunk_records(
+            chunks,
+            doc_id,
+            collection_id=effective_collection_id,
+            document_index_metadata=document_index_metadata,
+        )
         document_record = DocumentRecord(
             doc_id=doc_id,
             tenant_id=tenant_id,
@@ -1579,13 +1763,21 @@ def ingest_paths(
             title=title,
             source_type=source_type,
             content_hash=file_hash,
-            source_path=str(path),
+            source_path=stored_source_path,
             num_chunks=len(chunk_records),
             ingested_at=dt.datetime.now(dt.timezone.utc).isoformat(),
             file_type=path.suffix.lstrip(".").lower(),
-            doc_structure_type=structure.doc_structure_type,
+            doc_structure_type=document_index_metadata.doc_structure_type,
             source_display_path=source_display_path,
             source_identity=candidate_identity,
+            source_metadata=source_metadata,
+            source_uri=source_uri or stored_source_path,
+            source_storage_backend=source_storage_backend,
+            source_object_bucket=str(blob_ref.get("bucket") or blob_ref.get("container") or ""),
+            source_object_key=str(blob_ref.get("key") or ""),
+            source_etag=str(blob_ref.get("etag") or ""),
+            source_size_bytes=int(blob_ref.get("size") or 0),
+            source_content_type=str(blob_ref.get("content_type") or source_metadata.get("mime_type") or ""),
         )
         stores.doc_store.upsert_document(document_record)
         try:

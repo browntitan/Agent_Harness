@@ -19,6 +19,12 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote_to_bytes, urlparse
 
 import httpx
+from agentic_chatbot_next.capabilities import (
+    CapabilityProfile,
+    build_capability_catalog,
+    resolve_effective_capabilities,
+    save_capability_profile,
+)
 from agentic_chatbot_next.authz import (
     access_summary_allows,
     access_summary_allowed_ids,
@@ -72,6 +78,7 @@ from agentic_chatbot_next.providers import (
 from agentic_chatbot_next.app.service import RuntimeService
 from agentic_chatbot_next.context import RequestContext, build_local_context
 from agentic_chatbot_next.rag import ingest_paths, load_stores
+from agentic_chatbot_next.rag.ingest import preview_path_index_metadata
 from agentic_chatbot_next.rag.retrieval_scope import merge_scope_metadata, resolve_upload_collection_id
 from agentic_chatbot_next.runtime.artifacts import latest_assistant_artifacts, normalize_artifact
 from agentic_chatbot_next.runtime.context import RuntimePaths, filesystem_key
@@ -81,6 +88,7 @@ from agentic_chatbot_next.runtime.registry_diagnostics import build_runtime_erro
 from agentic_chatbot_next.runtime.transcript_store import RuntimeTranscriptStore
 from agentic_chatbot_next.sandbox.workspace import SessionWorkspace
 from agentic_chatbot_next.session import ChatSession
+from agentic_chatbot_next.storage import blob_ref_from_record, build_blob_store
 from agentic_chatbot_next.skills.dependency_graph import (
     build_dependency_error_payload,
     build_record_activation_validation,
@@ -122,6 +130,34 @@ async def _stream_upload_to_path(file: UploadFile, dest: Path, *, max_bytes: int
                 raise RuntimeError(f"{file.filename or dest.name} exceeds the upload limit of {max_bytes} bytes")
             handle.write(chunk)
     return written
+
+
+def _safe_blob_key_part(value: str) -> str:
+    parts = [
+        part
+        for part in str(value or "").replace("\\", "/").split("/")
+        if part and part not in {".", ".."}
+    ]
+    return "/".join(parts)
+
+
+def _upload_object_key(*, ctx: RequestContext, collection_id: str, filename: str, index: int) -> str:
+    safe_filename = Path(filename or f"upload_{index}").name or f"upload_{index}"
+    return "/".join(
+        part
+        for part in [
+            "tenants",
+            _safe_blob_key_part(ctx.tenant_id) or "default",
+            "collections",
+            _safe_blob_key_part(collection_id) or "default",
+            "conversations",
+            _safe_blob_key_part(ctx.conversation_id) or "default",
+            _safe_blob_key_part(ctx.request_id) or uuid.uuid4().hex,
+            f"{index:04d}_{uuid.uuid4().hex}",
+            safe_filename,
+        ]
+        if part
+    )
 
 
 class OpenAIMessage(BaseModel):
@@ -210,6 +246,12 @@ class IngestDocumentsRequest(BaseModel):
     paths: List[str] = Field(default_factory=list)
     source_type: str = "upload"
     collection_id: Optional[str] = None
+    source_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    source_display_paths: Dict[str, str] = Field(default_factory=dict)
+    source_identities: Dict[str, str] = Field(default_factory=dict)
+    metadata_profile: str = "auto"
+    metadata_enrichment: str = "deterministic"
+    index_preview: bool = False
     conversation_id: Optional[str] = Field(
         default=None,
         description=(
@@ -218,6 +260,169 @@ class IngestDocumentsRequest(BaseModel):
             "access them at /workspace/<filename> without a separate load_dataset call."
         ),
     )
+
+
+def _index_metadata_summary_for_doc_ids(
+    stores: object,
+    tenant_id: str,
+    doc_ids: List[str],
+    *,
+    metadata_profile: str = "auto",
+) -> Dict[str, Any]:
+    structure_counts: Dict[str, int] = {}
+    tag_counts: Dict[str, int] = {}
+    parser_counts: Dict[str, int] = {}
+    warnings: List[str] = []
+    chunk_count = 0
+    doc_store = getattr(stores, "doc_store", None)
+    for doc_id in doc_ids:
+        if doc_store is None:
+            continue
+        try:
+            record = doc_store.get_document(str(doc_id), tenant_id)
+        except Exception:
+            record = None
+        if record is None:
+            continue
+        source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+        index_metadata = source_metadata.get("index_metadata")
+        if not isinstance(index_metadata, dict):
+            continue
+        structure = str(index_metadata.get("doc_structure_type") or getattr(record, "doc_structure_type", "") or "general")
+        structure_counts[structure] = int(structure_counts.get(structure, 0)) + 1
+        chunk_count += int(getattr(record, "num_chunks", 0) or 0)
+        for tag in list(index_metadata.get("tags") or []):
+            text = str(tag or "")
+            tag_counts[text] = int(tag_counts.get(text, 0)) + 1
+        for parser in list(index_metadata.get("parser_chain") or []):
+            text = str(parser or "")
+            parser_counts[text] = int(parser_counts.get(text, 0)) + 1
+        for warning in list(index_metadata.get("warnings") or []):
+            text = str(warning or "").strip()
+            if text and text not in warnings:
+                warnings.append(text)
+    return {
+        "extractor_version": "document_index_metadata_v1",
+        "metadata_profile": str(metadata_profile or "auto"),
+        "document_count": sum(structure_counts.values()),
+        "chunk_count": chunk_count,
+        "structure_type_counts": dict(sorted(structure_counts.items())),
+        "tag_counts": dict(sorted(tag_counts.items())),
+        "parser_counts": dict(sorted(parser_counts.items())),
+        "warnings": warnings[:20],
+    }
+
+
+def _merge_index_metadata_summaries(
+    summaries: Iterable[Dict[str, Any]],
+    *,
+    metadata_profile: str = "auto",
+) -> Dict[str, Any]:
+    structure_counts: Dict[str, int] = {}
+    tag_counts: Dict[str, int] = {}
+    parser_counts: Dict[str, int] = {}
+    warnings: List[str] = []
+    document_count = 0
+    chunk_count = 0
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        document_count += int(summary.get("document_count") or 0)
+        chunk_count += int(summary.get("chunk_count") or 0)
+        for key, target in (
+            ("structure_type_counts", structure_counts),
+            ("tag_counts", tag_counts),
+            ("parser_counts", parser_counts),
+        ):
+            for item_key, item_value in dict(summary.get(key) or {}).items():
+                text = str(item_key or "")
+                if text:
+                    target[text] = int(target.get(text, 0)) + int(item_value or 0)
+        for warning in list(summary.get("warnings") or []):
+            text = str(warning or "").strip()
+            if text and text not in warnings:
+                warnings.append(text)
+    return {
+        "extractor_version": "document_index_metadata_v1",
+        "metadata_profile": str(metadata_profile or "auto"),
+        "document_count": document_count,
+        "chunk_count": chunk_count,
+        "structure_type_counts": dict(sorted(structure_counts.items())),
+        "tag_counts": dict(sorted(tag_counts.items())),
+        "parser_counts": dict(sorted(parser_counts.items())),
+        "warnings": warnings[:20],
+    }
+
+
+def _source_metadata_for_path(source_metadata: Dict[str, Dict[str, Any]], path: Path) -> Dict[str, Any]:
+    candidates = [str(path), str(path.resolve())]
+    for key in candidates:
+        value = source_metadata.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def _preview_index_metadata_for_paths(
+    settings: Any,
+    paths: Iterable[Path],
+    *,
+    metadata_profile: str = "auto",
+    metadata_enrichment: str = "deterministic",
+    source_metadata_by_path: Dict[str, Dict[str, Any]] | None = None,
+    source_display_paths: Dict[str, str] | None = None,
+) -> Dict[str, Any]:
+    source_metadata = dict(source_metadata_by_path or {})
+    source_display = dict(source_display_paths or {})
+    files: List[Dict[str, Any]] = []
+    summaries: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for path in paths:
+        path_key = str(path.resolve())
+        display_path = str(source_display.get(path_key) or source_display.get(str(path)) or path.name)
+        try:
+            preview = preview_path_index_metadata(
+                settings,
+                path,
+                metadata_profile=metadata_profile,
+                metadata_enrichment=metadata_enrichment,
+                source_metadata=_source_metadata_for_path(source_metadata, path),
+            )
+            summary = dict(preview.get("metadata_summary") or {})
+            summaries.append(summary)
+            files.append(
+                {
+                    "display_path": display_path,
+                    "filename": Path(display_path).name,
+                    "source_path": path_key,
+                    "outcome": "previewed",
+                    "doc_ids": [],
+                    "metadata_summary": summary,
+                    "index_preview": preview,
+                }
+            )
+        except Exception as exc:
+            message = str(exc)
+            errors.append(message)
+            files.append(
+                {
+                    "display_path": display_path,
+                    "filename": Path(display_path).name,
+                    "source_path": path_key,
+                    "outcome": "failed",
+                    "doc_ids": [],
+                    "error": message,
+                }
+            )
+    return {
+        "preview": True,
+        "status": "preview" if not errors else "partial",
+        "ingested_count": 0,
+        "doc_ids": [],
+        "files": files,
+        "errors": errors,
+        "metadata_summary": _merge_index_metadata_summaries(summaries, metadata_profile=metadata_profile),
+    }
 
 
 class SkillPackUpsertRequest(BaseModel):
@@ -292,6 +497,21 @@ class GraphQueryRequest(BaseModel):
     methods: List[str] = Field(default_factory=list)
     limit: int = Field(default=8, ge=1, le=20)
     top_k_graphs: int = Field(default=3, ge=1, le=8)
+
+
+class CapabilityProfileRequest(BaseModel):
+    enabled_tools: List[str] = Field(default_factory=list)
+    disabled_tools: List[str] = Field(default_factory=list)
+    enabled_tool_groups: List[str] = Field(default_factory=list)
+    enabled_skill_pack_ids: List[str] = Field(default_factory=list)
+    disabled_skill_pack_ids: List[str] = Field(default_factory=list)
+    enabled_mcp_tool_ids: List[str] = Field(default_factory=list)
+    enabled_agents: List[str] = Field(default_factory=list)
+    enabled_collections: List[str] = Field(default_factory=list)
+    enabled_plugins: List[str] = Field(default_factory=list)
+    permission_mode: str = "default"
+    fast_path_policy: str = "inventory_plus_simple"
+    plugin_preferences: Dict[str, bool] = Field(default_factory=dict)
 
 
 class Runtime:
@@ -518,6 +738,42 @@ def _require_gateway_bearer_auth(settings: Settings, authorization: Optional[str
     if is_authorized_bearer_token(authorization, settings.gateway_shared_bearer_token):
         return
     raise HTTPException(status_code=401, detail="Missing or invalid bearer token.")
+
+
+def _safe_document_source_path(settings: Settings, raw_path: str) -> Path:
+    if not str(raw_path or "").strip():
+        raise HTTPException(status_code=404, detail="Document source path is not available.")
+    try:
+        source_path = Path(raw_path).expanduser().resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Document source path is invalid.") from exc
+    roots: List[Path] = []
+    for candidate in [
+        getattr(settings, "kb_dir", None),
+        *list(getattr(settings, "kb_extra_dirs", ()) or ()),
+        getattr(settings, "uploads_dir", None),
+        getattr(settings, "data_dir", None),
+    ]:
+        if candidate is None:
+            continue
+        try:
+            roots.append(Path(candidate).expanduser().resolve(strict=False))
+        except Exception:
+            continue
+    if roots and not any(source_path == root or root in source_path.parents for root in roots):
+        raise HTTPException(status_code=403, detail="Document source path is outside configured source roots.")
+    if not source_path.exists() or not source_path.is_file():
+        raise HTTPException(status_code=404, detail="Document source file is no longer available.")
+    return source_path
+
+
+def _document_source_media_type(record: Any, source_path: Path) -> str:
+    source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    explicit = str(source_metadata.get("mime_type") or source_metadata.get("content_type") or "").strip()
+    if explicit:
+        return explicit
+    guessed, _ = mimetypes.guess_type(str(source_path))
+    return guessed or "application/octet-stream"
 
 
 def _serialize_mailbox_message(message: Any) -> Dict[str, Any]:
@@ -1068,6 +1324,9 @@ def _stream_with_progress(
             break
         if event is None:  # sentinel: processing complete
             break
+        if isinstance(event, dict) and isinstance(event.get("agentic_tool_call"), dict):
+            yield _named_sse_event("status", event)
+            continue
         yield f"event: progress\ndata: {_json_dumps(event)}\n\n"
         if tracker is not None:
             for snapshot in tracker.progress_snapshots(event, time.monotonic()):
@@ -1104,7 +1363,15 @@ def _stream_with_progress(
         yield f"event: artifacts\ndata: {_json_dumps(artifacts)}\n\n"
     metadata = latest_assistant_metadata(
         getattr(session, "messages", []) or [],
-        keys=["job_id", "long_output", "turn_outcome", "clarification"],
+        keys=[
+            "job_id",
+            "long_output",
+            "turn_outcome",
+            "clarification",
+            "rag_retrieval_summary",
+            "retrieval_mode",
+            "tool_calls_used",
+        ],
     )
     if metadata:
         yield f"event: metadata\ndata: {_json_dumps(metadata)}\n\n"
@@ -3056,7 +3323,15 @@ def chat_completions(
         artifacts = _present_download_artifacts(runtime, artifacts)
     metadata = latest_assistant_metadata(
         getattr(session, "messages", []) or [],
-        keys=["job_id", "long_output", "turn_outcome", "clarification"],
+        keys=[
+            "job_id",
+            "long_output",
+            "turn_outcome",
+            "clarification",
+            "rag_retrieval_summary",
+            "retrieval_mode",
+            "tool_calls_used",
+        ],
     )
     payload = _build_openai_completion_payload(
         request.model,
@@ -3399,6 +3674,17 @@ async def connector_chat(
 
                             if event_name is None:
                                 break
+                            if event_name == "status":
+                                try:
+                                    payload_data = json.loads(data)
+                                except json.JSONDecodeError:
+                                    payload_data = {"description": data}
+                                if isinstance(payload_data, dict):
+                                    yield _connector_status_part(
+                                        str(payload_data.get("status_id") or status_id),
+                                        payload_data,
+                                    )
+                                continue
                             if event_name == "progress":
                                 try:
                                     payload_data = json.loads(data)
@@ -3482,6 +3768,260 @@ async def connector_chat(
             "x-vercel-ai-ui-message-stream": "v1",
         },
     )
+
+
+@app.get("/v1/capabilities/catalog")
+def get_capabilities_catalog(
+    runtime: Runtime = Depends(get_runtime_or_503),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_openwebui_chat_id: Optional[str] = Header(None, alias="X-OpenWebUI-Chat-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    x_openwebui_message_id: Optional[str] = Header(None, alias="X-OpenWebUI-Message-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_openwebui_user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+) -> Dict[str, Any]:
+    _require_gateway_bearer_auth(runtime.settings, authorization)
+    ctx = get_request_context(
+        runtime,
+        conversation_id=_first_non_empty(x_conversation_id, x_openwebui_chat_id),
+        request_id=_first_non_empty(x_request_id, x_openwebui_message_id),
+        tenant_id=x_tenant_id,
+        user_id=_first_non_empty(x_user_id, x_openwebui_user_id),
+    )
+    session = SimpleNamespace(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        metadata={"access_summary": dict(ctx.access_summary or {})},
+        access_summary=dict(ctx.access_summary or {}),
+    )
+    effective = resolve_effective_capabilities(
+        settings=runtime.settings,
+        stores=runtime.bot.ctx.stores,
+        session=session,
+        registry=runtime.bot.kernel.registry,
+        access_summary=dict(ctx.access_summary or {}),
+    )
+    return build_capability_catalog(
+        settings=runtime.settings,
+        stores=runtime.bot.ctx.stores,
+        session=session,
+        registry=runtime.bot.kernel.registry,
+        tool_definitions=getattr(runtime.bot.kernel, "tool_definitions", {}),
+        effective=effective,
+    )
+
+
+@app.get("/v1/users/me/capabilities")
+def get_my_capabilities(
+    runtime: Runtime = Depends(get_runtime_or_503),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_openwebui_chat_id: Optional[str] = Header(None, alias="X-OpenWebUI-Chat-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    x_openwebui_message_id: Optional[str] = Header(None, alias="X-OpenWebUI-Message-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_openwebui_user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+) -> Dict[str, Any]:
+    _require_gateway_bearer_auth(runtime.settings, authorization)
+    ctx = get_request_context(
+        runtime,
+        conversation_id=_first_non_empty(x_conversation_id, x_openwebui_chat_id),
+        request_id=_first_non_empty(x_request_id, x_openwebui_message_id),
+        tenant_id=x_tenant_id,
+        user_id=_first_non_empty(x_user_id, x_openwebui_user_id),
+    )
+    session = SimpleNamespace(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        metadata={"access_summary": dict(ctx.access_summary or {})},
+        access_summary=dict(ctx.access_summary or {}),
+    )
+    effective = resolve_effective_capabilities(
+        settings=runtime.settings,
+        stores=runtime.bot.ctx.stores,
+        session=session,
+        registry=runtime.bot.kernel.registry,
+        access_summary=dict(ctx.access_summary or {}),
+    )
+    return {
+        "object": "user.capabilities",
+        "tenant_id": ctx.tenant_id,
+        "user_id": ctx.user_id,
+        "profile": CapabilityProfile.from_dict(effective.to_dict()).to_dict(),
+        "effective_capabilities": effective.to_dict(),
+    }
+
+
+@app.put("/v1/users/me/capabilities")
+def update_my_capabilities(
+    request: CapabilityProfileRequest,
+    runtime: Runtime = Depends(get_runtime_or_503),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_openwebui_chat_id: Optional[str] = Header(None, alias="X-OpenWebUI-Chat-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    x_openwebui_message_id: Optional[str] = Header(None, alias="X-OpenWebUI-Message-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_openwebui_user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+) -> Dict[str, Any]:
+    _require_gateway_bearer_auth(runtime.settings, authorization)
+    ctx = get_request_context(
+        runtime,
+        conversation_id=_first_non_empty(x_conversation_id, x_openwebui_chat_id),
+        request_id=_first_non_empty(x_request_id, x_openwebui_message_id),
+        tenant_id=x_tenant_id,
+        user_id=_first_non_empty(x_user_id, x_openwebui_user_id),
+    )
+    raw = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+    profile = CapabilityProfile.from_dict(raw)
+    saved = save_capability_profile(
+        settings=runtime.settings,
+        stores=runtime.bot.ctx.stores,
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        profile=profile,
+    )
+    session = SimpleNamespace(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        metadata={"capability_profile": saved.to_dict(), "access_summary": dict(ctx.access_summary or {})},
+        access_summary=dict(ctx.access_summary or {}),
+    )
+    effective = resolve_effective_capabilities(
+        settings=runtime.settings,
+        stores=runtime.bot.ctx.stores,
+        session=session,
+        registry=runtime.bot.kernel.registry,
+        profile=saved,
+        access_summary=dict(ctx.access_summary or {}),
+    )
+    return {
+        "object": "user.capabilities",
+        "tenant_id": ctx.tenant_id,
+        "user_id": ctx.user_id,
+        "profile": saved.to_dict(),
+        "effective_capabilities": effective.to_dict(),
+    }
+
+
+def _task_payload_from_job(runtime: Runtime, job: Any) -> Dict[str, Any]:
+    artifacts = [
+        normalize_artifact(item)
+        for item in list((getattr(job, "metadata", {}) or {}).get("artifacts") or [])
+        if isinstance(item, dict)
+    ]
+    if artifacts:
+        artifacts = _present_download_artifacts(runtime, artifacts)
+    return {
+        "object": "task",
+        "task_id": getattr(job, "job_id", ""),
+        "job_id": getattr(job, "job_id", ""),
+        "worker_agent": getattr(job, "agent_name", ""),
+        "status": getattr(job, "status", ""),
+        "dependencies": list((getattr(job, "metadata", {}) or {}).get("depends_on") or []),
+        "output_artifact_path": getattr(job, "output_path", "") or getattr(job, "result_path", ""),
+        "progress_summary": getattr(job, "result_summary", "") or getattr(job, "description", ""),
+        "recent_tool_activity": list((getattr(job, "metadata", {}) or {}).get("recent_tool_activity") or []),
+        "token_counts": {
+            "estimated": int(getattr(job, "estimated_token_cost", 0) or 0),
+            "actual": int(getattr(job, "actual_token_cost", 0) or 0),
+        },
+        "warnings": list((getattr(job, "metadata", {}) or {}).get("warnings") or []),
+        "errors": [str(getattr(job, "last_error", "") or "")] if str(getattr(job, "last_error", "") or "").strip() else [],
+        "artifacts": artifacts,
+        "metadata": dict(getattr(job, "metadata", {}) or {}),
+    }
+
+
+@app.get("/v1/tasks")
+def list_tasks(
+    status: str = "",
+    runtime: Runtime = Depends(get_runtime_or_503),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_openwebui_chat_id: Optional[str] = Header(None, alias="X-OpenWebUI-Chat-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    x_openwebui_message_id: Optional[str] = Header(None, alias="X-OpenWebUI-Message-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_openwebui_user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+) -> Dict[str, Any]:
+    _require_gateway_bearer_auth(runtime.settings, authorization)
+    ctx = get_request_context(
+        runtime,
+        conversation_id=_first_non_empty(x_conversation_id, x_openwebui_chat_id),
+        request_id=_first_non_empty(x_request_id, x_openwebui_message_id),
+        tenant_id=x_tenant_id,
+        user_id=_first_non_empty(x_user_id, x_openwebui_user_id),
+    )
+    jobs = runtime.bot.kernel.job_manager.list_jobs(session_id=ctx.session_id)
+    if status:
+        jobs = [job for job in jobs if str(getattr(job, "status", "") or "") == status]
+    return {
+        "object": "task.list",
+        "tasks": [_task_payload_from_job(runtime, job) for job in jobs],
+    }
+
+
+@app.get("/v1/tasks/{task_id}")
+def get_task(
+    task_id: str,
+    runtime: Runtime = Depends(get_runtime_or_503),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_openwebui_chat_id: Optional[str] = Header(None, alias="X-OpenWebUI-Chat-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    x_openwebui_message_id: Optional[str] = Header(None, alias="X-OpenWebUI-Message-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_openwebui_user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+) -> Dict[str, Any]:
+    _require_gateway_bearer_auth(runtime.settings, authorization)
+    ctx = get_request_context(
+        runtime,
+        conversation_id=_first_non_empty(x_conversation_id, x_openwebui_chat_id),
+        request_id=_first_non_empty(x_request_id, x_openwebui_message_id),
+        tenant_id=x_tenant_id,
+        user_id=_first_non_empty(x_user_id, x_openwebui_user_id),
+    )
+    job = runtime.bot.kernel.job_manager.get_job(task_id)
+    if job is None or str(getattr(job, "session_id", "") or "") != ctx.session_id:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return _task_payload_from_job(runtime, job)
+
+
+@app.post("/v1/tasks/{task_id}/stop")
+def stop_task(
+    task_id: str,
+    runtime: Runtime = Depends(get_runtime_or_503),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_openwebui_chat_id: Optional[str] = Header(None, alias="X-OpenWebUI-Chat-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    x_openwebui_message_id: Optional[str] = Header(None, alias="X-OpenWebUI-Message-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_openwebui_user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+) -> Dict[str, Any]:
+    _require_gateway_bearer_auth(runtime.settings, authorization)
+    ctx = get_request_context(
+        runtime,
+        conversation_id=_first_non_empty(x_conversation_id, x_openwebui_chat_id),
+        request_id=_first_non_empty(x_request_id, x_openwebui_message_id),
+        tenant_id=x_tenant_id,
+        user_id=_first_non_empty(x_user_id, x_openwebui_user_id),
+    )
+    job = runtime.bot.kernel.job_manager.get_job(task_id)
+    if job is None or str(getattr(job, "session_id", "") or "") != ctx.session_id:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    stopped = runtime.bot.kernel.job_manager.stop_job(task_id)
+    if stopped is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return _task_payload_from_job(runtime, stopped)
 
 
 @app.get("/v1/jobs/{job_id}")
@@ -3981,6 +4521,103 @@ def download_file(
     )
 
 
+@app.get("/v1/documents/{doc_id}/source")
+def document_source_file(
+    doc_id: str,
+    conversation_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    expires: Optional[int] = None,
+    sig: Optional[str] = None,
+    runtime: Runtime = Depends(get_runtime_or_503),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
+    x_openwebui_chat_id: Optional[str] = Header(None, alias="X-OpenWebUI-Chat-Id"),
+    x_request_id: Optional[str] = Header(None, alias="X-Request-ID"),
+    x_openwebui_message_id: Optional[str] = Header(None, alias="X-OpenWebUI-Message-Id"),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_openwebui_user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+    x_user_email: Optional[str] = Header(None, alias="X-User-Email"),
+    x_openwebui_user_email: Optional[str] = Header(None, alias="X-OpenWebUI-User-Email"),
+):
+    resolved_conversation_id = _first_non_empty(conversation_id, x_conversation_id, x_openwebui_chat_id)
+    resolved_tenant_id = _first_non_empty(tenant_id, x_tenant_id) or runtime.settings.default_tenant_id
+    resolved_user_id = _first_non_empty(user_id, x_user_id, x_openwebui_user_id) or runtime.settings.default_user_id
+    signed_access_granted = verify_download_token(
+        download_id=doc_id,
+        tenant_id=resolved_tenant_id,
+        user_id=resolved_user_id,
+        conversation_id=str(resolved_conversation_id or runtime.settings.default_conversation_id),
+        expires=expires or 0,
+        sig=sig,
+        secret=runtime.settings.download_url_secret,
+    )
+    if not signed_access_granted:
+        _require_gateway_bearer_auth(runtime.settings, authorization)
+
+    ctx = get_request_context(
+        runtime,
+        conversation_id=resolved_conversation_id,
+        request_id=_first_non_empty(x_request_id, x_openwebui_message_id),
+        tenant_id=resolved_tenant_id,
+        user_id=resolved_user_id,
+        user_email=_request_user_email(x_user_email, x_openwebui_user_email),
+    )
+    state = _load_or_create_session_state(runtime, ctx)
+    _apply_request_access_snapshot(runtime, state, user_email=ctx.user_email, display_name=ctx.user_id)
+    doc_store = getattr(getattr(getattr(runtime.bot, "ctx", None), "stores", None), "doc_store", None)
+    if doc_store is None or not hasattr(doc_store, "get_document"):
+        raise HTTPException(status_code=503, detail="Document store is unavailable.")
+    try:
+        record = doc_store.get_document(doc_id, ctx.tenant_id)
+    except TypeError:
+        record = doc_store.get_document(doc_id=doc_id, tenant_id=ctx.tenant_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    _require_collection_use_access(
+        runtime,
+        state,
+        collection_id=str(getattr(record, "collection_id", "") or ""),
+    )
+    source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    blob_ref = blob_ref_from_record(record)
+    filename = (
+        Path(str(source_metadata.get("original_filename") or "")).name
+        or Path(str(getattr(record, "source_display_path", "") or "")).name
+        or Path(str(getattr(record, "title", "") or "")).name
+    )
+    if blob_ref is not None:
+        blob_store = build_blob_store(runtime.settings)
+        if blob_ref.backend != "local":
+            if not blob_store.exists(blob_ref):
+                raise HTTPException(status_code=404, detail="Document source file is no longer available.")
+            download_filename = (filename or doc_id).replace('"', "")
+            return StreamingResponse(
+                blob_store.iter_bytes(blob_ref),
+                media_type=(
+                    str(getattr(record, "source_content_type", "") or "")
+                    or blob_ref.content_type
+                    or _document_source_media_type(record, Path(filename or getattr(record, "title", "source")))
+                ),
+                headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
+            )
+        try:
+            local_source = blob_store.materialize_to_path(blob_ref)
+            source_path = _safe_document_source_path(runtime.settings, str(local_source))
+        except Exception:
+            source_path = _safe_document_source_path(runtime.settings, str(getattr(record, "source_path", "") or ""))
+    else:
+        source_path = _safe_document_source_path(runtime.settings, str(getattr(record, "source_path", "") or ""))
+    if not filename:
+        filename = source_path.name
+    return FileResponse(
+        path=source_path,
+        media_type=_document_source_media_type(record, source_path),
+        filename=filename,
+    )
+
+
 @app.get("/v1/graphs")
 def list_graphs(
     collection_id: str = "",
@@ -4203,6 +4840,29 @@ def ingest_documents(
     )
     _require_collection_use_access(runtime, state, collection_id=effective_collection_id)
 
+    if request.index_preview:
+        preview = _preview_index_metadata_for_paths(
+            runtime.settings,
+            valid_paths,
+            metadata_profile=request.metadata_profile,
+            metadata_enrichment=request.metadata_enrichment,
+            source_metadata_by_path=dict(request.source_metadata or {}),
+            source_display_paths=dict(request.source_display_paths or {}),
+        )
+        preview.update(
+            {
+                "object": "ingest.preview",
+                "tenant_id": ctx.tenant_id,
+                "collection_id": effective_collection_id,
+                "missing_paths": missing,
+            }
+        )
+        if missing and not valid_paths:
+            preview["status"] = "failed"
+        elif missing:
+            preview["status"] = "partial"
+        return preview
+
     doc_ids = ingest_paths(
         runtime.settings,
         runtime.bot.ctx.stores,
@@ -4210,6 +4870,11 @@ def ingest_documents(
         source_type=request.source_type,
         tenant_id=ctx.tenant_id,
         collection_id=effective_collection_id,
+        source_display_paths=dict(request.source_display_paths or {}),
+        source_identities=dict(request.source_identities or {}),
+        source_metadata_by_path=dict(request.source_metadata or {}),
+        metadata_profile=request.metadata_profile,
+        metadata_enrichment=request.metadata_enrichment,
     )
 
     # Copy ingested files into the active session workspace keyed by session_id.
@@ -4243,6 +4908,12 @@ def ingest_documents(
         "ingested_count": len(doc_ids),
         "doc_ids": doc_ids,
         "missing_paths": missing,
+        "metadata_summary": _index_metadata_summary_for_doc_ids(
+            runtime.bot.ctx.stores,
+            ctx.tenant_id,
+            doc_ids,
+            metadata_profile=request.metadata_profile,
+        ),
     }
     if workspace_copies:
         result["workspace_copies"] = workspace_copies
@@ -4254,6 +4925,9 @@ async def upload_files(
     files: List[UploadFile] = File(...),
     source_type: str = "upload",
     collection_id: str = "",
+    metadata_profile: str = "auto",
+    metadata_enrichment: str = "deterministic",
+    index_preview: bool = False,
     source_ids: Optional[List[str]] = Form(None),
     runtime: Runtime = Depends(get_upload_runtime_or_503),
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -4290,8 +4964,13 @@ async def upload_files(
         len(files),
     )
 
-    uploads_dir = runtime.settings.uploads_dir
-    uploads_dir.mkdir(parents=True, exist_ok=True)
+    blob_store = build_blob_store(runtime.settings)
+    staging_root = (
+        blob_store.cache_dir
+        / "incoming"
+        / (_safe_blob_key_part(ctx.request_id) or uuid.uuid4().hex)
+    )
+    staging_root.mkdir(parents=True, exist_ok=True)
     effective_collection_id = str(
         collection_id
         or x_collection_id
@@ -4321,6 +5000,9 @@ async def upload_files(
     seen_source_id_set = set(seen_source_ids)
 
     saved_paths: List[Path] = []
+    source_display_paths_by_path: Dict[str, str] = {}
+    source_identities_by_path: Dict[str, str] = {}
+    source_metadata_by_path: Dict[str, Dict[str, Any]] = {}
     errors: List[str] = []
     skipped_source_ids: List[str] = []
     skipped_filenames: List[str] = []
@@ -4332,13 +5014,81 @@ async def upload_files(
             skipped_filenames.append(file.filename or source_id)
             continue
         try:
-            dest = uploads_dir / (file.filename or f"upload_{uuid.uuid4().hex}")
+            original_filename = Path(str(file.filename or f"upload_{uuid.uuid4().hex}")).name or f"upload_{uuid.uuid4().hex}"
+            dest = staging_root / f"{index:04d}_{uuid.uuid4().hex}_{original_filename}"
             await _stream_upload_to_path(file, dest)
-            saved_paths.append(dest)
+            content_type = str(file.content_type or mimetypes.guess_type(original_filename)[0] or "")
+            blob_ref = None
+            ingest_path = dest
+            if not index_preview:
+                blob_ref = blob_store.put_file(
+                    dest,
+                    key=_upload_object_key(
+                        ctx=ctx,
+                        collection_id=effective_collection_id,
+                        filename=original_filename,
+                        index=index,
+                    ),
+                    content_type=content_type,
+                )
+                if blob_ref.backend == "local":
+                    ingest_path = blob_store.materialize_to_path(blob_ref)
+            saved_paths.append(ingest_path)
+            path_key = str(ingest_path.resolve())
+            source_display_paths_by_path[path_key] = original_filename
+            if source_id:
+                source_identities_by_path[path_key] = f"upload:{source_id}"
+            source_metadata = {
+                "source_origin_id": source_id,
+                "client_source_id": source_id,
+                "original_filename": original_filename,
+                "mime_type": content_type,
+                "upload_conversation_id": ctx.conversation_id,
+                "upload_request_id": ctx.request_id,
+            }
+            if blob_ref is not None:
+                source_metadata.update(
+                    {
+                        "blob_ref": blob_ref.to_dict(),
+                        "source_uri": blob_ref.uri,
+                        "storage_backend": blob_ref.backend,
+                        "object_bucket": blob_ref.bucket,
+                        "object_key": blob_ref.key,
+                    }
+                )
+            source_metadata_by_path[path_key] = source_metadata
             if source_id:
                 remembered_source_ids.append(source_id)
         except Exception as e:
             errors.append(f"{file.filename}: {str(e)}")
+
+    if index_preview:
+        preview_filenames = [
+            source_display_paths_by_path.get(str(p.resolve())) or p.name
+            for p in saved_paths
+        ]
+        preview = _preview_index_metadata_for_paths(
+            runtime.settings,
+            saved_paths,
+            metadata_profile=metadata_profile,
+            metadata_enrichment=metadata_enrichment,
+            source_metadata_by_path=source_metadata_by_path,
+            source_display_paths=source_display_paths_by_path,
+        )
+        preview.update(
+            {
+                "object": "upload.preview",
+                "tenant_id": ctx.tenant_id,
+                "collection_id": effective_collection_id,
+                "filenames": preview_filenames,
+                "skipped_source_ids": list(skipped_source_ids),
+                "skipped_filenames": list(skipped_filenames),
+            }
+        )
+        if errors:
+            preview["status"] = "partial" if saved_paths else "failed"
+            preview["errors"] = [*list(preview.get("errors") or []), *errors]
+        return preview
 
     doc_ids: List[str] = []
     if saved_paths:
@@ -4349,6 +5099,11 @@ async def upload_files(
             source_type=source_type,
             tenant_id=ctx.tenant_id,
             collection_id=effective_collection_id,
+            source_display_paths=source_display_paths_by_path,
+            source_identities=source_identities_by_path,
+            source_metadata_by_path=source_metadata_by_path,
+            metadata_profile=metadata_profile,
+            metadata_enrichment=metadata_enrichment,
         )
 
     ws_session_id = f"{ctx.tenant_id}:{ctx.user_id}:{ctx.conversation_id}"
@@ -4358,8 +5113,9 @@ async def upload_files(
     workspace_copies: List[str] = []
     for p in saved_paths:
         try:
-            shutil.copy2(p, ws_root / p.name)
-            workspace_copies.append(p.name)
+            workspace_name = Path(source_display_paths_by_path.get(str(p.resolve())) or p.name).name
+            shutil.copy2(p, ws_root / workspace_name)
+            workspace_copies.append(workspace_name)
         except Exception as exc:
             logger.warning("upload_files: could not copy %s to workspace %s: %s", p.name, ws_root, exc)
 
@@ -4385,11 +5141,13 @@ async def upload_files(
         "collection_id": effective_collection_id,
         "active_uploaded_doc_ids": active_uploaded_doc_ids,
         "doc_ids": list(doc_ids),
-        "filenames": [p.name for p in saved_paths],
+        "filenames": [source_display_paths_by_path.get(str(p.resolve())) or p.name for p in saved_paths],
         "skipped_source_ids": list(skipped_source_ids),
         "skipped_filenames": list(skipped_filenames),
         "errors": list(errors),
         "source_type": source_type,
+        "metadata_profile": metadata_profile,
+        "metadata_enrichment": metadata_enrichment,
         "repository_source": "agent_document_repository",
     }
     runtime_diagnostics = dict(getattr(runtime, "diagnostics", {}) or {})
@@ -4416,10 +5174,16 @@ async def upload_files(
         "doc_ids": doc_ids,
         "uploaded_doc_ids": active_uploaded_doc_ids,
         "active_uploaded_doc_ids": active_uploaded_doc_ids,
-        "filenames": [p.name for p in saved_paths],
+        "filenames": [source_display_paths_by_path.get(str(p.resolve())) or p.name for p in saved_paths],
         "errors": errors,
         "document_source_policy": "agent_repository_only",
         "upload_manifest": upload_manifest,
+        "metadata_summary": _index_metadata_summary_for_doc_ids(
+            runtime.bot.ctx.stores,
+            ctx.tenant_id,
+            doc_ids,
+            metadata_profile=metadata_profile,
+        ),
     }
     if runtime_diagnostics:
         result["runtime_diagnostics"] = runtime_diagnostics

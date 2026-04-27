@@ -151,6 +151,36 @@ def test_resolve_rag_execution_hints_prefers_bounded_synthesis_for_architecture_
     assert "force_deep_search" not in hints.controller_hints
 
 
+def test_answer_contract_blocks_inventory_skill_shape_for_grounded_answer() -> None:
+    hints = resolve_rag_execution_hints(
+        SimpleNamespace(default_tenant_id="tenant"),
+        SimpleNamespace(skill_store=_SkillStore()),
+        session=SimpleNamespace(tenant_id="tenant"),
+        query="Draft a concise grounded answer about alpha, beta, and gamma. Cite sources.",
+        skill_queries=["corpus discovery"],
+        answer_contract=SimpleNamespace(kind="grounded_synthesis", broad_coverage=False),
+    )
+
+    assert hints.result_mode == "answer"
+    assert hints.coverage_goal == "targeted"
+    assert hints.research_profile == ""
+    assert "prefer_inventory_output" not in hints.controller_hints
+
+
+def test_inventory_answer_contract_preserves_inventory_skill_shape() -> None:
+    hints = resolve_rag_execution_hints(
+        SimpleNamespace(default_tenant_id="tenant"),
+        SimpleNamespace(skill_store=_SkillStore()),
+        session=SimpleNamespace(tenant_id="tenant"),
+        query="Which documents mention alpha, beta, and gamma?",
+        skill_queries=["corpus discovery"],
+        answer_contract=SimpleNamespace(kind="inventory", broad_coverage=True),
+    )
+
+    assert hints.result_mode == "inventory"
+    assert hints.controller_hints["prefer_inventory_output"] is True
+
+
 def test_resolve_rag_execution_hints_uses_active_graph_bound_skill_metadata():
     hints = resolve_rag_execution_hints(
         SimpleNamespace(default_tenant_id="tenant", default_user_id="user"),

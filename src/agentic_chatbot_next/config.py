@@ -89,6 +89,11 @@ class Settings:
     rag_top_k_keyword: int
     rag_max_retries: int
     rag_min_evidence_chunks: int
+    rag_budget_ms: int
+    rag_budget_synthesis_reserve_ms: int
+    rag_heuristic_grading_enabled: bool
+    rag_judge_grade_max_chunks: int
+    rag_extractive_fallback_enabled: bool
     max_rag_agent_steps: int  # step budget for the RAG loop agent
     max_parallel_collection_probes: int
     max_collection_discovery_collections: int
@@ -109,6 +114,17 @@ class Settings:
     uploads_dir: Path
     kb_source_uri: str
     uploads_source_uri: str
+    object_store_bucket: str
+    object_store_prefix: str
+    object_store_endpoint_url: str
+    object_store_region: str
+    object_store_access_key: str
+    object_store_secret_key: str
+    object_store_session_token: str
+    object_store_cache_dir: Path
+    azure_blob_connection_string: str
+    azure_blob_account_name: str
+    azure_blob_account_key: str
     default_collection_id: str
     skill_packs_dir: Path
     runtime_dir: Path
@@ -144,9 +160,9 @@ class Settings:
     memory_context_token_budget: int # env: MEMORY_CONTEXT_TOKEN_BUDGET (default: 1600)
     memory_shadow_mode: bool         # env: MEMORY_SHADOW_MODE (default: False)
 
-    # --- OCR (PaddleOCR, optional) ---
+    # --- OCR (PaddleOCR-backed by default; Docling optional) ---
     docling_enabled: bool    # env: DOCLING_ENABLED (default: False)
-    ocr_enabled: bool        # env: USE_PADDLE_OCR (default: True)
+    ocr_enabled: bool        # env: OCR_ENABLED or deprecated USE_PADDLE_OCR (default: True)
     ocr_language: str        # env: OCR_LANGUAGE   (default: "en")
     ocr_use_gpu: bool        # env: OCR_USE_GPU    (default: False)
     ocr_min_page_chars: int  # env: OCR_MIN_PAGE_CHARS (default: 50)
@@ -166,6 +182,7 @@ class Settings:
     # --- OpenAI-compatible gateway ---
     gateway_model_id: str
     gateway_shared_bearer_token: str | None
+    gateway_public_base_url: str
     download_url_secret: str | None
     download_url_ttl_seconds: int
     connector_secret_api_key: str | None
@@ -343,6 +360,13 @@ def _as_bool(name: str, default: bool) -> bool:
     return v.lower() in ("1", "true", "yes", "y")
 
 
+def _as_bool_alias(name: str, legacy_name: str, default: bool) -> bool:
+    v = _getenv(name)
+    if v is not None:
+        return v.lower() in ("1", "true", "yes", "y")
+    return _as_bool(legacy_name, default)
+
+
 def _as_router_mode(name: str, default: str) -> str:
     value = str(_getenv(name, default) or default).strip().lower()
     return value if value in {"hybrid", "llm_only"} else default
@@ -492,6 +516,8 @@ def runtime_settings_diagnostics(settings: Settings) -> dict[str, object]:
         "mcp_catalog_refresh_seconds": int(getattr(settings, "mcp_catalog_refresh_seconds", 0) or 0),
         "mcp_secret_configured": bool(getattr(settings, "mcp_secret_encryption_key", "") or ""),
         "max_rag_agent_steps": int(getattr(settings, "max_rag_agent_steps", 0) or 0),
+        "rag_budget_ms": int(getattr(settings, "rag_budget_ms", 0) or 0),
+        "rag_judge_grade_max_chunks": int(getattr(settings, "rag_judge_grade_max_chunks", 0) or 0),
         "max_parallel_collection_probes": int(getattr(settings, "max_parallel_collection_probes", 0) or 0),
         "max_collection_discovery_collections": int(
             getattr(settings, "max_collection_discovery_collections", 0) or 0
@@ -664,10 +690,15 @@ def load_settings(
     llm_http_connect_timeout_seconds = _as_int("LLM_HTTP_CONNECT_TIMEOUT_SECONDS", 20)
 
     # RAG
-    rag_top_k_vector = _as_int("RAG_TOPK_VECTOR", 12)
-    rag_top_k_keyword = _as_int("RAG_TOPK_BM25", 12)
+    rag_top_k_vector = _as_int("RAG_TOPK_VECTOR", 15)
+    rag_top_k_keyword = _as_int("RAG_TOPK_BM25", 15)
     rag_max_retries = _as_int("RAG_MAX_RETRIES", 2)
     rag_min_evidence_chunks = _as_int("RAG_MIN_EVIDENCE_CHUNKS", 2)
+    rag_budget_ms = max(0, _as_int("RAG_BUDGET_MS", 210_000))
+    rag_budget_synthesis_reserve_ms = max(0, _as_int("RAG_BUDGET_SYNTHESIS_RESERVE_MS", 30_000))
+    rag_heuristic_grading_enabled = _as_bool("RAG_HEURISTIC_GRADING_ENABLED", True)
+    rag_judge_grade_max_chunks = max(1, _as_int("RAG_JUDGE_GRADE_MAX_CHUNKS", 12))
+    rag_extractive_fallback_enabled = _as_bool("RAG_EXTRACTIVE_FALLBACK_ENABLED", True)
     max_rag_agent_steps = _as_int("MAX_RAG_AGENT_STEPS", 8)
     max_parallel_collection_probes = max(1, _as_int("MAX_PARALLEL_COLLECTION_PROBES", 4))
     max_collection_discovery_collections = max(1, _as_int("MAX_COLLECTION_DISCOVERY_COLLECTIONS", 25))
@@ -687,6 +718,37 @@ def load_settings(
     uploads_dir = Path(_getenv("UPLOADS_DIR", str(data_dir / "uploads")))
     kb_source_uri = str(_getenv("KB_SOURCE_URI", f"file://{kb_dir}"))
     uploads_source_uri = str(_getenv("UPLOADS_SOURCE_URI", f"file://{uploads_dir}"))
+    object_store_bucket = str(
+        _getenv("OBJECT_STORE_BUCKET", _getenv("OBJECT_STORE_CONTAINER", "")) or ""
+    ).strip()
+    object_store_prefix = str(
+        _getenv("OBJECT_STORE_PREFIX", "uploads" if object_store_backend != "local" else "") or ""
+    ).strip().strip("/")
+    object_store_endpoint_url = str(
+        _getenv("OBJECT_STORE_ENDPOINT_URL", _getenv("S3_ENDPOINT_URL", "")) or ""
+    ).strip()
+    object_store_region = str(
+        _getenv("OBJECT_STORE_REGION", _getenv("AWS_REGION", "us-east-1")) or ""
+    ).strip()
+    object_store_access_key = str(
+        _getenv("OBJECT_STORE_ACCESS_KEY", _getenv("AWS_ACCESS_KEY_ID", "")) or ""
+    ).strip()
+    object_store_secret_key = str(
+        _getenv("OBJECT_STORE_SECRET_KEY", _getenv("AWS_SECRET_ACCESS_KEY", "")) or ""
+    ).strip()
+    object_store_session_token = str(
+        _getenv("OBJECT_STORE_SESSION_TOKEN", _getenv("AWS_SESSION_TOKEN", "")) or ""
+    ).strip()
+    object_store_cache_dir = Path(
+        _getenv("OBJECT_STORE_CACHE_DIR", str(data_dir / "cache" / "blob-store"))
+    )
+    azure_blob_connection_string = str(_getenv("AZURE_BLOB_CONNECTION_STRING", "") or "").strip()
+    azure_blob_account_name = str(
+        _getenv("AZURE_STORAGE_ACCOUNT_NAME", _getenv("AZURE_BLOB_ACCOUNT_NAME", "")) or ""
+    ).strip()
+    azure_blob_account_key = str(
+        _getenv("AZURE_STORAGE_ACCOUNT_KEY", _getenv("AZURE_BLOB_ACCOUNT_KEY", "")) or ""
+    ).strip()
     default_collection_id = str(_getenv("DEFAULT_COLLECTION_ID", "default"))
     skill_packs_dir = Path(_getenv("SKILL_PACKS_DIR", str(data_dir / "skill_packs")))
     runtime_dir = Path(_getenv("RUNTIME_DIR", str(data_dir / "runtime")))
@@ -725,7 +787,7 @@ def load_settings(
 
     # OCR
     docling_enabled    = _as_bool("DOCLING_ENABLED", False)
-    ocr_enabled        = _as_bool("USE_PADDLE_OCR", True)
+    ocr_enabled        = _as_bool_alias("OCR_ENABLED", "USE_PADDLE_OCR", True)
     ocr_language       = str(_getenv("OCR_LANGUAGE", "en"))
     ocr_use_gpu        = _as_bool("OCR_USE_GPU", False)
     ocr_min_page_chars = _as_int("OCR_MIN_PAGE_CHARS", 50)
@@ -744,6 +806,7 @@ def load_settings(
     # Gateway model config
     gateway_model_id = str(_getenv("GATEWAY_MODEL_ID", "enterprise-agent"))
     gateway_shared_bearer_token = _getenv("GATEWAY_SHARED_BEARER_TOKEN", "")
+    gateway_public_base_url = str(_getenv("GATEWAY_PUBLIC_BASE_URL", "") or "").strip()
     download_url_secret = _getenv("DOWNLOAD_URL_SECRET", "")
     download_url_ttl_seconds = _as_int("DOWNLOAD_URL_TTL_SECONDS", 900)
     connector_secret_api_key = _getenv(
@@ -1008,6 +1071,11 @@ def load_settings(
         raise ValueError(f"Unsupported VECTOR_STORE_BACKEND={vector_store_backend!r}. Supported: pgvector")
     if object_store_backend not in {"local", "s3", "azure_blob"}:
         raise ValueError(f"Unsupported OBJECT_STORE_BACKEND={object_store_backend!r}. Supported: local, s3, azure_blob")
+    if object_store_backend in {"s3", "azure_blob"} and not object_store_bucket:
+        raise ValueError(
+            "OBJECT_STORE_BUCKET (or OBJECT_STORE_CONTAINER) is required when "
+            f"OBJECT_STORE_BACKEND={object_store_backend!r}"
+        )
     if skills_backend not in {"local", "s3", "azure_blob"}:
         raise ValueError(f"Unsupported SKILLS_BACKEND={skills_backend!r}. Supported: local, s3, azure_blob")
     if prompts_backend not in {"local", "s3", "azure_blob"}:
@@ -1021,6 +1089,7 @@ def load_settings(
         data_dir,
         kb_dir,
         uploads_dir,
+        object_store_cache_dir,
         skills_dir,
         prompts_dir,
         workspace_dir,
@@ -1098,6 +1167,11 @@ def load_settings(
         rag_top_k_keyword=rag_top_k_keyword,
         rag_max_retries=rag_max_retries,
         rag_min_evidence_chunks=rag_min_evidence_chunks,
+        rag_budget_ms=rag_budget_ms,
+        rag_budget_synthesis_reserve_ms=rag_budget_synthesis_reserve_ms,
+        rag_heuristic_grading_enabled=rag_heuristic_grading_enabled,
+        rag_judge_grade_max_chunks=rag_judge_grade_max_chunks,
+        rag_extractive_fallback_enabled=rag_extractive_fallback_enabled,
         max_rag_agent_steps=max_rag_agent_steps,
         max_parallel_collection_probes=max_parallel_collection_probes,
         max_collection_discovery_collections=max_collection_discovery_collections,
@@ -1112,6 +1186,17 @@ def load_settings(
         uploads_dir=uploads_dir,
         kb_source_uri=kb_source_uri,
         uploads_source_uri=uploads_source_uri,
+        object_store_bucket=object_store_bucket,
+        object_store_prefix=object_store_prefix,
+        object_store_endpoint_url=object_store_endpoint_url,
+        object_store_region=object_store_region,
+        object_store_access_key=object_store_access_key,
+        object_store_secret_key=object_store_secret_key,
+        object_store_session_token=object_store_session_token,
+        object_store_cache_dir=object_store_cache_dir,
+        azure_blob_connection_string=azure_blob_connection_string,
+        azure_blob_account_name=azure_blob_account_name,
+        azure_blob_account_key=azure_blob_account_key,
         default_collection_id=default_collection_id,
         skill_packs_dir=skill_packs_dir,
         runtime_dir=runtime_dir,
@@ -1154,6 +1239,7 @@ def load_settings(
         default_conversation_id=default_conversation_id,
         gateway_model_id=gateway_model_id,
         gateway_shared_bearer_token=gateway_shared_bearer_token,
+        gateway_public_base_url=gateway_public_base_url,
         download_url_secret=download_url_secret,
         download_url_ttl_seconds=download_url_ttl_seconds,
         connector_secret_api_key=connector_secret_api_key,

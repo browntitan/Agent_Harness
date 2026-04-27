@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from contextlib import contextmanager
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from langchain_core.documents import Document
 
@@ -16,10 +18,23 @@ __all__ = [
     "GradedChunk",
     "keyword_search",
     "merge_dedupe",
+    "rank_fuse_dedupe",
     "retrieve_candidates",
     "vector_search",
     "grade_chunks",
 ]
+
+_GRADE_CACHE_MAX = 256
+_GRADE_CACHE: "OrderedDict[tuple[str, tuple[tuple[str, str, int, str], ...]], List[GradedChunk]]" = OrderedDict()
+
+
+@contextmanager
+def _optional_stage(stage_timer: Any, name: str):
+    if stage_timer is not None and hasattr(stage_timer, "measure"):
+        with stage_timer.measure(name):
+            yield
+        return
+    yield
 
 
 @dataclass
@@ -109,6 +124,45 @@ def merge_dedupe(chunks: Sequence[ScoredChunk]) -> List[ScoredChunk]:
         if key not in by_key or chunk.score > by_key[key].score:
             by_key[key] = chunk
     return sorted(by_key.values(), key=lambda chunk: chunk.score, reverse=True)
+
+
+def rank_fuse_dedupe(
+    lanes: Mapping[str, Sequence[ScoredChunk]],
+    *,
+    rrf_k: int = 60,
+) -> List[ScoredChunk]:
+    fused_scores: Dict[str, float] = {}
+    lane_details: Dict[str, Dict[str, Dict[str, float]]] = {}
+    best_by_key: Dict[str, ScoredChunk] = {}
+    best_source_score: Dict[str, float] = {}
+
+    for lane_name, chunks in lanes.items():
+        clean_lane = str(lane_name or "retrieval").strip() or "retrieval"
+        for rank, chunk in enumerate(chunks, start=1):
+            key = _doc_key(chunk.doc)
+            fused_scores[key] = fused_scores.get(key, 0.0) + (1.0 / (max(1, int(rrf_k)) + rank))
+            lane_details.setdefault(key, {})[clean_lane] = {
+                "rank": float(rank),
+                "score": float(chunk.score),
+            }
+            if key not in best_by_key or float(chunk.score) > best_source_score.get(key, float("-inf")):
+                best_by_key[key] = chunk
+                best_source_score[key] = float(chunk.score)
+
+    fused: List[ScoredChunk] = []
+    for key, chunk in best_by_key.items():
+        metadata = dict(chunk.doc.metadata or {})
+        metadata["_retrieval_lanes"] = lane_details.get(key, {})
+        metadata["_rrf_score"] = fused_scores.get(key, 0.0)
+        doc = Document(page_content=chunk.doc.page_content, metadata=metadata)
+        fused.append(
+            ScoredChunk(
+                doc=doc,
+                score=float(fused_scores.get(key, 0.0)),
+                method="+".join(sorted(lane_details.get(key, {}) or {chunk.method: {}})),
+            )
+        )
+    return sorted(fused, key=lambda chunk: chunk.score, reverse=True)
 
 
 def _title_matched_doc_ids(
@@ -206,59 +260,63 @@ def retrieve_candidates(
     doc_id_filter: Optional[str] = None,
     collection_id_filter: Optional[str] = None,
     collection_ids_filter: Optional[Sequence[str]] = None,
+    stage_timer: Any | None = None,
 ) -> Dict[str, Any]:
     effective_filter = doc_id_filter
     title_matched_doc_ids: List[str] = []
     if not effective_filter:
-        title_matched_doc_ids = _title_matched_doc_ids(
+        with _optional_stage(stage_timer, "source_planning"):
+            title_matched_doc_ids = _title_matched_doc_ids(
+                stores,
+                query,
+                tenant_id=tenant_id,
+                preferred_doc_ids=preferred_doc_ids,
+                collection_id_filter=collection_id_filter,
+                collection_ids_filter=collection_ids_filter,
+            )
+
+    with _optional_stage(stage_timer, "vector_search"):
+        vector_hits = vector_search(
             stores,
             query,
+            top_k=top_k_vector,
             tenant_id=tenant_id,
-            preferred_doc_ids=preferred_doc_ids,
-            collection_id_filter=collection_id_filter,
-            collection_ids_filter=collection_ids_filter,
+            doc_id_filter=effective_filter,
+            collection_id_filter=collection_id_filter if not effective_filter else None,
+            collection_ids_filter=collection_ids_filter if not effective_filter else None,
         )
-
-    vector_hits = vector_search(
-        stores,
-        query,
-        top_k=top_k_vector,
-        tenant_id=tenant_id,
-        doc_id_filter=effective_filter,
-        collection_id_filter=collection_id_filter if not effective_filter else None,
-        collection_ids_filter=collection_ids_filter if not effective_filter else None,
-    )
-    if title_matched_doc_ids:
-        for matched_doc_id in title_matched_doc_ids:
-            vector_hits.extend(
-                vector_search(
-                    stores,
-                    query,
-                    top_k=max(1, min(3, top_k_vector)),
-                    tenant_id=tenant_id,
-                    doc_id_filter=matched_doc_id,
+        if title_matched_doc_ids:
+            for matched_doc_id in title_matched_doc_ids:
+                vector_hits.extend(
+                    vector_search(
+                        stores,
+                        query,
+                        top_k=max(1, min(3, top_k_vector)),
+                        tenant_id=tenant_id,
+                        doc_id_filter=matched_doc_id,
+                    )
                 )
-            )
-    keyword_hits = keyword_search(
-        stores,
-        query,
-        top_k=top_k_keyword,
-        tenant_id=tenant_id,
-        doc_id_filter=effective_filter,
-        collection_id_filter=collection_id_filter if not effective_filter else None,
-        collection_ids_filter=collection_ids_filter if not effective_filter else None,
-    )
-    if title_matched_doc_ids:
-        for matched_doc_id in title_matched_doc_ids:
-            keyword_hits.extend(
-                keyword_search(
-                    stores,
-                    query,
-                    top_k=max(1, min(2, top_k_keyword)),
-                    tenant_id=tenant_id,
-                    doc_id_filter=matched_doc_id,
+    with _optional_stage(stage_timer, "bm25_search"):
+        keyword_hits = keyword_search(
+            stores,
+            query,
+            top_k=top_k_keyword,
+            tenant_id=tenant_id,
+            doc_id_filter=effective_filter,
+            collection_id_filter=collection_id_filter if not effective_filter else None,
+            collection_ids_filter=collection_ids_filter if not effective_filter else None,
+        )
+        if title_matched_doc_ids:
+            for matched_doc_id in title_matched_doc_ids:
+                keyword_hits.extend(
+                    keyword_search(
+                        stores,
+                        query,
+                        top_k=max(1, min(2, top_k_keyword)),
+                        tenant_id=tenant_id,
+                        doc_id_filter=matched_doc_id,
+                    )
                 )
-            )
     if not effective_filter and preferred_doc_ids:
         vector_hits = [chunk for chunk in vector_hits if (chunk.doc.metadata or {}).get("doc_id") in preferred_doc_ids]
         keyword_hits = [chunk for chunk in keyword_hits if (chunk.doc.metadata or {}).get("doc_id") in preferred_doc_ids]
@@ -275,7 +333,7 @@ def retrieve_candidates(
     vector_hits = _boost_title_matches(vector_hits, title_matched_doc_ids)
     keyword_hits = _boost_title_matches(keyword_hits, title_matched_doc_ids)
 
-    merged = merge_dedupe(vector_hits + keyword_hits)
+    merged = rank_fuse_dedupe({"vector": vector_hits, "keyword": keyword_hits})
     return {"vector": vector_hits, "keyword": keyword_hits, "merged": merged}
 
 
@@ -387,6 +445,90 @@ def _operational_runbook_penalty(question: str, metadata: Dict[str, Any]) -> int
     return 2
 
 
+def _apply_relevance_adjustments(question: str, chunk: Document, relevance: int, reason: str) -> tuple[int, str]:
+    title_relevance = _title_hint_relevance(question, chunk.metadata or {})
+    if title_relevance > relevance:
+        relevance = title_relevance
+        reason = "title_hint"
+    echo_penalty = _question_echo_penalty(question, chunk)
+    meta_penalty = _meta_catalog_penalty(question, chunk.metadata or {})
+    runbook_penalty = _operational_runbook_penalty(question, chunk.metadata or {})
+    if echo_penalty or meta_penalty or runbook_penalty:
+        if echo_penalty >= meta_penalty and echo_penalty >= runbook_penalty:
+            relevance = max(0, relevance - echo_penalty)
+            reason = "question_echo"
+        elif meta_penalty >= runbook_penalty:
+            relevance = max(0, relevance - meta_penalty)
+            reason = "meta_catalog"
+        else:
+            relevance = max(0, relevance - runbook_penalty)
+            reason = "operational_runbook"
+    return max(0, min(3, int(relevance))), reason
+
+
+def _heuristic_grade_selected(question: str, selected: Sequence[Document], *, reason: str = "heuristic_pregrade") -> List[GradedChunk]:
+    graded: List[GradedChunk] = []
+    for chunk in selected:
+        relevance = max(
+            _heuristic_relevance(question, chunk.page_content),
+            _title_hint_relevance(question, chunk.metadata or {}),
+        )
+        adjusted_relevance, adjusted_reason = _apply_relevance_adjustments(question, chunk, relevance, reason)
+        if adjusted_reason == reason and adjusted_relevance == 0:
+            adjusted_reason = "heuristic"
+        graded.append(GradedChunk(doc=chunk, relevance=adjusted_relevance, reason=adjusted_reason))
+    return graded
+
+
+def _chunk_cache_signature(chunk: Document) -> tuple[str, str, int, str]:
+    metadata = chunk.metadata or {}
+    chunk_id = str(metadata.get("chunk_id") or f"{metadata.get('doc_id')}#chunk{metadata.get('chunk_index')}")
+    version = str(
+        metadata.get("chunk_version")
+        or metadata.get("content_hash")
+        or metadata.get("updated_at")
+        or metadata.get("ingested_at")
+        or ""
+    )
+    text = str(chunk.page_content or "")
+    text_fingerprint = f"{text[:64]}|{text[-64:]}" if text else ""
+    return chunk_id, version, len(text), text_fingerprint
+
+
+def _grade_cache_key(question: str, selected: Sequence[Document]) -> tuple[str, tuple[tuple[str, str, int, str], ...]]:
+    normalized_question = _normalize_for_match(question)
+    return normalized_question, tuple(_chunk_cache_signature(chunk) for chunk in selected)
+
+
+def _get_cached_grades(key: tuple[str, tuple[tuple[str, str, int, str], ...]]) -> List[GradedChunk] | None:
+    cached = _GRADE_CACHE.get(key)
+    if cached is None:
+        return None
+    _GRADE_CACHE.move_to_end(key)
+    return list(cached)
+
+
+def _put_cached_grades(key: tuple[str, tuple[tuple[str, str, int, str], ...]], graded: Sequence[GradedChunk]) -> None:
+    _GRADE_CACHE[key] = list(graded)
+    _GRADE_CACHE.move_to_end(key)
+    while len(_GRADE_CACHE) > _GRADE_CACHE_MAX:
+        _GRADE_CACHE.popitem(last=False)
+
+
+def _heuristic_grades_are_decisive(settings: Any, selected: Sequence[Document], graded: Sequence[GradedChunk]) -> bool:
+    if not bool(getattr(settings, "rag_heuristic_grading_enabled", True)):
+        return False
+    if not selected:
+        return True
+    strong = sum(1 for item in graded if item.relevance >= 2)
+    if strong <= 0:
+        return False
+    min_evidence = max(1, int(getattr(settings, "rag_min_evidence_chunks", 2) or 2))
+    if len(selected) <= 6:
+        return strong >= min_evidence
+    return strong >= max(3, min_evidence) and strong >= max(1, len(selected) // 5)
+
+
 def grade_chunks(
     judge_llm: Any,
     *,
@@ -397,8 +539,23 @@ def grade_chunks(
     callbacks=None,
 ) -> List[GradedChunk]:
     selected = list(chunks)[:max_chunks]
+    cache_key = _grade_cache_key(question, selected)
+    cached = _get_cached_grades(cache_key)
+    if cached is not None:
+        return cached
+
+    pregraded = _heuristic_grade_selected(question, selected)
+    if judge_llm is None or _heuristic_grades_are_decisive(settings, selected, pregraded):
+        _put_cached_grades(cache_key, pregraded)
+        return list(pregraded)
+
+    judge_window = min(
+        len(selected),
+        max(1, int(getattr(settings, "rag_judge_grade_max_chunks", max_chunks) or max_chunks)),
+    )
+    judge_selected = selected[:judge_window]
     items = []
-    for chunk in selected:
+    for chunk in judge_selected:
         metadata = chunk.metadata or {}
         chunk_id = metadata.get("chunk_id") or f"{metadata.get('doc_id')}#chunk{metadata.get('chunk_index')}"
         title = metadata.get("title", "")
@@ -427,54 +584,22 @@ def grade_chunks(
                 if chunk_id:
                     grade_map[chunk_id] = (relevance, reason)
             graded: List[GradedChunk] = []
+            pregrade_by_id = {
+                str((item.doc.metadata or {}).get("chunk_id") or f"{(item.doc.metadata or {}).get('doc_id')}#chunk{(item.doc.metadata or {}).get('chunk_index')}"): item
+                for item in pregraded
+            }
             for chunk in selected:
-                chunk_id = str((chunk.metadata or {}).get("chunk_id") or "")
-                relevance, reason = grade_map.get(
-                    chunk_id,
-                    (_heuristic_relevance(question, chunk.page_content), "heuristic"),
-                )
-                title_relevance = _title_hint_relevance(question, chunk.metadata or {})
-                if title_relevance > relevance:
-                    relevance = title_relevance
-                    reason = "title_hint"
-                echo_penalty = _question_echo_penalty(question, chunk)
-                meta_penalty = _meta_catalog_penalty(question, chunk.metadata or {})
-                runbook_penalty = _operational_runbook_penalty(question, chunk.metadata or {})
-                if echo_penalty or meta_penalty or runbook_penalty:
-                    if echo_penalty >= meta_penalty and echo_penalty >= runbook_penalty:
-                        relevance = max(0, relevance - echo_penalty)
-                        reason = "question_echo"
-                    elif meta_penalty >= runbook_penalty:
-                        relevance = max(0, relevance - meta_penalty)
-                        reason = "meta_catalog"
-                    else:
-                        relevance = max(0, relevance - runbook_penalty)
-                        reason = "operational_runbook"
+                metadata = chunk.metadata or {}
+                chunk_id = str(metadata.get("chunk_id") or f"{metadata.get('doc_id')}#chunk{metadata.get('chunk_index')}")
+                fallback = pregrade_by_id.get(chunk_id)
+                relevance, reason = grade_map.get(chunk_id, (fallback.relevance, fallback.reason) if fallback else (0, "heuristic"))
+                relevance, reason = _apply_relevance_adjustments(question, chunk, relevance, reason)
                 graded.append(GradedChunk(doc=chunk, relevance=relevance, reason=reason))
+            _put_cached_grades(cache_key, graded)
             return graded
     except Exception:
         pass
 
-    graded: List[GradedChunk] = []
-    for chunk in selected:
-        relevance = max(
-            _heuristic_relevance(question, chunk.page_content),
-            _title_hint_relevance(question, chunk.metadata or {}),
-        )
-        echo_penalty = _question_echo_penalty(question, chunk)
-        meta_penalty = _meta_catalog_penalty(question, chunk.metadata or {})
-        runbook_penalty = _operational_runbook_penalty(question, chunk.metadata or {})
-        if echo_penalty or meta_penalty or runbook_penalty:
-            if echo_penalty >= meta_penalty and echo_penalty >= runbook_penalty:
-                relevance = max(0, relevance - echo_penalty)
-                reason = "question_echo"
-            elif meta_penalty >= runbook_penalty:
-                relevance = max(0, relevance - meta_penalty)
-                reason = "meta_catalog"
-            else:
-                relevance = max(0, relevance - runbook_penalty)
-                reason = "operational_runbook"
-        else:
-            reason = "heuristic"
-        graded.append(GradedChunk(doc=chunk, relevance=relevance, reason=reason))
-    return graded
+    fallback = _heuristic_grade_selected(question, selected, reason="heuristic_timeout_or_unavailable")
+    _put_cached_grades(cache_key, fallback)
+    return fallback

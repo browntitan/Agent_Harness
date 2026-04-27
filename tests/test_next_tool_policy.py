@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.messages import SessionState
+from agentic_chatbot_next.capabilities import EffectiveCapabilities
 from agentic_chatbot_next.runtime.context import RuntimePaths
 from agentic_chatbot_next.tools.base import ToolContext
 from agentic_chatbot_next.tools.policy import ToolPolicyService
@@ -189,3 +190,35 @@ def test_tool_policy_clips_tools_inside_skill_execution(tmp_path: Path) -> None:
     assert policy.is_allowed(agent, definitions["calculator"], ctx)
     assert not policy.is_allowed(agent, definitions["search_skills"], ctx)
     assert not policy.is_allowed(agent, definitions["execute_skill"], ctx)
+
+
+def test_tool_policy_blocks_disabled_tool_from_effective_capabilities(tmp_path: Path) -> None:
+    definitions = build_tool_definitions(None)
+    policy = ToolPolicyService()
+    agent = AgentDefinition(
+        name="utility",
+        mode="react",
+        prompt_file="utility_agent.md",
+        allowed_tools=["calculator", "list_indexed_docs"],
+    )
+    ctx = _tool_context(tmp_path)
+    ctx.metadata["effective_capabilities"] = EffectiveCapabilities(disabled_tools=["calculator"]).to_dict()
+
+    assert not policy.is_allowed(agent, definitions["calculator"], ctx)
+    assert policy.is_allowed(agent, definitions["list_indexed_docs"], ctx)
+
+
+def test_tool_policy_restricted_mode_allows_read_only_tools_only(tmp_path: Path) -> None:
+    definitions = build_tool_definitions(None)
+    policy = ToolPolicyService()
+    agent = AgentDefinition(
+        name="general",
+        mode="react",
+        prompt_file="general_agent.md",
+        allowed_tools=["list_jobs", "stop_job"],
+    )
+    ctx = _tool_context(tmp_path)
+    ctx.metadata["effective_capabilities"] = EffectiveCapabilities(permission_mode="restricted").to_dict()
+
+    assert policy.is_allowed(agent, definitions["list_jobs"], ctx)
+    assert not policy.is_allowed(agent, definitions["stop_job"], ctx)

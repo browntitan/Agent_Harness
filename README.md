@@ -56,13 +56,15 @@ docker compose --profile observability up -d --no-build
 Use the dev compose overlay when you are editing Python API/agent code or the control panel and do not want to rebuild the app image after every save:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build app control-panel-dev
+cd /Users/shivbalodi/Desktop/Rag_Research/agentic_chatbot_v3
+docker compose down --remove-orphans
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build app app-bootstrap openwebui openwebui-bootstrap control-panel-dev
 ```
 
-After the first build, restart the dev stack without rebuilding:
+After the first build, bring the dev stack back up without rebuilding:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build app control-panel-dev
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build app openwebui control-panel-dev
 ```
 
 Dev URLs:
@@ -70,8 +72,31 @@ Dev URLs:
 - API with backend reload: `http://127.0.0.1:18000`
 - Vite control panel with HMR: `http://127.0.0.1:4174`
 - Static control panel served by FastAPI: `http://127.0.0.1:18000/control-panel`
+- Open WebUI: `http://127.0.0.1:3001`
 
 In this mode, `./src` and `./run.py` are mounted into the app container and uvicorn watches `/app/src`. Control panel source is served by Vite with `/v1` and `/health` proxied to the app container. Rebuild the app image only when Docker-level inputs change, such as `requirements.txt`, `Dockerfile`, system packages, or production static assets.
+
+Use this rule of thumb while developing:
+
+- `src/` changes: save the file and let uvicorn reload automatically.
+- `data/agents`, `data/prompts`, or `data/router` changes: restart `app` so the runtime reloads those mounted files.
+- schema/bootstrap changes: rerun `app-bootstrap`.
+- dependency or image changes such as `requirements.txt` or `Dockerfile`: rebuild.
+
+Useful dev commands:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart app
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate --no-deps app-bootstrap
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build app app-bootstrap
+```
+
+To confirm you are really in dev mode, the running `app` container should show a bind mount for `/app/src` and a uvicorn `--reload` command:
+
+```bash
+docker inspect agentic-chatbot-v3-app-1 --format '{{json .Config.Cmd}}'
+docker inspect agentic-chatbot-v3-app-1 --format '{{range .Mounts}}{{println .Destination " <- " .Source}}{{end}}'
+```
 
 ## Health Checks
 

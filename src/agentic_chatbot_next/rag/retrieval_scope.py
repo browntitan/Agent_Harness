@@ -182,12 +182,7 @@ def resolve_available_kb_collection_ids(settings: Any, session: Any) -> tuple[st
     metadata = _metadata(session)
     access_summary = dict(metadata.get("access_summary") or {})
     if access_summary_authz_enabled(access_summary):
-        return _dedupe_non_empty(
-            [
-                *access_summary_allowed_ids(access_summary, "collection", action="use"),
-                str(access_summary.get("session_upload_collection_id") or "").strip(),
-            ]
-        )
+        return _dedupe_non_empty(access_summary_allowed_ids(access_summary, "collection", action="use"))
     normalized = _normalize_collection_ids(metadata.get("available_kb_collection_ids"))
     if normalized:
         return normalized
@@ -341,7 +336,6 @@ def merge_scope_metadata(settings: Any, metadata: dict[str, Any] | None) -> dict
             _dedupe_non_empty(
                 [
                     *access_summary_allowed_ids(access_summary, "collection", action="use"),
-                    str(access_summary.get("session_upload_collection_id") or "").strip(),
                 ]
             )
             if access_summary_authz_enabled(access_summary)
@@ -382,6 +376,42 @@ def _explicit_upload_excludes_kb(query: str) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+def _explicit_current_chat_upload_request(query: str) -> bool:
+    text = str(query or "")
+    return bool(
+        re.search(
+            r"\b(?:(?:current|this)\s+chat\s+|attached\s+|attachment\s+|my\s+)(?:upload|uploads|file|files|document|documents)\b",
+            text,
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"\b(?:in|from|use|inspect|review|summari[sz]e)\s+(?:the\s+)?(?:(?:current|this)\s+chat\s+)?(?:uploaded|attached|attachment)\b",
+            text,
+            re.IGNORECASE,
+        )
+        or re.search(
+            r"\bsearch\s+(?:the\s+)?(?:(?:current|this)\s+chat\s+)?(?:attached|attachment)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _explicit_kb_scope_requested(session: Any) -> bool:
+    metadata = _metadata(session)
+    if resolve_requested_kb_collection_id(session):
+        return True
+    if _coerce_bool(metadata.get("kb_collection_confirmed"), default=False):
+        return True
+    raw_search_ids = metadata.get("search_collection_ids")
+    if isinstance(raw_search_ids, (list, tuple)):
+        upload_collection_id = _first_non_empty(metadata.get("upload_collection_id"))
+        normalized = [str(item or "").strip() for item in raw_search_ids if str(item or "").strip()]
+        if normalized and any(item != upload_collection_id for item in normalized):
+            return True
+    return False
 
 
 def _extract_named_document_targets(query: str) -> tuple[str, ...]:
@@ -469,6 +499,18 @@ def decide_retrieval_scope(
             upload_collection_id=upload_collection_id,
             kb_collection_id=kb_collection_id,
             search_collection_ids=_dedupe_non_empty([upload_collection_id if effective_has_uploads else ""]),
+            has_uploads=effective_has_uploads,
+            kb_available=kb_available,
+        )
+
+    explicit_kb_text = any(pattern.search(text) for pattern in _EXPLICIT_KB_PATTERNS)
+    if (explicit_kb_text or _explicit_kb_scope_requested(session)) and not _explicit_current_chat_upload_request(text):
+        return RetrievalScopeDecision(
+            mode="kb_only",
+            reason="explicit_kb_only",
+            upload_collection_id=upload_collection_id,
+            kb_collection_id=kb_collection_id,
+            search_collection_ids=_dedupe_non_empty([kb_collection_id]),
             has_uploads=effective_has_uploads,
             kb_available=kb_available,
         )

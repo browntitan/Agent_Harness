@@ -6,6 +6,7 @@ from agentic_chatbot_next.persistence.postgres.access import (
     AuthRolePermissionRecord,
     AuthRoleRecord,
 )
+from agentic_chatbot_next.persistence.postgres.capabilities import PostgresCapabilityProfileStore
 from agentic_chatbot_next.persistence.postgres.chunks import ChunkRecord, ChunkStore, ScoredChunk
 from agentic_chatbot_next.persistence.postgres.collections import (
     COLLECTION_MAINTENANCE_CONFIGURED_KB_SOURCES,
@@ -84,6 +85,7 @@ __all__ = [
     "McpConnectionRecord",
     "McpConnectionStore",
     "McpToolCatalogRecord",
+    "PostgresCapabilityProfileStore",
     "PostgresMemoryStore",
     "RequirementStatementRecord",
     "RequirementStatementStore",

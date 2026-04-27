@@ -21,7 +21,10 @@ from agentic_chatbot_next.runtime.doc_focus import (
     active_doc_focus_from_metadata,
     is_active_doc_focus_followup,
 )
-from agentic_chatbot_next.runtime.task_decomposition import is_mixed_utility_retrieval_request
+from agentic_chatbot_next.runtime.task_decomposition import (
+    is_clause_policy_workflow,
+    is_mixed_utility_retrieval_request,
+)
 from agentic_chatbot_next.runtime.turn_contracts import (
     plan_satisfies_intent,
     resolve_turn_intent,
@@ -34,6 +37,7 @@ _VALID_EXECUTORS = {
     "data_analyst",
     "general",
     "graph_manager",
+    "verifier",
 }
 _VALID_MODES = {"sequential", "parallel"}
 TERMINAL_TASK_STATUSES = {"completed", "failed", "stopped", "waiting_message"}
@@ -72,6 +76,13 @@ class TaskSpec:
     consumes_artifacts: List[str] = field(default_factory=list)
     handoff_schema: str = ""
     input_artifact_ids: List[str] = field(default_factory=list)
+    capability_requirements: Dict[str, Any] = field(default_factory=dict)
+    evidence_scope: Dict[str, Any] = field(default_factory=dict)
+    loop_over_artifact: str = ""
+    parallelization_key: str = ""
+    acceptance_criteria: List[str] = field(default_factory=list)
+    permission_requirements: List[str] = field(default_factory=list)
+    expected_artifacts: List[str] = field(default_factory=list)
     status: str = "pending"
     artifact_ref: str = ""
 
@@ -94,6 +105,13 @@ class TaskSpec:
             "consumes_artifacts": list(self.consumes_artifacts),
             "handoff_schema": self.handoff_schema,
             "input_artifact_ids": list(self.input_artifact_ids),
+            "capability_requirements": dict(self.capability_requirements),
+            "evidence_scope": dict(self.evidence_scope),
+            "loop_over_artifact": self.loop_over_artifact,
+            "parallelization_key": self.parallelization_key,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "permission_requirements": list(self.permission_requirements),
+            "expected_artifacts": list(self.expected_artifacts),
             "status": self.status,
             "artifact_ref": self.artifact_ref or f"task:{self.id}",
         }
@@ -114,6 +132,9 @@ class TaskSpec:
         produces_artifacts = [str(item) for item in (raw.get("produces_artifacts") or []) if str(item)]
         consumes_artifacts = [str(item) for item in (raw.get("consumes_artifacts") or []) if str(item)]
         input_artifact_ids = [str(item) for item in (raw.get("input_artifact_ids") or []) if str(item)]
+        acceptance_criteria = [str(item) for item in (raw.get("acceptance_criteria") or []) if str(item)]
+        permission_requirements = [str(item) for item in (raw.get("permission_requirements") or []) if str(item)]
+        expected_artifacts = [str(item) for item in (raw.get("expected_artifacts") or []) if str(item)]
         status = str(raw.get("status") or "pending")
         artifact_ref = str(raw.get("artifact_ref") or f"task:{task_id}")
         task = cls(
@@ -134,6 +155,13 @@ class TaskSpec:
             consumes_artifacts=consumes_artifacts,
             handoff_schema=str(raw.get("handoff_schema") or ""),
             input_artifact_ids=input_artifact_ids,
+            capability_requirements=dict(raw.get("capability_requirements") or {}),
+            evidence_scope=dict(raw.get("evidence_scope") or {}),
+            loop_over_artifact=str(raw.get("loop_over_artifact") or ""),
+            parallelization_key=str(raw.get("parallelization_key") or ""),
+            acceptance_criteria=acceptance_criteria,
+            permission_requirements=permission_requirements,
+            expected_artifacts=expected_artifacts,
             status=status,
             artifact_ref=artifact_ref,
         )
@@ -221,6 +249,7 @@ class WorkerExecutionRequest:
 @dataclass
 class VerificationResult:
     status: str = "pass"
+    verdict: str = "PASS"
     summary: str = ""
     issues: List[str] = field(default_factory=list)
     feedback: str = ""
@@ -229,6 +258,7 @@ class VerificationResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status,
+            "verdict": self.verdict,
             "summary": self.summary,
             "issues": list(self.issues),
             "feedback": self.feedback,
@@ -501,6 +531,141 @@ def _build_mixed_utility_retrieval_plan(
     tasks = [utility_task, retrieval_task]
     if max_tasks >= 3:
         tasks.append(synthesis_task)
+    return [task.to_dict() for task in tasks[:max_tasks]]
+
+
+def _build_clause_redline_policy_plan(
+    query: str,
+    *,
+    analysis_query: str,
+    max_tasks: int,
+    requested_collection_id: str = "",
+) -> List[Dict[str, Any]]:
+    requested_collection_id = requested_collection_id or extract_requested_kb_collection_id(analysis_query)
+    policy_scope = [requested_collection_id] if requested_collection_id else []
+    extract_task = TaskSpec(
+        id="task_1",
+        title="Extract clauses and redlines",
+        executor="general",
+        mode="sequential",
+        input=(
+            "Inspect the uploaded document artifacts and extract every clause plus associated redline or tracked-change context. "
+            "Do not search policy guidance in this task. Return structured JSON only with this schema:\n"
+            "{"
+            '"clauses":[{"clause_id":"...", "clause_text":"...", "redline_text":"...", '
+            '"redline_type":"insertion|deletion|modification|comment|unknown", '
+            '"source_doc_id":"...", "location":"...", "confidence":0.0}], '
+            '"warnings":["..."]'
+            "}\n\n"
+            f"REQUEST:\n{query}"
+        ),
+        skill_queries=[
+            "document clause extraction",
+            "tracked changes redline extraction",
+            "structured legal review artifact",
+        ],
+        produces_artifacts=["clause_redline_inventory"],
+        handoff_schema="clause_redline_policy_review",
+        capability_requirements={"agents": ["general"], "tools": ["read_indexed_doc", "extract_requirement_statements"]},
+        evidence_scope={"source": "uploads", "requires_redline_preservation": True},
+        acceptance_criteria=[
+            "Every extracted item has clause_id, clause_text, source_doc_id, location, and confidence.",
+            "Redlines are represented separately from flattened clause text when available.",
+            "Extraction warnings call out any unsupported tracked-change fidelity gaps.",
+        ],
+        expected_artifacts=["clause_redline_inventory"],
+    )
+    lookup_task = _build_rag_task(
+        task_id="task_2",
+        title="Search internal policy guidance per clause",
+        mode="sequential",
+        query=(
+            "For each clause/redline in the clause_redline_inventory artifact, search the selected internal policy guidance collection. "
+            "Return one policy evidence record per clause_id, including explicit no-evidence records when no policy guidance is found. "
+            "Do not draft buyer-facing language in this task.\n\n"
+            f"REQUEST:\n{query}"
+        ),
+        doc_scope=policy_scope,
+        skill_queries=[
+            "policy guidance retrieval",
+            "per item evidence fanout",
+            "citation hygiene and synthesis rules",
+        ],
+        depends_on=["task_1"],
+        answer_mode="evidence_only",
+        controller_hints={
+            "research_workflow": "clause_redline_policy_review",
+            "workflow_phase": "policy_lookup_fanout",
+            "retrieval_scope_mode": "kb_only",
+            "strict_kb_scope": bool(requested_collection_id),
+            **({"requested_kb_collection_id": requested_collection_id, "search_collection_ids": [requested_collection_id]} if requested_collection_id else {}),
+        },
+        produces_artifacts=["policy_guidance_matches"],
+        consumes_artifacts=["clause_redline_inventory"],
+        handoff_schema="clause_redline_policy_review",
+    )
+    lookup_task.capability_requirements = {
+        "agents": ["rag_worker"],
+        "collections": policy_scope,
+        "tools": ["search_indexed_docs", "read_indexed_doc"],
+    }
+    lookup_task.evidence_scope = {"source": "knowledge_base", "collection_id": requested_collection_id}
+    lookup_task.loop_over_artifact = "clause_redline_inventory.clauses"
+    lookup_task.parallelization_key = "clause_id"
+    lookup_task.acceptance_criteria = [
+        "Each clause_id has policy evidence or an explicit no_evidence result.",
+        "Policy summaries preserve citation IDs and collection scope.",
+        "No uploaded-document clause text is treated as policy guidance.",
+    ]
+    lookup_task.expected_artifacts = ["policy_guidance_matches"]
+
+    verify_task = TaskSpec(
+        id="task_3",
+        title="Verify clause coverage",
+        executor="verifier",
+        mode="sequential",
+        depends_on=["task_2"],
+        input=(
+            "Audit the clause_redline_inventory and policy_guidance_matches artifacts. "
+            "Verify that every clause_id has either cited policy evidence or a documented no-evidence result. "
+            "Return JSON only with verdict PASS, FAIL, or PARTIAL plus missing clause_ids and risks."
+        ),
+        consumes_artifacts=["clause_redline_inventory", "policy_guidance_matches"],
+        produces_artifacts=["policy_coverage_verification"],
+        handoff_schema="clause_redline_policy_review",
+        capability_requirements={"agents": ["verifier", "general"], "tools": ["read_indexed_doc"]},
+        evidence_scope={"source": "artifacts", "requires_complete_clause_coverage": True},
+        acceptance_criteria=[
+            "Verdict is PASS, FAIL, or PARTIAL.",
+            "Missing or weak-evidence clause_ids are listed explicitly.",
+        ],
+        expected_artifacts=["policy_coverage_verification"],
+    )
+    synthesis_task = TaskSpec(
+        id="task_4",
+        title="Draft buyer recommendation table",
+        executor="general",
+        mode="sequential",
+        depends_on=["task_3"],
+        input=(
+            "Use the verified clause/redline extraction and policy evidence to prepare a buyer-facing recommendation table. "
+            "Columns must be: clause/redline, supplier position, internal policy guidance summary, recommended buyer response, "
+            "risk level, citations/evidence, unresolved questions. Do not invent policy guidance where evidence is missing.\n\n"
+            f"REQUEST:\n{query}"
+        ),
+        consumes_artifacts=["clause_redline_inventory", "policy_guidance_matches", "policy_coverage_verification"],
+        produces_artifacts=["buyer_recommendation_table"],
+        handoff_schema="clause_redline_policy_review",
+        capability_requirements={"agents": ["general"], "collections": policy_scope},
+        evidence_scope={"source": "mixed_upload_and_policy_kb", "requires_citations": True},
+        acceptance_criteria=[
+            "Final table includes all requested columns.",
+            "Recommendations are grounded in cited internal guidance or marked unresolved.",
+            "Risk level is provided for every clause/redline.",
+        ],
+        expected_artifacts=["buyer_recommendation_table"],
+    )
+    tasks = [extract_task, lookup_task, verify_task, synthesis_task]
     return [task.to_dict() for task in tasks[:max_tasks]]
 
 
@@ -934,6 +1099,24 @@ def build_fallback_plan(
             },
         )
         return [task.to_dict()]
+
+    if max_tasks >= 4 and is_clause_policy_workflow(
+        analysis_query,
+        session_metadata={
+            **dict(session_metadata or {}),
+            "has_uploads": bool(dict(session_metadata or {}).get("uploaded_doc_ids")),
+        },
+    ):
+        return _build_clause_redline_policy_plan(
+            query,
+            analysis_query=analysis_query,
+            max_tasks=max_tasks,
+            requested_collection_id=str(
+                dict(session_metadata or {}).get("requested_kb_collection_id")
+                or dict(session_metadata or {}).get("kb_collection_id")
+                or ""
+            ).strip(),
+        )
 
     if max_tasks >= 2 and is_mixed_utility_retrieval_request(
         analysis_query,

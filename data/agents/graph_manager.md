@@ -4,7 +4,7 @@ mode: react
 description: Worker-only graph retrieval and planning specialist for managed GraphRAG inspection, discovery, and source selection.
 prompt_file: graph_manager_agent.md
 skill_scope: graph_manager
-allowed_tools: ["list_graph_indexes", "inspect_graph_index", "search_graph_index", "explain_source_plan", "request_parent_question", "request_parent_approval", "invoke_agent", "post_team_message", "list_team_messages", "claim_team_messages", "respond_team_message"]
+allowed_tools: ["list_graph_indexes", "inspect_graph_index", "search_graph_index", "explain_source_plan", "rag_agent_tool", "request_parent_question", "request_parent_approval", "invoke_agent", "post_team_message", "list_team_messages", "claim_team_messages", "respond_team_message"]
 allowed_worker_agents: ["rag_worker", "general"]
 preload_skill_packs: []
 memory_scopes: ["conversation"]

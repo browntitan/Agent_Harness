@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from langchain_core.documents import Document
 
 from agentic_chatbot_next.persistence.postgres.chunks import ScoredChunk
-from agentic_chatbot_next.rag.retrieval import grade_chunks, merge_dedupe, retrieve_candidates
+from agentic_chatbot_next.rag import retrieval as retrieval_module
+from agentic_chatbot_next.rag.query_normalization import normalize_retrieval_question
+from agentic_chatbot_next.rag.retrieval import grade_chunks, merge_dedupe, rank_fuse_dedupe, retrieve_candidates
 
 
 def _scored_chunk(*, doc_id: str, chunk_id: str, title: str, score: float, method: str = "vector") -> ScoredChunk:
@@ -187,6 +189,39 @@ def test_merge_dedupe_returns_results_sorted_by_score_descending():
     assert [chunk.doc.metadata["doc_id"] for chunk in merged] == ["doc-high", "doc-low"]
 
 
+def test_rank_fuse_dedupe_uses_lane_rank_not_raw_score_only() -> None:
+    vector_top = _scored_chunk(doc_id="doc-vector", chunk_id="doc-vector#chunk0001", title="VECTOR.md", score=0.99)
+    shared_vector = _scored_chunk(doc_id="doc-shared", chunk_id="doc-shared#chunk0001", title="SHARED.md", score=0.2)
+    shared_keyword = _scored_chunk(doc_id="doc-shared", chunk_id="doc-shared#chunk0001", title="SHARED.md", score=0.2, method="keyword")
+    keyword_top = _scored_chunk(doc_id="doc-keyword", chunk_id="doc-keyword#chunk0001", title="KEYWORD.md", score=12.0, method="keyword")
+
+    fused = rank_fuse_dedupe(
+        {
+            "vector": [vector_top, shared_vector],
+            "keyword": [shared_keyword, keyword_top],
+        }
+    )
+
+    assert fused[0].doc.metadata["doc_id"] == "doc-shared"
+    assert set(fused[0].doc.metadata["_retrieval_lanes"]) == {"vector", "keyword"}
+
+
+def test_normalize_retrieval_question_strips_guided_tool_routing_prefix() -> None:
+    assert (
+        normalize_retrieval_question(
+            "Search the default knowledge base for this product fact and answer briefly with citations: What are the three AAP plans?"
+        )
+        == "What are the three AAP plans?"
+    )
+
+
+def test_normalize_retrieval_question_preserves_content_prefix() -> None:
+    assert (
+        normalize_retrieval_question("Security policy: What happens when an uploaded document is deleted?")
+        == "Security policy: What happens when an uploaded document is deleted?"
+    )
+
+
 def test_grade_chunks_preserves_architecture_docs_via_title_hint():
     architecture_doc = Document(
         page_content="Implementation details for the next runtime kernel and routing flow.",
@@ -338,3 +373,34 @@ def test_grade_chunks_batches_selected_chunks_into_single_judge_call():
         "doc-b#chunk0001",
         "doc-c#chunk0001",
     ]
+
+
+def test_grade_chunks_caches_identical_candidate_sets():
+    retrieval_module._GRADE_CACHE.clear()
+    doc = Document(
+        page_content="Alpha approval evidence with budget owner and rollout date.",
+        metadata={"chunk_id": "doc-a#chunk0001", "title": "alpha.md"},
+    )
+    invocations = 0
+
+    def invoke(prompt, config=None):
+        nonlocal invocations
+        del prompt, config
+        invocations += 1
+        return SimpleNamespace(
+            content='{"grades": [{"chunk_id": "doc-a#chunk0001", "relevance": 3, "reason": "exact"}]}'
+        )
+
+    judge = SimpleNamespace(invoke=invoke)
+    settings = SimpleNamespace(
+        prompts_backend="local",
+        judge_grading_prompt_path=Path("missing"),
+        rag_heuristic_grading_enabled=False,
+    )
+
+    first = grade_chunks(judge, settings=settings, question="Who owns Alpha approval?", chunks=[doc], callbacks=[])
+    second = grade_chunks(judge, settings=settings, question="Who owns Alpha approval?", chunks=[doc], callbacks=[])
+
+    assert invocations == 1
+    assert first[0].relevance == 3
+    assert second[0].relevance == 3

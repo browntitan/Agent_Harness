@@ -11,18 +11,17 @@ langgraph>=0.2.0
 # PostgreSQL + pgvector (replaces chromadb + rank-bm25)
 psycopg2-binary>=2.9.9
 pgvector>=0.3.0
-langchain-postgres>=0.0.9
 
 # RAG + document processing
 pypdf>=4.0.0
 docx2txt>=0.8
 python-docx>=1.1.0
+python-pptx>=0.6.23
 rapidfuzz>=3.6.0
+fsspec>=2024.6.0
+s3fs>=2024.6.0
+adlfs>=2024.4.0
 
-# Docling — advanced document extraction engine (IBM, MIT license)
-# Handles PDF, DOCX, PPTX, XLSX, images; layout-aware; table extraction; clean Markdown output
-# Install separately if not needed: pip install docling
-docling>=2.0.0
 graphrag>=3.0.8
 pyarrow>=16.0.0
 
@@ -47,7 +46,8 @@ uvicorn>=0.30.0
 httpx[http2]>=0.27.0
 python-multipart>=0.0.9
 mcp>=1.0.0
-cryptography>=42.0.0
+# cryptography 47.0.0 arm64 wheels crash with SIGILL in this Docker Desktop stack.
+cryptography==46.0.3
 
 # Data analyst sandbox
 docker>=7.0.0

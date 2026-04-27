@@ -975,10 +975,12 @@ def test_rag_agent_tool_forwards_search_mode_and_max_rounds(monkeypatch) -> None
         **kwargs,
     ):
         del settings_arg, stores_arg, providers, session, query, conversation_context
-        del preferred_doc_ids, must_include_uploads, top_k_vector, top_k_keyword, max_retries, callbacks, kwargs
+        del preferred_doc_ids, must_include_uploads, max_retries, callbacks, kwargs
         del research_profile, coverage_goal, result_mode, controller_hints
         captured["search_mode"] = search_mode
         captured["max_search_rounds"] = max_search_rounds
+        captured["top_k_vector"] = top_k_vector
+        captured["top_k_keyword"] = top_k_keyword
         return FakeRagContract("adaptive answer")
 
     monkeypatch.setattr("agentic_chatbot_next.tools.rag_agent_tool.run_rag_contract", fake_run_rag_contract)
@@ -993,4 +995,9 @@ def test_rag_agent_tool_forwards_search_mode_and_max_rounds(monkeypatch) -> None
     result = tool.invoke({"query": "find workflows", "search_mode": "deep", "max_search_rounds": 4})
 
     assert result["answer"] == "adaptive answer"
-    assert captured == {"search_mode": "deep", "max_search_rounds": 4}
+    assert captured == {
+        "search_mode": "deep",
+        "max_search_rounds": 4,
+        "top_k_vector": 15,
+        "top_k_keyword": 15,
+    }

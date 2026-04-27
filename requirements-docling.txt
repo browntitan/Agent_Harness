@@ -1,0 +1,8 @@
+# Optional advanced document extraction engine (IBM, MIT license).
+# Install in addition to requirements.txt when DOCLING_ENABLED=true is needed:
+#   pip install -r requirements-docling.txt
+#
+# Docling handles PDF, DOCX, PPTX, XLSX, images, layout-aware extraction,
+# table extraction, and Markdown export, but it brings a much larger ML
+# dependency stack than the default PaddleOCR path.
+docling>=2.0.0

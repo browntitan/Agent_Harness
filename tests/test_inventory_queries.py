@@ -125,6 +125,10 @@ def test_classify_inventory_query_distinguishes_session_access_and_kb_inventory(
     assert classify_inventory_query("what documents are in the default collection") == INVENTORY_QUERY_KB_FILE
     assert classify_inventory_query("show the files in collection default") == INVENTORY_QUERY_KB_FILE
     assert classify_inventory_query("list the individual files inside the default KB") == INVENTORY_QUERY_KB_FILE
+    assert (
+        classify_inventory_query("Use the indexed knowledge base inventory tools to list the knowledge base collections this session can access.")
+        == INVENTORY_QUERY_KB_COLLECTIONS
+    )
 
 
 def test_classify_inventory_query_distinguishes_graph_inventory() -> None:
@@ -132,6 +136,10 @@ def test_classify_inventory_query_distinguishes_graph_inventory() -> None:
     assert classify_inventory_query("which knowledge graphs are available") == INVENTORY_QUERY_GRAPH_INDEXES
     assert classify_inventory_query("list my graph indexes") == INVENTORY_QUERY_GRAPH_INDEXES
     assert classify_inventory_query("what graphs exist") == INVENTORY_QUERY_GRAPH_INDEXES
+    assert (
+        classify_inventory_query("Use the knowledge graph inventory tools to list the knowledge graphs this session can access.")
+        == INVENTORY_QUERY_GRAPH_INDEXES
+    )
 
 
 def test_classify_inventory_query_routes_bare_namespace_doc_list_queries_to_inventory() -> None:
@@ -143,6 +151,10 @@ def test_classify_inventory_query_routes_bare_namespace_doc_list_queries_to_inve
 
 def test_classify_inventory_query_distinguishes_graph_document_inventory() -> None:
     assert classify_inventory_query("what documents are in the rfp-corpus graph") == INVENTORY_QUERY_GRAPH_FILE
+    assert (
+        classify_inventory_query("Search the defense_rag_v2_graph knowledge graph inventory and list the source documents in that graph.")
+        == INVENTORY_QUERY_GRAPH_FILE
+    )
 
 
 def test_classify_inventory_query_rejects_filtered_discovery_prompts() -> None:
@@ -305,6 +317,7 @@ def test_list_indexed_docs_kb_collections_view_returns_all_visible_collections()
             "display_name": "RFP Corpus Graph",
             "collection_id": "rfp-corpus",
             "status": "ready",
+            "backend": "microsoft_graphrag",
             "query_ready": True,
             "domain_summary": "Graph index for cross-document RFP entity and requirement analysis",
             "source_document_count": 1,
@@ -757,6 +770,7 @@ def test_list_indexed_docs_kb_collections_view_only_lists_graphs_allowed_by_acce
             "display_name": "Allowed Graph",
             "collection_id": "default",
             "status": "ready",
+            "backend": "microsoft_graphrag",
             "query_ready": True,
             "domain_summary": "",
             "source_document_count": 1,
@@ -764,6 +778,135 @@ def test_list_indexed_docs_kb_collections_view_only_lists_graphs_allowed_by_acce
             "summary": "Graph index over default, query-ready, covering 1 source document.",
         }
     ]
+
+
+def test_kb_collection_access_inventory_excludes_current_and_previous_chat_uploads() -> None:
+    session = SimpleNamespace(
+        tenant_id="tenant",
+        user_id="user-1",
+        metadata={
+            "collection_id": "owui-chat-1",
+            "upload_collection_id": "owui-chat-1",
+            "kb_collection_id": "default",
+            "access_summary": {
+                "authz_enabled": True,
+                "session_upload_collection_id": "owui-chat-1",
+                "resources": {
+                    "collection": {
+                        "use": ["default", "owui-chat-1", "owui-chat-old"],
+                        "manage": [],
+                        "use_all": False,
+                        "manage_all": False,
+                    },
+                    "graph": {
+                        "use": ["kb_graph", "current_upload_graph", "old_upload_graph"],
+                        "manage": [],
+                        "use_all": False,
+                        "manage_all": False,
+                    },
+                    "tool": {"use": [], "manage": [], "use_all": False, "manage_all": False},
+                    "skill_family": {"use": [], "manage": [], "use_all": False, "manage_all": False},
+                },
+            },
+        },
+        uploaded_doc_ids=["upload-current"],
+    )
+    stores = SimpleNamespace(
+        doc_store=_DocStore(
+            [
+                SimpleNamespace(
+                    doc_id="doc-default",
+                    title="Architecture.md",
+                    source_type="kb",
+                    collection_id="default",
+                    tenant_id="tenant",
+                    num_chunks=12,
+                    file_type="md",
+                    doc_structure_type="general",
+                    source_path="/repo/docs/ARCHITECTURE.md",
+                ),
+                SimpleNamespace(
+                    doc_id="upload-current",
+                    title="current-contract.pdf",
+                    source_type="upload",
+                    collection_id="owui-chat-1",
+                    tenant_id="tenant",
+                    num_chunks=4,
+                    file_type="pdf",
+                    doc_structure_type="general",
+                    source_path="/uploads/current-contract.pdf",
+                ),
+                SimpleNamespace(
+                    doc_id="upload-old",
+                    title="old-contract.pdf",
+                    source_type="upload",
+                    collection_id="owui-chat-old",
+                    tenant_id="tenant",
+                    num_chunks=3,
+                    file_type="pdf",
+                    doc_structure_type="general",
+                    source_path="/uploads/old-contract.pdf",
+                ),
+            ]
+        ),
+        graph_index_store=_GraphIndexStore(
+            [
+                GraphIndexRecord(
+                    graph_id="kb_graph",
+                    tenant_id="tenant",
+                    collection_id="default",
+                    display_name="KB Graph",
+                    status="ready",
+                    query_ready=True,
+                    source_doc_ids=["doc-default"],
+                ),
+                GraphIndexRecord(
+                    graph_id="current_upload_graph",
+                    tenant_id="tenant",
+                    collection_id="owui-chat-1",
+                    display_name="Current Upload Graph",
+                    status="ready",
+                    query_ready=True,
+                    source_doc_ids=["upload-current"],
+                ),
+                GraphIndexRecord(
+                    graph_id="old_upload_graph",
+                    tenant_id="tenant",
+                    collection_id="owui-chat-old",
+                    display_name="Old Upload Graph",
+                    status="ready",
+                    query_ready=True,
+                    source_doc_ids=["upload-old"],
+                ),
+            ]
+        ),
+    )
+
+    dispatched = dispatch_authoritative_inventory(
+        _settings(),
+        stores,
+        session,
+        query="what knowledge bases do i have access to",
+        query_type=INVENTORY_QUERY_KB_COLLECTIONS,
+    )
+
+    assert dispatched["handled"] is True
+    assert [item["collection_id"] for item in dispatched["payload"]["collections"]] == ["default"]
+    assert session.metadata["available_kb_collection_ids"] == ["default"]
+    assert [item["graph_id"] for item in dispatched["payload"]["graphs"]] == ["kb_graph"]
+    answer = dispatched["answer"]["answer"]
+    assert "KB Graph (`kb_graph`)" in answer
+    assert "current-contract.pdf" not in answer
+    assert "old-contract.pdf" not in answer
+    assert "owui-chat-1" not in answer
+    assert "owui-chat-old" not in answer
+    assert "Current Upload Graph" not in answer
+    assert "Old Upload Graph" not in answer
+
+    session_access = json.loads(make_list_docs_tool(_settings(), stores, session).invoke({"view": "session_access"}))
+    assert session_access["view"] == "session_access"
+    assert session_access["available_kb_collection_ids"] == ["default"]
+    assert [item["doc_id"] for item in session_access["uploaded_documents"]] == ["upload-current"]
 
 
 def test_sync_session_kb_collection_state_promotes_clarified_collection_choice() -> None:

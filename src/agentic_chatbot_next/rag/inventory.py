@@ -62,6 +62,10 @@ _COLLECTION_REFERENCE_PATTERNS = (
 )
 _GRAPH_REFERENCE_PATTERNS = (
     re.compile(
+        rf"\b(?P<graph>{_COLLECTION_NAME_PATTERN})\s+(?:knowledge\s+graph|graph(?:\s+index)?)\s+inventory\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         rf"\b(?:in|inside|within|from|for)\s+(?:the\s+)?(?P<graph>{_COLLECTION_NAME_PATTERN})\s+(?:knowledge\s+graph|graph(?:\s+index)?)\b",
         re.IGNORECASE,
     ),
@@ -113,11 +117,11 @@ _GRAPH_FILE_INVENTORY_PATTERNS = (
 )
 _KB_COLLECTION_ACCESS_PATTERNS = (
     re.compile(
-        r"\b(?:what|which)\b.*\b(?:knowledge\s*bases?|kbs?|kb\s+collections?)\b.*\b(?:have\s+access\s+to|are\s+available)\b",
+        r"\b(?:what|which)\b.*\b(?:knowledge\s*bases|kbs\b|kb\s+collections?|knowledge\s*base\s+collections?)\b.*\b(?:have\s+access\s+to|are\s+available)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:show|list)(?:\s+out)?\b.*\b(?:knowledge\s*bases?|kbs?|kb\s+collections?)\b.*\b(?:have\s+access\s+to|available)?\b",
+        r"\b(?:show|list)(?:\s+out)?\b.*\b(?:knowledge\s*bases|kbs\b|kb\s+collections?|knowledge\s*base\s+collections?)\b.*\b(?:have\s+access\s+to|available)?\b",
         re.IGNORECASE,
     ),
 )
@@ -194,6 +198,10 @@ _NAMESPACE_STOPWORDS = {
     "collection",
     "graph",
     "knowledge graph",
+    "indexed",
+    "inventory",
+    "tool",
+    "tools",
     "it",
     "them",
     "this",
@@ -337,20 +345,20 @@ def classify_inventory_query(query: str) -> str:
     text = str(query or "").strip()
     if not text:
         return INVENTORY_QUERY_NONE
+    if any(pattern.search(text) for pattern in _KB_COLLECTION_ACCESS_PATTERNS):
+        return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_KB_COLLECTIONS
     if _is_graph_scoped_file_inventory_query(text):
         return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_GRAPH_FILE
+    if any(pattern.search(text) for pattern in _GRAPH_INDEX_INVENTORY_PATTERNS):
+        return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_GRAPH_INDEXES
     if _is_collection_scoped_kb_file_inventory_query(text):
         return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_KB_FILE
     if _is_namespace_scoped_doc_inventory_query(text):
         return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_KB_FILE
-    if any(pattern.search(text) for pattern in _GRAPH_INDEX_INVENTORY_PATTERNS):
-        return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_GRAPH_INDEXES
     if _DISCOVERY_OVERRIDE_HINTS.search(text):
         return INVENTORY_QUERY_NONE
     if any(pattern.search(text) for pattern in _KB_FILE_INVENTORY_PATTERNS):
         return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_KB_FILE
-    if any(pattern.search(text) for pattern in _KB_COLLECTION_ACCESS_PATTERNS):
-        return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_KB_COLLECTIONS
     if any(pattern.search(text) for pattern in _SESSION_ACCESS_PATTERNS):
         return INVENTORY_QUERY_NONE if _FILTER_HINTS.search(text) else INVENTORY_QUERY_SESSION_ACCESS
     return INVENTORY_QUERY_NONE
@@ -526,15 +534,73 @@ def _json_safe_inventory_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _summary_is_upload_only(summary: dict[str, Any]) -> bool:
-    counts = {
-        str(key or "").strip().lower(): int(value or 0)
-        for key, value in dict(summary.get("source_type_counts") or {}).items()
-        if str(key or "").strip()
-    }
+    counts = _summary_source_type_counts(summary)
     if not counts:
         return False
     positive_types = {key for key, value in counts.items() if value > 0}
     return bool(positive_types) and positive_types <= {"upload"}
+
+
+def _summary_source_type_counts(summary: dict[str, Any]) -> dict[str, int]:
+    return {
+        str(key or "").strip().lower(): int(value or 0)
+        for key, value in dict(summary.get("source_type_counts") or {}).items()
+        if str(key or "").strip()
+    }
+
+
+def _summary_non_upload_doc_count(summary: dict[str, Any]) -> int:
+    counts = _summary_source_type_counts(summary)
+    if counts:
+        return sum(value for source_type, value in counts.items() if source_type != "upload" and value > 0)
+    return int(summary.get("kb_doc_count") or 0)
+
+
+def _summary_non_upload_source_counts(summary: dict[str, Any]) -> dict[str, int]:
+    return {
+        source_type: value
+        for source_type, value in _summary_source_type_counts(summary).items()
+        if source_type != "upload" and value > 0
+    }
+
+
+def _is_upload_record(record: Any) -> bool:
+    return str(getattr(record, "source_type", "") or "").strip().casefold() == "upload"
+
+
+def _non_upload_records(records: Sequence[Any]) -> list[Any]:
+    return [record for record in records if not _is_upload_record(record)]
+
+
+def _known_upload_collection_ids(
+    session: Any,
+    doc_summaries: dict[str, dict[str, Any]],
+) -> set[str]:
+    metadata = dict(getattr(session, "metadata", {}) or {})
+    access_summary = dict(metadata.get("access_summary") or {})
+    upload_manifest = dict(metadata.get("upload_manifest") or {})
+    candidates = [
+        metadata.get("upload_collection_id"),
+        access_summary.get("session_upload_collection_id"),
+        upload_manifest.get("collection_id"),
+    ]
+    collection_id = str(metadata.get("collection_id") or "").strip()
+    kb_collection_id = str(metadata.get("kb_collection_id") or "").strip()
+    if collection_id and collection_id != kb_collection_id and (
+        bool(metadata.get("openwebui_client"))
+        or bool(metadata.get("connector_client"))
+        or bool(metadata.get("openwebui_thin_mode"))
+        or has_upload_evidence(session)
+    ):
+        candidates.append(collection_id)
+    for collection_id, summary in doc_summaries.items():
+        if _summary_is_upload_only(summary):
+            candidates.append(collection_id)
+    return {str(item or "").strip().casefold() for item in candidates if str(item or "").strip()}
+
+
+def _is_upload_collection_id(collection_id: str, upload_collection_ids: set[str]) -> bool:
+    return str(collection_id or "").strip().casefold() in upload_collection_ids
 
 
 def _catalog_collection_ids(stores: Any, *, tenant_id: str) -> list[str]:
@@ -766,16 +832,20 @@ def _visible_kb_collections(settings: Any, stores: Any, session: Any) -> list[di
     metadata = dict(getattr(session, "metadata", {}) or {})
     access_summary = dict(metadata.get("access_summary") or {})
     doc_summaries = _document_collection_summaries(stores, tenant_id=tenant_id)
+    upload_collection_ids = _known_upload_collection_ids(session, doc_summaries)
     fallback_doc_collection_ids = [
         collection_id
         for collection_id, summary in doc_summaries.items()
-        if not _summary_is_upload_only(summary)
+        if not _summary_is_upload_only(summary) and not _is_upload_collection_id(collection_id, upload_collection_ids)
     ]
     if access_summary_authz_enabled(access_summary):
+        available_ids = list(resolve_available_kb_collection_ids(settings, session))
+        active_collection_id = resolve_kb_collection_id(settings, session)
+        explicit_kb_collection_id = str(metadata.get("kb_collection_id") or "").strip()
         visible_ids = _dedupe_collection_ids(
             [
-                *resolve_available_kb_collection_ids(settings, session),
-                resolve_kb_collection_id(settings, session),
+                *available_ids,
+                active_collection_id if explicit_kb_collection_id or active_collection_id in set(available_ids) else "",
             ]
         )
     else:
@@ -787,20 +857,36 @@ def _visible_kb_collections(settings: Any, stores: Any, session: Any) -> list[di
                 resolve_kb_collection_id(settings, session),
             ]
         )
+    visible_ids = [
+        collection_id
+        for collection_id in visible_ids
+        if not _is_upload_collection_id(collection_id, upload_collection_ids)
+        and not _summary_is_upload_only(dict(doc_summaries.get(collection_id) or {}))
+    ]
     if not visible_ids:
         fallback = str(metadata.get("kb_collection_id") or getattr(settings, "default_collection_id", "default") or "default").strip()
-        if fallback:
+        fallback_summary = dict(doc_summaries.get(fallback) or {})
+        if (
+            fallback
+            and not access_summary_authz_enabled(access_summary)
+            and not _is_upload_collection_id(fallback, upload_collection_ids)
+            and not _summary_is_upload_only(fallback_summary)
+        ):
             visible_ids = [fallback]
 
     payloads: list[dict[str, Any]] = []
     for collection_id in visible_ids:
-        records = _list_documents(
-            stores,
-            tenant_id=tenant_id,
-            source_type="",
-            collection_id=collection_id,
+        records = _non_upload_records(
+            _list_documents(
+                stores,
+                tenant_id=tenant_id,
+                source_type="",
+                collection_id=collection_id,
+            )
         )
         summary = dict(doc_summaries.get(collection_id) or {})
+        non_upload_doc_count = _summary_non_upload_doc_count(summary)
+        non_upload_source_counts = _summary_non_upload_source_counts(summary)
         readiness = get_collection_readiness_status(
             settings,
             stores,
@@ -812,9 +898,9 @@ def _visible_kb_collections(settings: Any, stores: Any, session: Any) -> list[di
                 "collection_id": collection_id,
                 "maintenance_policy": str(getattr(readiness, "maintenance_policy", "") or ""),
                 "kb_available": bool(getattr(readiness, "ready", False)),
-                "kb_doc_count": int(summary.get("kb_doc_count") or len(records)),
+                "kb_doc_count": int(non_upload_doc_count or len(records)),
                 "latest_ingested_at": summary.get("latest_ingested_at"),
-                "source_type_counts": dict(summary.get("source_type_counts") or {}),
+                "source_type_counts": non_upload_source_counts or dict(summary.get("source_type_counts") or {}),
             }
         )
     return payloads
@@ -822,6 +908,8 @@ def _visible_kb_collections(settings: Any, stores: Any, session: Any) -> list[di
 
 def _visible_graph_indexes(settings: Any, stores: Any, session: Any) -> list[dict[str, Any]]:
     tenant_id = _tenant_id(settings, session)
+    doc_summaries = _document_collection_summaries(stores, tenant_id=tenant_id)
+    upload_collection_ids = _known_upload_collection_ids(session, doc_summaries)
     try:
         from agentic_chatbot_next.graph.service import GraphService
     except Exception:
@@ -838,13 +926,20 @@ def _visible_graph_indexes(settings: Any, stores: Any, session: Any) -> list[dic
         graph_id = str(payload.get("graph_id") or "").strip()
         if not graph_id:
             continue
+        collection_id = str(payload.get("collection_id") or "").strip()
+        if collection_id and (
+            _is_upload_collection_id(collection_id, upload_collection_ids)
+            or _summary_is_upload_only(dict(doc_summaries.get(collection_id) or {}))
+        ):
+            continue
         display_name = str(payload.get("display_name") or graph_id).strip() or graph_id
         graphs.append(
             {
                 "graph_id": graph_id,
                 "display_name": display_name,
-                "collection_id": str(payload.get("collection_id") or "").strip(),
+                "collection_id": collection_id,
                 "status": str(payload.get("status") or "draft").strip() or "draft",
+                "backend": str(payload.get("backend") or getattr(settings, "graph_backend", "microsoft_graphrag") or "").strip(),
                 "query_ready": bool(payload.get("query_ready")),
                 "domain_summary": str(payload.get("domain_summary") or "").strip(),
                 "source_document_count": _graph_source_document_count(
@@ -1349,11 +1444,13 @@ def build_session_access_inventory_payload(settings: Any, stores: Any, session: 
     kb_scope = sync_session_kb_collection_state(settings, stores, session)
     kb_collection_id = str(kb_scope.get("kb_collection_id") or resolve_kb_collection_id(settings, session))
     upload_collection_id = resolve_upload_collection_id(settings, session)
-    kb_records = _list_documents(
-        stores,
-        tenant_id=tenant_id,
-        source_type="",
-        collection_id=kb_collection_id,
+    kb_records = _non_upload_records(
+        _list_documents(
+            stores,
+            tenant_id=tenant_id,
+            source_type="",
+            collection_id=kb_collection_id,
+        )
     )
     upload_records = _list_documents(
         stores,
@@ -1402,14 +1499,16 @@ def build_kb_file_inventory_payload(
     requested_collection_id = str(collection_id or session_kb_collection_id).strip() or session_kb_collection_id
     requested_collection_available = requested_collection_id in set(visible_collection_ids)
     kb_records = (
-        sorted(list(records or []), key=_record_sort_key)
+        _non_upload_records(sorted(list(records or []), key=_record_sort_key))
         if records is not None
         else (
-            _list_documents(
-                stores,
-                tenant_id=tenant_id,
-                source_type="",
-                collection_id=requested_collection_id,
+            _non_upload_records(
+                _list_documents(
+                    stores,
+                    tenant_id=tenant_id,
+                    source_type="",
+                    collection_id=requested_collection_id,
+                )
             )
             if requested_collection_available
             else []
@@ -1518,6 +1617,7 @@ def build_graph_document_inventory_payload(
                 "display_name": str(getattr(record, "display_name", "") or ""),
                 "collection_id": str(getattr(record, "collection_id", "") or ""),
                 "status": str(getattr(record, "status", "") or ""),
+                "backend": str(getattr(record, "backend", "") or getattr(settings, "graph_backend", "microsoft_graphrag") or ""),
                 "query_ready": bool(getattr(record, "query_ready", False)),
             }
             source_store = getattr(stores, "graph_source_store", None)
@@ -1655,11 +1755,13 @@ def build_kb_collection_access_payload(settings: Any, stores: Any, session: Any)
         payload = dict(item)
         collection_id = str(payload.get("collection_id") or "").strip()
         records = (
-            _list_documents(
-                stores,
-                tenant_id=tenant_id,
-                source_type="",
-                collection_id=collection_id,
+            _non_upload_records(
+                _list_documents(
+                    stores,
+                    tenant_id=tenant_id,
+                    source_type="",
+                    collection_id=collection_id,
+                )
             )
             if collection_id
             else []
@@ -1865,6 +1967,7 @@ def build_kb_file_inventory_answer(payload: dict[str, Any]) -> dict[str, Any]:
         lines.append(f"- {title} ({'; '.join(details)})")
     if len(lines) == 1:
         lines.append("- No knowledge-base documents are currently indexed for this collection.")
+    lines.append("Source: Postgres documents metadata.")
     return {
         "answer": "\n".join(lines),
         "followups": [],
@@ -1930,6 +2033,7 @@ def build_graph_document_inventory_answer(payload: dict[str, Any]) -> dict[str, 
         lines.append(f"- {title}" + (f" ({'; '.join(details)})" if details else ""))
     if len(lines) == 1:
         lines.append("- No graph source documents are currently recorded for this graph.")
+    lines.append("Source: graph_index_sources metadata.")
     return {
         "answer": "\n".join(lines),
         "followups": [],
@@ -2027,6 +2131,7 @@ def build_kb_collection_access_answer(payload: dict[str, Any]) -> dict[str, Any]
         if lines and not lines[-1]:
             lines.pop()
         lines.append("Reply with one or more ids or `use all` if you want me to scope later searches to specific namespaces.")
+    lines.append("Source: Postgres documents/collections metadata and graph_indexes metadata.")
 
     return {
         "answer": "\n".join(lines),
@@ -2045,7 +2150,19 @@ def build_graph_index_access_answer(payload: dict[str, Any]) -> dict[str, Any]:
             graph_id = str(item.get("graph_id") or "").strip()
             display_name = str(item.get("display_name") or graph_id).strip() or graph_id
             title = display_name if display_name.casefold() == graph_id.casefold() else f"{display_name} (`{graph_id}`)"
+            collection_id = str(item.get("collection_id") or "").strip()
+            status = str(item.get("status") or "draft").strip() or "draft"
+            backend = str(item.get("backend") or "").strip()
             lines.append(title)
+            details = []
+            if status:
+                details.append(f"status={status}")
+            if backend:
+                details.append(f"backend={backend}")
+            if collection_id:
+                details.append(f"collection={collection_id}")
+            if details:
+                lines.append("; ".join(details))
             lines.append(str(item.get("summary") or "").strip() or "Graph index metadata is available.")
             lines.append("")
             if graph_id:
@@ -2057,6 +2174,7 @@ def build_graph_index_access_answer(payload: dict[str, Any]) -> dict[str, Any]:
         if lines and not lines[-1]:
             lines.pop()
         lines.append("Reply with a graph id if you want me to inspect one in more detail.")
+    lines.append("Source: graph_indexes metadata.")
 
     return {
         "answer": "\n".join(lines),

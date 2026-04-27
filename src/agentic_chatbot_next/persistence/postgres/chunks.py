@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -25,6 +26,8 @@ class ChunkRecord:
     row_start: Optional[int] = None
     row_end: Optional[int] = None
     cell_range: Optional[str] = None
+    metadata_json: Dict[str, Any] = field(default_factory=dict)
+    embedding_text: Optional[str] = field(default=None, repr=False)
     embedding: Optional[List[float]] = field(default=None, repr=False)
 
 
@@ -38,6 +41,7 @@ class ScoredChunk:
     @classmethod
     def from_row(cls, row: Dict[str, Any], score: float, method: str) -> "ScoredChunk":
         from langchain_core.documents import Document
+        index_metadata = _coerce_metadata_json(row.get("metadata_json"))
         metadata = {
             "chunk_id":      row.get("chunk_id", ""),
             "doc_id":        row.get("doc_id", ""),
@@ -58,6 +62,7 @@ class ScoredChunk:
             "source_path":   row.get("source_path", ""),
             "file_type":     row.get("file_type", ""),
             "doc_structure_type": row.get("doc_structure_type", ""),
+            "index_metadata": index_metadata,
         }
         doc = Document(page_content=row.get("content", ""), metadata=metadata)
         return cls(doc=doc, score=score, method=method)
@@ -83,7 +88,7 @@ class ChunkStore:
         for ch in chunks:
             emb = ch.embedding
             if emb is None:
-                emb = self._embed(ch.content)
+                emb = self._embed(ch.embedding_text or ch.content)
             rows.append((
                 ch.chunk_id,
                 ch.doc_id,
@@ -100,6 +105,7 @@ class ChunkStore:
                 ch.content,
                 emb,
                 ch.chunk_type,
+                psycopg2.extras.Json(dict(ch.metadata_json or {})),
             ))
 
         with get_conn() as conn:
@@ -114,7 +120,7 @@ class ChunkStore:
                     INSERT INTO chunks
                         (chunk_id, doc_id, tenant_id, collection_id, chunk_index, page_number,
                          clause_number, section_title, sheet_name, row_start, row_end, cell_range,
-                         content, embedding, chunk_type)
+                         content, embedding, chunk_type, metadata_json)
                     VALUES %s
                     ON CONFLICT (chunk_id) DO UPDATE SET
                         tenant_id     = EXCLUDED.tenant_id,
@@ -127,11 +133,12 @@ class ChunkStore:
                         sheet_name    = EXCLUDED.sheet_name,
                         row_start     = EXCLUDED.row_start,
                         row_end       = EXCLUDED.row_end,
-                        cell_range    = EXCLUDED.cell_range
+                        cell_range    = EXCLUDED.cell_range,
+                        metadata_json = EXCLUDED.metadata_json
                     """,
                     rows,
                     template=(
-                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)"
+                        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s)"
                     ),
                 )
             conn.commit()
@@ -540,5 +547,18 @@ def _row_to_chunk(row: Dict[str, Any]) -> ChunkRecord:
         row_start=row.get("row_start"),
         row_end=row.get("row_end"),
         cell_range=row.get("cell_range"),
+        metadata_json=_coerce_metadata_json(row.get("metadata_json")),
         embedding=None,  # don't load embeddings back into Python by default
     )
+
+
+def _coerce_metadata_json(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}

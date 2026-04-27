@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentic_chatbot_next.authz import access_summary_allows, access_summary_authz_enabled
+from agentic_chatbot_next.capabilities import coerce_effective_capabilities
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.tools import ToolDefinition
 
@@ -49,6 +50,18 @@ class ToolPolicyService:
 
         metadata = dict((tool_context.metadata if tool_context is not None else {}) or {})
         task_payload = dict(metadata.get("task_payload") or {})
+        effective_capabilities = coerce_effective_capabilities(
+            metadata.get("effective_capabilities")
+            or dict(getattr(getattr(tool_context, "session", None), "metadata", {}) or {}).get("effective_capabilities")
+        )
+        if effective_capabilities is not None and not effective_capabilities.allows_tool(
+            tool_name,
+            group=tool.group,
+            read_only=bool(tool.read_only),
+            destructive=bool(tool.destructive),
+            metadata=dict(getattr(tool, "metadata", {}) or {}),
+        ):
+            return False
         if tool_name in self.TEAM_MAILBOX_TOOLS and not bool(
             getattr(getattr(tool_context, "settings", None), "team_mailbox_enabled", False)
         ):

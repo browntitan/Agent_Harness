@@ -135,6 +135,7 @@ function createFetchMock(options: {
   blockSkillDeactivate?: boolean
   architectureSnapshotFailureCalls?: number[]
   architectureActivityFailureCalls?: number[]
+  langGraphUnavailable?: boolean
 } = {}) {
   const state = {
     maxAgentSteps: '6',
@@ -343,7 +344,14 @@ function createFetchMock(options: {
       ...Object.keys(state.collectionCatalog),
       ...Object.keys(state.collections),
       ...Object.values(state.graphs).map(graph => graph.collection_id),
-    ])).sort()
+    ]))
+      .filter(collectionId => {
+        const docs = state.collections[collectionId] ?? []
+        const hasNonUploadDocs = docs.some(doc => doc.source_type !== 'upload')
+        const hasGraphs = graphIdsForCollection(collectionId).length > 0
+        return hasNonUploadDocs || hasGraphs || docs.length === 0
+      })
+      .sort()
   }
 
   function graphIdsForCollection(collectionId: string): string[] {
@@ -353,7 +361,7 @@ function createFetchMock(options: {
   }
 
   function sourceTypeCounts(collectionId: string): Record<string, number> {
-    return (state.collections[collectionId] ?? []).reduce<Record<string, number>>((counts, doc) => {
+    return (state.collections[collectionId] ?? []).filter(doc => doc.source_type !== 'upload').reduce<Record<string, number>>((counts, doc) => {
       counts[doc.source_type] = (counts[doc.source_type] ?? 0) + 1
       return counts
     }, {})
@@ -381,7 +389,7 @@ function createFetchMock(options: {
 
   function collectionSummaryPayload(collectionId: string) {
     const catalog = ensureCollection(collectionId)
-    const docs = state.collections[collectionId] ?? []
+    const docs = (state.collections[collectionId] ?? []).filter(doc => doc.source_type !== 'upload')
     const graphIds = graphIdsForCollection(collectionId)
     return {
       collection_id: collectionId,
@@ -416,7 +424,7 @@ function createFetchMock(options: {
 
   function documentsPayload(collectionId: string) {
     return {
-      documents: (state.collections[collectionId] ?? []).map(doc => ({
+      documents: (state.collections[collectionId] ?? []).filter(doc => doc.source_type !== 'upload').map(doc => ({
         doc_id: doc.doc_id,
         title: doc.title,
         source_type: doc.source_type,
@@ -440,8 +448,8 @@ function createFetchMock(options: {
       collection_id: collectionId,
       maintenance_policy: catalog.maintenance_policy,
       configured_source_count: 0,
-      indexed_doc_count: (state.collections[collectionId] ?? []).length,
-      active_doc_count: (state.collections[collectionId] ?? []).length,
+      indexed_doc_count: (state.collections[collectionId] ?? []).filter(doc => doc.source_type !== 'upload').length,
+      active_doc_count: (state.collections[collectionId] ?? []).filter(doc => doc.source_type !== 'upload').length,
       missing_sources: [],
       duplicate_group_count: 0,
       content_drift_count: 0,
@@ -514,6 +522,30 @@ function createFetchMock(options: {
 
   function getDoc(collectionId: string, docId: string): DocState | undefined {
     return (state.collections[collectionId] ?? []).find(doc => doc.doc_id === docId)
+  }
+
+  function getUploadDoc(docId: string): DocState | undefined {
+    return Object.values(state.collections).flat().find(doc => doc.doc_id === docId && doc.source_type === 'upload')
+  }
+
+  function uploadedFilesPayload() {
+    return {
+      uploads: Object.values(state.collections).flat()
+        .filter(doc => doc.source_type === 'upload')
+        .sort((left, right) => right.ingested_at.localeCompare(left.ingested_at) || left.title.localeCompare(right.title))
+        .map(doc => ({
+          doc_id: doc.doc_id,
+          title: doc.title,
+          source_type: doc.source_type,
+          source_path: doc.source_path,
+          source_display_path: doc.source_display_path,
+          collection_id: doc.collection_id,
+          num_chunks: 1,
+          ingested_at: doc.ingested_at,
+          file_type: doc.file_type,
+          doc_structure_type: doc.doc_structure_type,
+        })),
+    }
   }
 
   function upsertCollectionDoc(
@@ -842,6 +874,32 @@ function createFetchMock(options: {
       nodes,
       edges,
       canonical_paths,
+      langgraph: options.langGraphUnavailable ? {
+        status: 'unavailable',
+        generated_at: '2026-04-08T10:00:00Z',
+        agent_name: state.agent.name,
+        mermaid: '',
+        nodes: [],
+        edges: [],
+        warnings: ['No chat provider available for graph export.'],
+      } : {
+        status: 'available',
+        generated_at: '2026-04-08T10:00:00Z',
+        agent_name: state.agent.name,
+        mermaid: 'graph TD\n  __start__ --> agent\n  agent --> tools\n  tools --> agent\n  agent --> __end__',
+        nodes: [
+          { id: '__start__', name: '__start__', data_type: 'RunnableCallable', metadata: {} },
+          { id: 'agent', name: 'agent', data_type: 'RunnableCallable', metadata: {} },
+          { id: 'tools', name: 'tools', data_type: 'PolicyAwareToolNode', metadata: {} },
+          { id: '__end__', name: '__end__', data_type: 'RunnableCallable', metadata: {} },
+        ],
+        edges: [
+          { id: 'langgraph-edge-1', source: '__start__', target: 'agent', conditional: false, data: null },
+          { id: 'langgraph-edge-2', source: 'agent', target: 'tools', conditional: true, data: 'tools_condition' },
+          { id: 'langgraph-edge-3', source: 'tools', target: 'agent', conditional: false, data: null },
+        ],
+        warnings: [],
+      },
     }
   }
 
@@ -909,6 +967,7 @@ function createFetchMock(options: {
       '/v1/admin/agents': {},
       '/v1/admin/prompts': {},
       '/v1/admin/collections': {},
+      '/v1/admin/uploads': {},
       '/v1/admin/graphs': {},
       '/v1/admin/graphs/{graph_id}': {},
       '/v1/admin/access/principals': {},
@@ -946,6 +1005,7 @@ function createFetchMock(options: {
         agents: { supported: true, required_routes: ['/v1/admin/agents'], missing_routes: [], reason: '' },
         prompts: { supported: true, required_routes: ['/v1/admin/prompts'], missing_routes: [], reason: '' },
         collections: { supported: true, required_routes: ['/v1/admin/collections'], missing_routes: [], reason: '' },
+        uploads: { supported: true, required_routes: ['/v1/admin/uploads'], missing_routes: [], reason: '' },
         graphs: { supported: true, required_routes: ['/v1/admin/graphs', '/v1/admin/graphs/{graph_id}'], missing_routes: [], reason: '' },
         skills: { supported: true, required_routes: ['/v1/skills'], missing_routes: [], reason: '' },
         access: { supported: true, required_routes: ['/v1/admin/access/principals', '/v1/admin/access/roles', '/v1/admin/access/effective-access'], missing_routes: [], reason: '' },
@@ -985,7 +1045,7 @@ function createFetchMock(options: {
           ollama_embed_model: 'nomic-embed-text',
         },
         counts: {
-          collections: collectionIds().length,
+          collections: collectionsPayload().collections.length,
           agents: 1,
           skills: Object.keys(state.skills).length,
           tools: 1,
@@ -1325,6 +1385,93 @@ function createFetchMock(options: {
       return jsonResponse(collectionsPayload())
     }
 
+    if (path === '/v1/admin/uploads' && method === 'GET') {
+      return jsonResponse(uploadedFilesPayload())
+    }
+
+    if (path === '/v1/admin/uploads' && method === 'POST') {
+      const form = init?.body as FormData
+      const files = form ? form.getAll('files') as File[] : []
+      const relativePaths = form ? form.getAll('relative_paths').map(value => String(value)) : []
+      const collectionId = String(form?.get('collection_id') ?? 'control-panel-uploads')
+      const operationFiles = files.map((file, index) => {
+        const displayPath = relativePaths[index] || file.name
+        const doc = upsertCollectionDoc(collectionId, file.name, `uploaded content for ${file.name}`, {
+          sourcePath: `/uploads/${displayPath}`,
+          sourceDisplayPath: displayPath,
+          sourceType: 'upload',
+        })
+        return {
+          displayPath,
+          sourcePath: `/uploads/${displayPath}`,
+          sourceType: 'upload',
+          docIds: [doc.doc_id],
+        }
+      })
+      return jsonResponse(collectionOperationPayload(collectionId, operationFiles))
+    }
+
+    const uploadDetailMatch = path.match(/^\/v1\/admin\/uploads\/([^/]+)$/)
+    if (uploadDetailMatch && method === 'GET') {
+      const [, docId] = uploadDetailMatch
+      const doc = getUploadDoc(docId)
+      if (!doc) return jsonResponse({ detail: 'Uploaded file not found.' }, 404)
+      return jsonResponse({
+        document: {
+          doc_id: doc.doc_id,
+          title: doc.title,
+          source_type: doc.source_type,
+          source_path: doc.source_path,
+          source_display_path: doc.source_display_path,
+          collection_id: doc.collection_id,
+          num_chunks: 1,
+          ingested_at: doc.ingested_at,
+          file_type: doc.file_type,
+          doc_structure_type: doc.doc_structure_type,
+        },
+        extracted_content: {
+          content: doc.extracted,
+          truncated: false,
+          chunk_count: 1,
+        },
+        raw_source: {
+          path: doc.source_path,
+          content: doc.raw,
+          truncated: false,
+        },
+        chunks: [{
+          chunk_id: `${doc.doc_id}#0`,
+          chunk_index: 0,
+          chunk_type: 'general',
+          page_number: null,
+          section_title: null,
+          clause_number: null,
+          sheet_name: null,
+          content: doc.extracted,
+        }],
+      })
+    }
+
+    const uploadReindexMatch = path.match(/^\/v1\/admin\/uploads\/([^/]+)\/reindex$/)
+    if (uploadReindexMatch && method === 'POST') {
+      const [, docId] = uploadReindexMatch
+      const doc = getUploadDoc(docId)
+      if (doc) {
+        doc.extracted = `${doc.extracted} (reindexed)`
+        doc.raw = `${doc.raw} (reindexed)`
+      }
+      return jsonResponse({ collection_id: doc?.collection_id ?? 'control-panel-uploads', deleted_doc_id: docId, ingested_doc_ids: [docId] })
+    }
+
+    if (uploadDetailMatch && method === 'DELETE') {
+      const [, docId] = uploadDetailMatch
+      const doc = getUploadDoc(docId)
+      if (!doc) return jsonResponse({ detail: 'Uploaded file not found.' }, 404)
+      state.collections[doc.collection_id] = (state.collections[doc.collection_id] ?? []).filter(item => item.doc_id !== docId)
+      touchCollection(doc.collection_id)
+      return jsonResponse({ deleted: true, doc_id: docId, collection_id: doc.collection_id })
+    }
+
     const collectionCatalogMatch = path.match(/^\/v1\/admin\/collections\/([^/]+)$/)
     if (collectionCatalogMatch && method === 'GET') {
       const [, collectionId] = collectionCatalogMatch
@@ -1334,7 +1481,7 @@ function createFetchMock(options: {
 
     if (collectionCatalogMatch && method === 'DELETE') {
       const [, collectionId] = collectionCatalogMatch
-      const hasDocs = (state.collections[collectionId] ?? []).length > 0
+      const hasDocs = (state.collections[collectionId] ?? []).some(doc => doc.source_type !== 'upload')
       const hasGraphs = graphIdsForCollection(collectionId).length > 0
       if (hasDocs || hasGraphs) {
         return jsonResponse({ detail: 'Collection is not empty.' }, 409)
@@ -1838,8 +1985,24 @@ function getSection(name: string): HTMLElement {
   return screen.getByRole('heading', { name, level: 3 }).closest('section') as HTMLElement
 }
 
+const navLabelAliases: Record<string, string> = {
+  Dashboard: 'Overview',
+  Config: 'Settings',
+  Collections: 'Knowledge',
+  'Uploaded Files': 'Uploads',
+  MCP: 'Tools',
+}
+
+function navLabel(name: string): string {
+  return navLabelAliases[name] ?? name
+}
+
+function navButton(name: string): HTMLElement {
+  return screen.getByRole('button', { name: new RegExp(`^${navLabel(name)}\\b`) })
+}
+
 function openSection(name: string) {
-  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${name}\\b`) }))
+  fireEvent.click(navButton(name))
 }
 
 describe('App', () => {
@@ -1865,7 +2028,7 @@ describe('App', () => {
 
     expect(sessionStorage.getItem('control-panel-token')).toBe('token')
     expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Dashboard/ })).toHaveAttribute('aria-current', 'page')
+    expect(navButton('Dashboard')).toHaveAttribute('aria-current', 'page')
 
     fireEvent.click(screen.getByRole('button', { name: 'Lock' }))
     expect(screen.getByText('Agent Control Panel')).toBeInTheDocument()
@@ -1898,7 +2061,7 @@ describe('App', () => {
     openSection('Architecture')
 
     expect(await screen.findByRole('heading', { name: 'System Overview', level: 3 })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Architecture/ })).toHaveAttribute('aria-current', 'page')
+    expect(navButton('Architecture')).toHaveAttribute('aria-current', 'page')
     expect(await screen.findByRole('button', { name: /Router/i })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /^general$/i }))
@@ -1909,6 +2072,15 @@ describe('App', () => {
       expect(document.querySelector('[data-edge-id="edge-router-basic-basic"]')).toHaveAttribute('data-edge-layer', 'dimmed')
       expect(document.querySelector('[data-edge-id="edge-router-rag-rag_worker"]')).toHaveAttribute('data-edge-layer', 'dimmed')
     })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent Graph' }))
+    expect(await screen.findByRole('heading', { name: 'Agent Graph Overview', level: 3 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'LangGraph Export', level: 3 })).toBeInTheDocument()
+    expect(screen.getByText('LangGraph Nodes')).toBeInTheDocument()
+    expect(screen.getByText('PolicyAwareToolNode')).toBeInTheDocument()
+    fireEvent.click(document.querySelector('[data-edge-id="edge-router-default-general"]')!)
+    expect(await screen.findByRole('heading', { name: 'Edge Inspector', level: 3 })).toBeInTheDocument()
+    expect(within(getSection('Edge Inspector')).getByText('Default AGENT')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Routing Paths' }))
     expect(await screen.findByRole('heading', { name: 'Grounded lookup', level: 3 })).toBeInTheDocument()
@@ -1930,6 +2102,24 @@ describe('App', () => {
     const activityCalls = fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/v1/admin/architecture/activity')
     expect(architectureCalls.length).toBeGreaterThan(0)
     expect(activityCalls.length).toBeGreaterThan(0)
+  })
+
+  it('keeps the native agent graph visible when LangGraph export is unavailable', async () => {
+    const { fetchMock } = createFetchMock({ langGraphUnavailable: true })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+
+    await screen.findByRole('heading', { name: 'Runtime', level: 3 })
+    openSection('Architecture')
+    expect(await screen.findByRole('heading', { name: 'System Overview', level: 3 })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Agent Graph' }))
+    expect(await screen.findByRole('heading', { name: 'Agent Graph Overview', level: 3 })).toBeInTheDocument()
+    expect(await screen.findByText('LangGraph export unavailable')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^general$/i })).toBeInTheDocument()
   })
 
   it('recovers the architecture section after an initial snapshot failure when retry succeeds', async () => {
@@ -1988,8 +2178,9 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: 'Architecture is unavailable on this backend', level: 3 })).toBeInTheDocument()
     expect(screen.getByText(/Missing routes: \/v1\/admin\/architecture, \/v1\/admin\/architecture\/activity/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^Architecture\b/ })).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByRole('button', { name: /^Architecture\b/ })).toHaveTextContent('Unsupported')
+    expect(navButton('Architecture')).toHaveAttribute('aria-current', 'page')
+    expect(navButton('Architecture')).toHaveClass('owui-nav-item-warning')
+    expect(within(navButton('Architecture')).getByLabelText('Unsupported')).toBeInTheDocument()
 
     const architectureCalls = fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/v1/admin/architecture')
     const activityCalls = fetchMock.mock.calls.filter(([input]) => requestPath(input) === '/v1/admin/architecture/activity')
@@ -2007,7 +2198,7 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
 
     openSection('Config')
-    expect(screen.getByRole('button', { name: /Config/ })).toHaveAttribute('aria-current', 'page')
+    expect(navButton('Config')).toHaveAttribute('aria-current', 'page')
     const configTabs = await screen.findByRole('tablist', { name: 'Config groups' })
     expect(within(configTabs).getByRole('tab', { name: 'Runtime' })).toHaveAttribute('aria-selected', 'true')
     expect(within(configTabs).getByRole('tab', { name: 'Providers' })).toHaveAttribute('aria-selected', 'false')
@@ -2091,6 +2282,42 @@ describe('App', () => {
     expect(screen.queryByLabelText('Max Agent Steps')).not.toBeInTheDocument()
   })
 
+  it('filters settings groups and workspace resources from search inputs', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+
+    await screen.findByRole('heading', { name: 'Runtime', level: 3 })
+    openSection('Config')
+
+    const groupTabs = await screen.findByRole('tablist', { name: 'Config groups' })
+    expect(within(groupTabs).getByRole('tab', { name: 'Runtime' })).toBeInTheDocument()
+    expect(within(groupTabs).getByRole('tab', { name: 'Providers' })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('Search settings'), { target: { value: 'ollama' } })
+
+    expect(within(groupTabs).queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument()
+    expect(within(groupTabs).getByRole('tab', { name: 'Providers' })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByLabelText('Ollama Chat Model')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Max Agent Steps')).not.toBeInTheDocument()
+
+    openSection('Agents')
+    await screen.findByRole('heading', { name: 'Available Agents', level: 3 })
+    expect(within(getSection('Available Agents')).getByRole('button', { name: /^general\b/i })).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText('Search agents'), { target: { value: 'missing-agent' } })
+    expect(within(getSection('Available Agents')).queryByRole('button', { name: /^general\b/i })).not.toBeInTheDocument()
+    expect(within(getSection('Available Agents')).getByText('No agents are registered in the current runtime.')).toBeInTheDocument()
+
+    openSection('Collections')
+    await screen.findByRole('heading', { name: 'Collections', level: 3 })
+    expect(screen.getByRole('option', { name: 'default' })).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText('Search knowledge'), { target: { value: 'missing-collection' } })
+    expect(screen.queryByRole('option', { name: 'default' })).not.toBeInTheDocument()
+  })
+
   it('keeps technical details collapsed until requested', async () => {
     const { fetchMock } = createFetchMock()
     vi.stubGlobal('fetch', fetchMock)
@@ -2158,30 +2385,17 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Ingest Host Paths' }))
 
     await waitFor(() => expect(within(getSection('Documents')).getByRole('button', { name: /^regional_spend\.csv\b/ })).toBeInTheDocument())
-
-    const uploadInput = screen.getByLabelText('Upload Files Input')
-    fireEvent.change(uploadInput, {
-      target: {
-        files: [new File(['regional controls content'], 'regional_controls.csv', { type: 'text/csv' })],
-      },
-    })
-
-    expect(await within(getSection('Documents')).findByRole('button', { name: /^regional_controls\.csv\b/ })).toBeInTheDocument()
-    fireEvent.click(within(getSection('Documents')).getByRole('button', { name: /^regional_controls\.csv\b/ }))
-    await waitFor(() => expect(within(getSection('Document Viewer')).getAllByText(/uploaded content for regional_controls.csv/).length).toBeGreaterThan(0))
+    fireEvent.click(within(getSection('Documents')).getByRole('button', { name: /^regional_spend\.csv\b/ }))
+    await waitFor(() => expect(within(getSection('Document Viewer')).getAllByText(/ingested content for regional_spend.csv/).length).toBeGreaterThan(0))
 
     fireEvent.click(screen.getByRole('button', { name: 'Reindex' }))
     await waitFor(() => expect(within(getSection('Document Viewer')).getAllByText(/reindexed/).length).toBeGreaterThan(0))
     fireEvent.click(within(getSection('Document Viewer')).getByRole('tab', { name: 'Raw' }))
-    expect(within(getSection('Document Viewer')).getAllByText(/uploaded content for regional_controls.csv/).length).toBeGreaterThan(0)
+    expect(within(getSection('Document Viewer')).getAllByText(/ingested content for regional_spend.csv/).length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delete this document?' })).getByRole('button', { name: 'Delete' }))
-    await waitFor(() => expect(within(getSection('Documents')).queryByRole('button', { name: /^regional_controls\.csv\b/ })).not.toBeInTheDocument())
-
-    fireEvent.click(within(getSection('Documents')).getByRole('button', { name: /^regional_spend\.csv\b/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
-    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delete this document?' })).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(within(getSection('Documents')).queryByRole('button', { name: /^regional_spend\.csv\b/ })).not.toBeInTheDocument())
     await waitFor(() => expect(screen.getByRole('button', { name: /^smoke-control-panel\b/ })).toBeInTheDocument())
     expect(collectionIdField).toHaveValue('smoke-control-panel')
 
@@ -2208,17 +2422,47 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: 'Upload Files' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Upload Folder' })).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Upload Files' }))
-    expect(await screen.findByRole('button', { name: 'Upload Files' })).toBeInTheDocument()
-    expect(screen.queryByLabelText('Host Paths')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Upload Folder' }))
-    expect(await screen.findByRole('button', { name: 'Upload Folder' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Upload Files' })).not.toBeInTheDocument()
-
     fireEvent.click(screen.getByRole('tab', { name: 'Sync Configured Sources' }))
     expect(await screen.findByRole('button', { name: 'Sync Configured Sources' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Upload Folder' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Host Paths')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ingest Host Path' }))
+    expect(await screen.findByLabelText('Host Paths')).toBeInTheDocument()
+  })
+
+  it('manages uploaded files in their own workspace', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+
+    openSection('Uploaded Files')
+    expect(await screen.findByRole('heading', { name: 'Uploaded Files', level: 3 })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Upload Files Input'), {
+      target: {
+        files: [new File(['regional controls content'], 'regional_controls.csv', { type: 'text/csv' })],
+      },
+    })
+
+    expect(await screen.findByRole('button', { name: /^regional_controls\.csv\b/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^regional_controls\.csv\b/ }))
+    await waitFor(() => expect(within(getSection('Uploaded File Viewer')).getAllByText(/uploaded content for regional_controls.csv/).length).toBeGreaterThan(0))
+
+    openSection('Collections')
+    await waitFor(() => expect(within(getSection('Documents')).queryByRole('button', { name: /^regional_controls\.csv\b/ })).not.toBeInTheDocument())
+
+    openSection('Uploaded Files')
+    fireEvent.click(screen.getByRole('button', { name: /^regional_controls\.csv\b/ }))
+    fireEvent.click(within(getSection('Uploaded File Viewer')).getByRole('button', { name: 'Reindex' }))
+    await waitFor(() => expect(within(getSection('Uploaded File Viewer')).getAllByText(/reindexed/).length).toBeGreaterThan(0))
+
+    fireEvent.click(within(getSection('Uploaded File Viewer')).getByRole('button', { name: 'Delete' }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delete this uploaded file?' })).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^regional_controls\.csv\b/ })).not.toBeInTheDocument())
   })
 
   it('accepts partial upload API responses without collapsing into a generic error state', async () => {
@@ -2226,10 +2470,10 @@ describe('App', () => {
     const wrappedFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = requestPath(input)
       const method = requestMethod(input, init)
-      if (path === '/v1/admin/collections/partial-lab/upload' && method === 'POST') {
+      if (path === '/v1/admin/uploads' && method === 'POST') {
         await fetchMock(input, init)
         return jsonResponse({
-          collection_id: 'partial-lab',
+          collection_id: 'control-panel-uploads',
           status: 'partial',
           summary: {
             resolved_count: 2,
@@ -2242,7 +2486,7 @@ describe('App', () => {
           ingested_count: 1,
           skipped_count: 0,
           failed_count: 1,
-          doc_ids: ['partial-lab-alpha-1'],
+          doc_ids: ['control-panel-uploads-alpha-1'],
           missing_paths: [],
           errors: ['beta.docx: parser failed'],
           files: [
@@ -2253,7 +2497,7 @@ describe('App', () => {
               source_path: '/uploads/alpha.txt',
               outcome: 'ingested',
               error: '',
-              doc_ids: ['partial-lab-alpha-1'],
+              doc_ids: ['control-panel-uploads-alpha-1'],
             },
             {
               display_path: 'beta.docx',
@@ -2279,10 +2523,8 @@ describe('App', () => {
     fireEvent.click(screen.getByText('Unlock'))
     expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
 
-    openSection('Collections')
-    fireEvent.change(await screen.findByLabelText('Collection ID'), { target: { value: 'partial-lab' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Create Collection' }))
-    fireEvent.click(screen.getByRole('tab', { name: 'Upload Files' }))
+    openSection('Uploaded Files')
+    expect(await screen.findByRole('heading', { name: 'Add Uploaded Files', level: 3 })).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Upload Files Input'), {
       target: {
@@ -2293,7 +2535,7 @@ describe('App', () => {
       },
     })
 
-    expect(await within(getSection('Documents')).findByRole('button', { name: /^alpha\.txt\b/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^alpha\.txt\b/ })).toBeInTheDocument()
     expect(screen.queryByText('Unknown error')).not.toBeInTheDocument()
   })
 
@@ -2322,7 +2564,7 @@ describe('App', () => {
     expect(await screen.findByText('No duplicate or drift issues')).toBeInTheDocument()
   })
 
-  it('preserves folder-relative paths for duplicate filenames and sends ordered relative paths', async () => {
+  it('preserves uploaded folder-relative paths for duplicate filenames and sends ordered relative paths', async () => {
     const { fetchMock } = createFetchMock()
     vi.stubGlobal('fetch', fetchMock)
 
@@ -2331,9 +2573,8 @@ describe('App', () => {
     fireEvent.click(screen.getByText('Unlock'))
     expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
 
-    openSection('Collections')
-    fireEvent.change(await screen.findByLabelText('Collection ID'), { target: { value: 'folder-lab' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Create Collection' }))
+    openSection('Uploaded Files')
+    expect(await screen.findByRole('heading', { name: 'Add Uploaded Files', level: 3 })).toBeInTheDocument()
 
     const fileA = new File(['alpha'], 'same.txt', { type: 'text/plain' })
     Object.defineProperty(fileA, 'webkitRelativePath', { value: 'alpha/same.txt' })
@@ -2344,19 +2585,23 @@ describe('App', () => {
       target: { files: [fileA, fileB] },
     })
 
-    await waitFor(() => expect(within(getSection('Documents')).getAllByRole('button', { name: /^same\.txt\b/ })).toHaveLength(2))
-    expect(within(getSection('Documents')).getByText('alpha/same.txt')).toBeInTheDocument()
-    expect(within(getSection('Documents')).getByText('beta/same.txt')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /^same\.txt\b/ })).toHaveLength(2))
+    expect(screen.getAllByText('alpha/same.txt').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('beta/same.txt').length).toBeGreaterThan(0)
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.body instanceof FormData)).toBe(true))
-    const uploadCall = fetchMock.mock.calls.find(([, init]) => init?.body instanceof FormData)
+    const uploadCall = fetchMock.mock.calls.find(([input, init]) => requestPath(input) === '/v1/admin/uploads' && init?.body instanceof FormData)
     const uploadForm = uploadCall?.[1]?.body as FormData
     expect(uploadForm.getAll('relative_paths')).toEqual(['alpha/same.txt', 'beta/same.txt'])
   })
 
-  it('uploads graph source folders with relative paths and selects newly ingested docs in manual mode', async () => {
+  it('keeps uploaded files out of graph collection document selection', async () => {
     const { fetchMock } = createFetchMock()
     vi.stubGlobal('fetch', fetchMock)
+    const legacyUpload = new FormData()
+    legacyUpload.append('files', new File(['legacy upload'], 'legacy-upload.txt', { type: 'text/plain' }))
+    legacyUpload.append('relative_paths', 'legacy-upload.txt')
+    await fetchMock('/v1/admin/collections/default/upload', { method: 'POST', body: legacyUpload })
 
     renderApp()
     fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
@@ -2367,30 +2612,12 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Graph Workspace', level: 3 })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Graph Collection'), { target: { value: 'default' } })
 
-    const fileA = new File(['alpha'], 'same.txt', { type: 'text/plain' })
-    Object.defineProperty(fileA, 'webkitRelativePath', { value: 'alpha/same.txt' })
-    const fileB = new File(['beta'], 'same.txt', { type: 'text/plain' })
-    Object.defineProperty(fileB, 'webkitRelativePath', { value: 'beta/same.txt' })
-
-    fireEvent.change(screen.getByLabelText('Graph Source Folder Input'), {
-      target: { files: [fileA, fileB] },
-    })
-
-    await waitFor(() => {
-      expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/collections/default/upload')).toBe(true)
-    })
-    const uploadCall = fetchMock.mock.calls.find(([input]) => requestPath(input) === '/v1/admin/collections/default/upload')
-    const uploadForm = uploadCall?.[1]?.body as FormData
-    expect(uploadForm.getAll('relative_paths')).toEqual(['alpha/same.txt', 'beta/same.txt'])
-
     const graphSection = getSection('Graph Workspace')
+    expect(screen.queryByLabelText('Graph Source Folder Input')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Upload Files' })).not.toBeInTheDocument()
     fireEvent.click(within(graphSection).getByRole('tab', { name: 'Choose Documents' }))
-    expect(await within(graphSection).findByText('alpha/same.txt')).toBeInTheDocument()
-    expect(within(graphSection).getByText('beta/same.txt')).toBeInTheDocument()
-    const checkedSources = within(graphSection)
-      .getAllByRole('checkbox')
-      .filter(input => (input as HTMLInputElement).checked)
-    expect(checkedSources).toHaveLength(2)
+    expect(await within(graphSection).findByText('knowledge_base/default-notes.md')).toBeInTheDocument()
+    expect(within(graphSection).queryByText('legacy-upload.txt')).not.toBeInTheDocument()
   })
 
   it('keeps brand new empty collections available in the graph workspace dropdown', async () => {

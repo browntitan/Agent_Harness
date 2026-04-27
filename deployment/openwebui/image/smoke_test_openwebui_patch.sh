@@ -18,7 +18,14 @@ echo "Cloning OpenWebUI ${OPENWEBUI_VERSION} into ${WORKDIR}"
 git clone --depth 1 --branch "${OPENWEBUI_VERSION}" https://github.com/open-webui/open-webui.git "${WORKDIR}/open-webui"
 
 echo "Checking patch applicability"
-git -C "${WORKDIR}/open-webui" apply --check "${PATCH_FILE}"
+git -C "${WORKDIR}/open-webui" apply --recount --check "${PATCH_FILE}"
+
+echo "Checking patched tool-call trace UI files"
+git -C "${WORKDIR}/open-webui" apply --recount "${PATCH_FILE}"
+test -f "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte"
+grep -R "agentic_tool_call" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Chat.svelte" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory" >/dev/null
 
 if [[ "${SKIP_DOCKER_BUILD:-0}" == "1" ]]; then
   echo "Patch applies cleanly. Docker build skipped because SKIP_DOCKER_BUILD=1."

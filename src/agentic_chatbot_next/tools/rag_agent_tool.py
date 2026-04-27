@@ -21,14 +21,17 @@ def make_rag_agent_tool(
     session: Any,
     event_sink: Any | None = None,
 ) -> Callable:
+    default_top_k_vector = max(1, int(getattr(settings, "rag_top_k_vector", 15)))
+    default_top_k_keyword = max(1, int(getattr(settings, "rag_top_k_keyword", 15)))
+
     @tool
     def rag_agent_tool(
         query: str,
         conversation_context: str = "",
         preferred_doc_ids_csv: str = "",
         must_include_uploads: bool = True,
-        top_k_vector: int = 12,
-        top_k_keyword: int = 12,
+        top_k_vector: int = default_top_k_vector,
+        top_k_keyword: int = default_top_k_keyword,
         max_retries: int = 2,
         search_mode: str = "auto",
         max_search_rounds: int = 0,
@@ -42,6 +45,8 @@ def make_rag_agent_tool(
         """
 
         preferred_doc_ids = _parse_csv(preferred_doc_ids_csv)
+        effective_top_k_vector = max(1, int(top_k_vector or default_top_k_vector))
+        effective_top_k_keyword = max(1, int(top_k_keyword or default_top_k_keyword))
         if scratchpad_context_key and scratchpad_context_key in getattr(session, "scratchpad", {}):
             extra = session.scratchpad[scratchpad_context_key]
             conversation_context = f"{extra}\n\n{conversation_context}".strip()
@@ -64,8 +69,8 @@ def make_rag_agent_tool(
             conversation_context=conversation_context,
             preferred_doc_ids=preferred_doc_ids,
             must_include_uploads=must_include_uploads,
-            top_k_vector=top_k_vector,
-            top_k_keyword=top_k_keyword,
+            top_k_vector=effective_top_k_vector,
+            top_k_keyword=effective_top_k_keyword,
             max_retries=max_retries,
             callbacks=callbacks,
             search_mode=search_mode,

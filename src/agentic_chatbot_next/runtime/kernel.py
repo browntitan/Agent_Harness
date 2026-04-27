@@ -11,11 +11,16 @@ from agentic_chatbot_next.authz import (
     access_summary_authz_enabled,
     normalize_user_email,
 )
+from agentic_chatbot_next.capabilities import (
+    coerce_effective_capabilities,
+    resolve_effective_capabilities,
+)
 from agentic_chatbot_next.agents.prompt_builder import PromptBuilder
 from agentic_chatbot_next.agents.registry import AgentRegistry
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.jobs import JobRecord, TaskNotification
-from agentic_chatbot_next.contracts.messages import RuntimeMessage, SessionState
+from agentic_chatbot_next.contracts.messages import RuntimeMessage, SessionState, utc_now_iso
+from agentic_chatbot_next.general_agent import build_react_agent_graph
 from agentic_chatbot_next.memory.manager import MemorySelector, MemoryWriteManager
 from agentic_chatbot_next.memory.projector import MemoryProjector
 from agentic_chatbot_next.memory.extractor import MemoryExtractor
@@ -52,6 +57,7 @@ from agentic_chatbot_next.runtime.task_plan import (
     VerificationResult,
     WorkerExecutionRequest,
 )
+from agentic_chatbot_next.runtime.task_decomposition import is_clause_policy_workflow
 from agentic_chatbot_next.runtime.turn_contracts import (
     filter_context_messages,
     resolve_turn_intent,
@@ -72,6 +78,7 @@ from agentic_chatbot_next.skills.telemetry import (
     is_scored_answer_quality,
 )
 from agentic_chatbot_next.rag.retrieval_scope import resolve_upload_collection_id
+from agentic_chatbot_next.rag.hints import normalize_structured_query
 from agentic_chatbot_next.rag.inventory import (
     dispatch_authoritative_inventory,
     inventory_query_requests_grounded_analysis,
@@ -238,19 +245,35 @@ def _render_requirements_result(payload: Dict[str, Any]) -> str:
 
     preview_rows = [item for item in list(payload.get("preview_rows") or []) if isinstance(item, dict)]
     if preview_rows:
+        columns = [str(item) for item in list(payload.get("preview_columns") or []) if str(item)]
+        if not columns:
+            columns = ["document_title", "source_location", "requirement_text", "confidence"]
+        column_labels = {
+            "document_title": "Document",
+            "modality": "Modality",
+            "location": "Location",
+            "source_location": "Source",
+            "statement_text": "Requirement",
+            "requirement_text": "Requirement",
+            "source_structure": "Structure",
+            "source_excerpt": "Source Text",
+            "risk_rationale": "Risk Rationale",
+            "risk_label": "Risk",
+            "binding_strength": "Binding",
+            "confidence": "Confidence",
+        }
         lines.append("")
-        lines.append("| Document | Modality | Location | Requirement |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| " + " | ".join(column_labels.get(column, column.replace("_", " ").title()) for column in columns) + " |")
+        lines.append("| " + " | ".join("---" for _ in columns) + " |")
         for row in preview_rows:
             lines.append(
                 "| "
                 + " | ".join(
-                    [
-                        _truncate_inline(row.get("document_title"), limit=60).replace("|", "\\|"),
-                        _truncate_inline(row.get("modality"), limit=32).replace("|", "\\|"),
-                        _truncate_inline(row.get("location"), limit=80).replace("|", "\\|"),
-                        _truncate_inline(row.get("statement_text"), limit=220).replace("|", "\\|"),
-                    ]
+                    _truncate_inline(
+                        row.get(column),
+                        limit=220 if column in {"requirement_text", "statement_text", "source_excerpt", "risk_rationale"} else 80,
+                    ).replace("|", "\\|")
+                    for column in columns
                 )
                 + " |"
             )
@@ -345,6 +368,7 @@ class RuntimeKernel:
         self.provider_resolver = self.provider_controller.agent_resolver
         self.coordinator_controller = KernelCoordinatorController(self)
         self.tool_policy = ToolPolicyService()
+        self.tool_definitions = build_tool_definitions(self)
         if bool(getattr(self.settings, "memory_enabled", True)):
             self.file_memory_store = FileMemoryStore(self.paths)
             self.memory_extractor = MemoryExtractor(self.file_memory_store)
@@ -829,13 +853,18 @@ class RuntimeKernel:
             user_text,
             dict(session_state.metadata or {}),
         )
+        sanitized_user_query = (
+            str(getattr(resolved_turn_intent, "normalized_user_objective", "") or "").strip()
+            or normalize_structured_query(user_text)
+            or str(user_text or "").strip()
+        )
         effective_user_text = (
             str(getattr(resolved_turn_intent, "effective_user_text", "") or "").strip()
-            or str(getattr(resolved_turn_intent, "normalized_user_objective", "") or "").strip()
+            or sanitized_user_query
             or str(user_text or "").strip()
         )
         answer_kind = str(getattr(resolved_turn_intent.answer_contract, "kind", "") or "").strip().lower()
-        if answer_kind != REQUIREMENTS_WORKFLOW_KIND and not is_requirements_extraction_request(effective_user_text):
+        if answer_kind != REQUIREMENTS_WORKFLOW_KIND and not is_requirements_extraction_request(sanitized_user_query):
             return None
 
         self._emit(
@@ -847,17 +876,31 @@ class RuntimeKernel:
                 "label": "Extracting requirements",
                 "detail": "Resolving source documents and extracting requirement statements.",
                 "workflow": REQUIREMENTS_WORKFLOW_KIND,
+                "sanitized_user_query": sanitized_user_query,
+                "requested_scope": dict(getattr(resolved_turn_intent, "requested_scope", {}) or {}),
             },
         )
-        service = RequirementExtractionService(self.settings, self.stores, session_state)
-        payload = service.extract_for_user_request(effective_user_text)
+        agent_providers = self.resolve_providers_for_agent(agent.name)
+        service = RequirementExtractionService(self.settings, self.stores, session_state, providers=agent_providers)
+        payload = service.extract_for_user_request(
+            sanitized_user_query,
+            requested_scope=dict(getattr(resolved_turn_intent, "requested_scope", {}) or {}),
+        )
         text = _render_requirements_result(payload)
         artifacts = [dict(item) for item in list(payload.get("artifacts") or []) if isinstance(item, dict)]
         artifact_refs = [str(item.get("artifact_ref") or "") for item in artifacts if str(item.get("artifact_ref") or "")]
+        session_state.metadata["selected_requirement_doc_ids"] = list(payload.get("selected_doc_ids") or [])
+        if payload.get("candidate_documents"):
+            session_state.metadata["requirements_candidate_documents"] = list(payload.get("candidate_documents") or [])
+        else:
+            session_state.metadata.pop("requirements_candidate_documents", None)
         metadata: Dict[str, Any] = {
             "agent_name": agent.name,
             "turn_outcome": "requirements_extraction",
             "workflow": REQUIREMENTS_WORKFLOW_KIND,
+            "sanitized_user_query": sanitized_user_query,
+            "selected_requirement_doc_ids": list(payload.get("selected_doc_ids") or []),
+            "requirements_candidate_documents": list(payload.get("candidate_documents") or []),
             "requirements_extraction": make_json_compatible(
                 {
                     key: value
@@ -902,6 +945,15 @@ class RuntimeKernel:
                 "statement_count": int(payload.get("statement_count") or 0),
                 "document_count": int(payload.get("document_count") or 0),
                 "artifact_count": len(artifacts),
+                "sanitized_user_query": sanitized_user_query,
+                "selected_doc_ids": list(payload.get("selected_doc_ids") or []),
+                "mode": str(payload.get("mode") or ""),
+                "candidate_count": int(payload.get("candidate_count") or 0),
+                "kept_count": int(payload.get("kept_count") or 0),
+                "dropped_count": int(payload.get("dropped_count") or 0),
+                "dedupe_count": int(payload.get("dedupe_count") or 0),
+                "artifact_names": list(payload.get("artifact_names") or []),
+                "extractor_version": str(payload.get("extractor_version") or ""),
             },
         )
         return AgentRunResult(
@@ -920,14 +972,6 @@ class RuntimeKernel:
         task_payload: Optional[Dict[str, Any]] = None,
         chat_max_output_tokens: int | None = None,
     ) -> AgentRunResult:
-        requirements_result = self._maybe_run_requirements_extraction(
-            agent,
-            session_state,
-            user_text=user_text,
-        )
-        if requirements_result is not None:
-            return requirements_result
-
         inventory_result = self._maybe_run_authoritative_inventory(
             agent,
             session_state,
@@ -936,8 +980,28 @@ class RuntimeKernel:
         if inventory_result is not None:
             return inventory_result
 
+        effective_capabilities = resolve_effective_capabilities(
+            settings=self.settings,
+            stores=self.stores,
+            session=session_state,
+            registry=self.registry,
+        )
+        session_state.metadata = {
+            **dict(session_state.metadata or {}),
+            "effective_capabilities": effective_capabilities.to_dict(),
+        }
+
         if agent.mode == "coordinator":
             return self._run_coordinator(agent, session_state, user_text=user_text, callbacks=callbacks)
+
+        if not is_clause_policy_workflow(user_text, session_metadata=session_state.metadata):
+            requirements_result = self._maybe_run_requirements_extraction(
+                agent,
+                session_state,
+                user_text=user_text,
+            )
+            if requirements_result is not None:
+                return requirements_result
 
         skill_execution_payload = dict((task_payload or {}).get("skill_execution") or {})
         if skill_execution_payload:
@@ -972,6 +1036,7 @@ class RuntimeKernel:
             metadata={
                 "task_payload": dict(task_payload or {}),
                 "job_id": str((task_payload or {}).get("job_id") or ""),
+                "effective_capabilities": effective_capabilities.to_dict(),
             },
         )
         tools = self._build_tools(agent, tool_context)
@@ -989,6 +1054,138 @@ class RuntimeKernel:
             messages=list(loop_result.messages or session_state.messages),
             metadata=dict(loop_result.metadata),
         )
+
+    def export_langgraph_react_graph(self, agent_name: str = "") -> Dict[str, Any]:
+        selected_agent_name = str(agent_name or "").strip() or self.registry.get_default_agent_name()
+        warnings: List[str] = []
+
+        def unavailable(message: str) -> Dict[str, Any]:
+            warning_list = [*warnings, message] if message else list(warnings)
+            return {
+                "status": "unavailable",
+                "generated_at": utc_now_iso(),
+                "agent_name": selected_agent_name,
+                "mermaid": "",
+                "nodes": [],
+                "edges": [],
+                "warnings": warning_list,
+            }
+
+        try:
+            agent = self.registry.get(selected_agent_name)
+            if agent is None:
+                return unavailable(f"Agent '{selected_agent_name}' was not found in the live registry.")
+            if agent.mode in {"basic", "coordinator"}:
+                return unavailable(f"Agent '{selected_agent_name}' uses {agent.mode} execution rather than the ReAct LangGraph loop.")
+            if str(agent.metadata.get("execution_strategy") or "").strip().lower() == "plan_execute":
+                return unavailable(f"Agent '{selected_agent_name}' is configured for plan-execute fallback.")
+
+            providers = self.resolve_providers_for_agent(agent.name)
+            chat_llm = getattr(providers, "chat", None) if providers is not None else None
+            if chat_llm is None:
+                return unavailable(f"Agent '{selected_agent_name}' has no chat provider available for graph export.")
+
+            session_state = SessionState(
+                tenant_id=str(getattr(self.settings, "default_tenant_id", "local-dev") or "local-dev"),
+                user_id=str(getattr(self.settings, "default_user_id", "control-panel") or "control-panel"),
+                conversation_id="architecture-graph-preview",
+                user_email="control-panel@example.local",
+                active_agent=agent.name,
+                metadata={"source": "control_panel_architecture_export"},
+            )
+            tool_context = ToolContext(
+                settings=self.settings,
+                providers=providers,
+                stores=self.stores,
+                session=session_state,
+                paths=self.paths,
+                callbacks=[],
+                transcript_store=self.transcript_store,
+                job_manager=self.job_manager,
+                event_sink=self.event_sink,
+                kernel=self,
+                active_agent=agent.name,
+                active_definition=agent,
+                file_memory_store=self.file_memory_store,
+                memory_store=self.memory_store,
+                progress_emitter=self.get_live_progress_sink(session_state.session_id),
+                rag_runtime_bridge=self.build_rag_runtime_bridge(session_state) if agent.mode == "rag" else None,
+                metadata={"source": "control_panel_architecture_export"},
+            )
+            tools = self._build_tools(agent, tool_context)
+            if tools:
+                bind_tools = getattr(chat_llm, "bind_tools", None)
+                if callable(bind_tools):
+                    bind_tools(tools)
+                else:
+                    warnings.append(f"Agent '{selected_agent_name}' chat provider does not expose bind_tools().")
+
+            compiled_graph = build_react_agent_graph(
+                chat_llm,
+                tools=tools,
+                max_tool_calls=agent.max_tool_calls,
+                max_parallel_tool_calls=getattr(self.settings, "max_parallel_tool_calls", 4),
+                context_budget_manager=self.context_budget_manager,
+                tool_context=tool_context,
+                providers=providers,
+            )
+            graph_view = compiled_graph.get_graph()
+            mermaid = graph_view.draw_mermaid() if hasattr(graph_view, "draw_mermaid") else ""
+            return {
+                "status": "available",
+                "generated_at": utc_now_iso(),
+                "agent_name": agent.name,
+                "mermaid": str(mermaid or ""),
+                "nodes": self._serialize_langgraph_nodes(graph_view),
+                "edges": self._serialize_langgraph_edges(graph_view),
+                "warnings": warnings,
+            }
+        except Exception as exc:
+            logger.warning("LangGraph architecture export failed for agent '%s': %s", selected_agent_name, exc)
+            return unavailable(str(exc))
+
+    @staticmethod
+    def _safe_langgraph_json(value: Any) -> Any:
+        normalized = make_json_compatible(value)
+        try:
+            json.dumps(normalized)
+            return normalized
+        except TypeError:
+            return str(normalized)
+
+    @classmethod
+    def _serialize_langgraph_nodes(cls, graph_view: Any) -> List[Dict[str, Any]]:
+        raw_nodes = getattr(graph_view, "nodes", {}) or {}
+        items = raw_nodes.items() if isinstance(raw_nodes, dict) else enumerate(raw_nodes)
+        serialized: List[Dict[str, Any]] = []
+        for fallback_id, node in items:
+            node_id = str(getattr(node, "id", fallback_id) or fallback_id)
+            node_data = getattr(node, "data", None)
+            serialized.append(
+                {
+                    "id": node_id,
+                    "name": str(getattr(node, "name", node_id) or node_id),
+                    "data_type": node_data.__class__.__name__ if node_data is not None else "",
+                    "metadata": cls._safe_langgraph_json(getattr(node, "metadata", {}) or {}),
+                }
+            )
+        return serialized
+
+    @classmethod
+    def _serialize_langgraph_edges(cls, graph_view: Any) -> List[Dict[str, Any]]:
+        raw_edges = getattr(graph_view, "edges", []) or []
+        serialized: List[Dict[str, Any]] = []
+        for index, edge in enumerate(raw_edges):
+            serialized.append(
+                {
+                    "id": f"langgraph-edge-{index + 1}",
+                    "source": str(getattr(edge, "source", "") or ""),
+                    "target": str(getattr(edge, "target", "") or ""),
+                    "conditional": bool(getattr(edge, "conditional", False)),
+                    "data": cls._safe_langgraph_json(getattr(edge, "data", None)),
+                }
+            )
+        return serialized
 
     def resolve_providers_for_agent(self, agent_name: str, *, chat_max_output_tokens: int | None = None) -> Any | None:
         return self.provider_controller.resolve_for_agent(
@@ -1072,6 +1269,18 @@ class RuntimeKernel:
         )
         if record is None:
             return {"object": "skill.execution_result", "skill_id": clean_skill_id, "status": "error", "error": "Skill not found or not visible."}
+        effective_capabilities = coerce_effective_capabilities(
+            dict(tool_context.metadata or {}).get("effective_capabilities")
+            or dict(getattr(session, "metadata", {}) or {}).get("effective_capabilities")
+        )
+        family_id = str(getattr(record, "version_parent", "") or clean_skill_id)
+        if effective_capabilities is not None and not effective_capabilities.allows_skill(clean_skill_id, family_id=family_id):
+            return {
+                "object": "skill.execution_result",
+                "skill_id": clean_skill_id,
+                "status": "error",
+                "error": "Skill pack is disabled by the effective capability profile.",
+            }
         if str(getattr(record, "kind", "retrievable") or "retrievable").strip().lower() not in EXECUTABLE_SKILL_KINDS:
             return {"object": "skill.execution_result", "skill_id": clean_skill_id, "status": "error", "error": "Skill is not executable."}
         if not bool(getattr(record, "enabled", False)) or str(getattr(record, "status", "") or "").strip().lower() != "active":
@@ -1100,6 +1309,29 @@ class RuntimeKernel:
                 "error": "Skill requests tools that the current agent is not allowed to use.",
                 "disallowed_tools": disallowed_by_caller,
             }
+        if effective_capabilities is not None:
+            tool_definitions = getattr(self, "tool_definitions", {}) or {}
+            disallowed_by_capability = []
+            for tool_name in skill_allowed_tools:
+                definition = tool_definitions.get(tool_name)
+                if definition is None:
+                    continue
+                if not effective_capabilities.allows_tool(
+                    tool_name,
+                    group=str(getattr(definition, "group", "") or ""),
+                    read_only=bool(getattr(definition, "read_only", False)),
+                    destructive=bool(getattr(definition, "destructive", False)),
+                    metadata=dict(getattr(definition, "metadata", {}) or {}),
+                ):
+                    disallowed_by_capability.append(tool_name)
+            if disallowed_by_capability:
+                return {
+                    "object": "skill.execution_result",
+                    "skill_id": clean_skill_id,
+                    "status": "error",
+                    "error": "Skill requests tools disabled by the effective capability profile.",
+                    "disallowed_tools": sorted(disallowed_by_capability),
+                }
 
         preview = build_skill_execution_preview(
             record,
@@ -1193,6 +1425,12 @@ class RuntimeKernel:
         active_definition = tool_context.active_definition
         allowed_agents = set(active_definition.allowed_worker_agents if active_definition is not None else [])
         clean_agent = (agent_name or "utility").strip()
+        effective_capabilities = coerce_effective_capabilities(
+            dict(tool_context.metadata or {}).get("effective_capabilities")
+            or dict(getattr(tool_context.session, "metadata", {}) or {}).get("effective_capabilities")
+        )
+        if effective_capabilities is not None and not effective_capabilities.allows_agent(clean_agent):
+            return {"error": f"Agent '{clean_agent}' is disabled by the effective capability profile.", "agent_name": clean_agent}
         if clean_agent not in allowed_agents:
             return {"error": f"Agent '{clean_agent}' is not allowed.", "allowed_agents": sorted(allowed_agents)}
         if clean_agent == "memory_maintainer" and not bool(getattr(self.settings, "memory_enabled", True)):
@@ -1245,6 +1483,12 @@ class RuntimeKernel:
         clean_agent = str(agent_name or "").strip()
         clean_message = str(message or "").strip()
         clean_job_id = str(job_id or "").strip()
+        effective_capabilities = coerce_effective_capabilities(
+            dict(tool_context.metadata or {}).get("effective_capabilities")
+            or dict(getattr(tool_context.session, "metadata", {}) or {}).get("effective_capabilities")
+        )
+        if effective_capabilities is not None and not effective_capabilities.allows_agent(clean_agent):
+            return {"error": f"Agent '{clean_agent}' is disabled by the effective capability profile.", "agent_name": clean_agent}
         if not clean_agent:
             return {"error": "agent_name is required."}
         if not clean_message:

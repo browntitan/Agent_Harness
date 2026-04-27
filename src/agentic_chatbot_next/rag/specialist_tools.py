@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 from agentic_chatbot_next.config import Settings
 from agentic_chatbot_next.graph.service import GraphService
 from agentic_chatbot_next.persistence.postgres.chunks import ChunkRecord, ScoredChunk
+from agentic_chatbot_next.rag.retrieval import rank_fuse_dedupe
 from agentic_chatbot_next.rag.stores import KnowledgeStores
 
 logger = logging.getLogger(__name__)
@@ -42,14 +43,18 @@ def _chunk_to_dict(chunk: Any) -> dict:
     return {}
 
 
+def _fused_search_results(vector_hits: List[ScoredChunk], keyword_hits: List[ScoredChunk]) -> List[ScoredChunk]:
+    return rank_fuse_dedupe({"vector": vector_hits, "keyword": keyword_hits})
+
+
 def make_all_rag_tools(
     stores: KnowledgeStores,
     session: Any,
     *,
     settings: Settings | None = None,
 ) -> List[Any]:
-    top_k_vector = max(1, int(getattr(settings, "rag_top_k_vector", 8)))
-    top_k_keyword = max(1, int(getattr(settings, "rag_top_k_keyword", 8)))
+    top_k_vector = max(1, int(getattr(settings, "rag_top_k_vector", 15)))
+    top_k_keyword = max(1, int(getattr(settings, "rag_top_k_keyword", 15)))
     tenant_id = getattr(session, "tenant_id", getattr(settings, "default_tenant_id", "local-dev"))
 
     @tool
@@ -102,9 +107,10 @@ def make_all_rag_tools(
     @tool
     def search_document(doc_id: str, query: str, strategy: str = "hybrid") -> str:
         """Search within a single document."""
-        results = []
+        vector_hits: List[ScoredChunk] = []
+        keyword_hits: List[ScoredChunk] = []
         if strategy in {"vector", "hybrid"}:
-            results.extend(
+            vector_hits.extend(
                 stores.chunk_store.vector_search(
                     query,
                     top_k=top_k_vector,
@@ -113,7 +119,7 @@ def make_all_rag_tools(
                 )
             )
         if strategy in {"keyword", "hybrid"}:
-            results.extend(
+            keyword_hits.extend(
                 stores.chunk_store.keyword_search(
                     query,
                     top_k=top_k_keyword,
@@ -121,42 +127,30 @@ def make_all_rag_tools(
                     tenant_id=tenant_id,
                 )
             )
-        seen = set()
-        unique = []
-        for result in results:
-            chunk_id = (result.doc.metadata or {}).get("chunk_id", "")
-            if chunk_id not in seen:
-                seen.add(chunk_id)
-                unique.append(result)
-        unique.sort(key=lambda item: item.score, reverse=True)
+        unique = _fused_search_results(vector_hits, keyword_hits)
         max_out = min(50, top_k_vector + top_k_keyword)
         return json.dumps([_chunk_to_dict(item) for item in unique[:max_out]])
 
     @tool
     def search_all_documents(query: str, strategy: str = "hybrid") -> str:
         """Search across all indexed documents."""
-        results = []
+        vector_hits: List[ScoredChunk] = []
+        keyword_hits: List[ScoredChunk] = []
         if strategy in {"vector", "hybrid"}:
-            results.extend(stores.chunk_store.vector_search(query, top_k=top_k_vector, tenant_id=tenant_id))
+            vector_hits.extend(stores.chunk_store.vector_search(query, top_k=top_k_vector, tenant_id=tenant_id))
         if strategy in {"keyword", "hybrid"}:
-            results.extend(stores.chunk_store.keyword_search(query, top_k=top_k_keyword, tenant_id=tenant_id))
-        seen = set()
-        unique = []
-        for result in results:
-            chunk_id = (result.doc.metadata or {}).get("chunk_id", "")
-            if chunk_id not in seen:
-                seen.add(chunk_id)
-                unique.append(result)
-        unique.sort(key=lambda item: item.score, reverse=True)
+            keyword_hits.extend(stores.chunk_store.keyword_search(query, top_k=top_k_keyword, tenant_id=tenant_id))
+        unique = _fused_search_results(vector_hits, keyword_hits)
         max_out = min(80, top_k_vector + top_k_keyword)
         return json.dumps([_chunk_to_dict(item) for item in unique[:max_out]])
 
     @tool
     def search_collection(collection_id: str, query: str, strategy: str = "hybrid") -> str:
         """Search across one collection."""
-        results = []
+        vector_hits: List[ScoredChunk] = []
+        keyword_hits: List[ScoredChunk] = []
         if strategy in {"vector", "hybrid"}:
-            results.extend(
+            vector_hits.extend(
                 stores.chunk_store.vector_search(
                     query,
                     top_k=top_k_vector,
@@ -165,7 +159,7 @@ def make_all_rag_tools(
                 )
             )
         if strategy in {"keyword", "hybrid"}:
-            results.extend(
+            keyword_hits.extend(
                 stores.chunk_store.keyword_search(
                     query,
                     top_k=top_k_keyword,
@@ -173,14 +167,7 @@ def make_all_rag_tools(
                     tenant_id=tenant_id,
                 )
             )
-        seen = set()
-        unique = []
-        for result in results:
-            chunk_id = (result.doc.metadata or {}).get("chunk_id", "")
-            if chunk_id not in seen:
-                seen.add(chunk_id)
-                unique.append(result)
-        unique.sort(key=lambda item: item.score, reverse=True)
+        unique = _fused_search_results(vector_hits, keyword_hits)
         max_out = min(80, top_k_vector + top_k_keyword)
         return json.dumps([_chunk_to_dict(item) for item in unique[:max_out]])
 

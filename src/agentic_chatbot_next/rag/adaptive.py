@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import re
+import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence
 
 from langchain_core.documents import Document
 
 from agentic_chatbot_next.contracts.rag import RetrievalSummary
-from agentic_chatbot_next.graph import GraphService, SourcePlan, plan_sources
 from agentic_chatbot_next.persistence.postgres.chunks import ChunkRecord, ScoredChunk
 from agentic_chatbot_next.prompting import load_judge_rewrite_prompt, render_template
 from agentic_chatbot_next.rag.entity_linking import resolve_query_entities
@@ -23,6 +24,21 @@ from agentic_chatbot_next.rag.discovery_precision import (
     document_has_explicit_topic_support,
     workflow_topic_seed_terms,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - import-only typing surface
+    from agentic_chatbot_next.graph.planner import SourcePlan
+
+
+def _new_source_plan(query: str) -> "SourcePlan":
+    from agentic_chatbot_next.graph.planner import SourcePlan
+
+    return SourcePlan(query=query)
+
+
+def _plan_sources(*args: Any, **kwargs: Any) -> "SourcePlan":
+    from agentic_chatbot_next.graph.planner import plan_sources
+
+    return plan_sources(*args, **kwargs)
 from agentic_chatbot_next.rag.hints import (
     coerce_controller_hints,
     normalize_coverage_goal,
@@ -34,7 +50,7 @@ from agentic_chatbot_next.rag.collection_selection import (
     select_collection_for_query,
 )
 from agentic_chatbot_next.rag.retrieval_scope import resolve_collection_ids_for_source
-from agentic_chatbot_next.rag.retrieval import GradedChunk, grade_chunks, merge_dedupe, retrieve_candidates
+from agentic_chatbot_next.rag.retrieval import GradedChunk, grade_chunks, merge_dedupe, rank_fuse_dedupe, retrieve_candidates
 from agentic_chatbot_next.rag.verification import verify_retrieval_quality
 from agentic_chatbot_next.utils.json_utils import extract_json
 
@@ -147,17 +163,17 @@ _WORKBOOK_FOCUS_HINTS = re.compile(
     r"\b(budget|schedule|staffing|scorecard|kpi|bom|cost|costs|training|spares|milestone|milestones|variance|supplier|suppliers|price|procurement|resource|deployment|deploy|rollout|ims|risks?)\b",
     re.IGNORECASE,
 )
-_PROGRAM_NAMES = (
-    "asterion",
-    "iron vale",
-    "trident echo",
-    "blue mica",
-    "harbor scribe",
-    "ember reach",
+_CAUSAL_REWRITE_HINTS = re.compile(
+    r"\b(because|caused|cause|reason|why|driver|drove|driven|factor|issue|root\s+cause|attributed|resulted)\b",
+    re.IGNORECASE,
 )
-_ALIAS_GROUPS = (
-    ("north coast systems llc", "northcoast signal labs"),
-    ("halcyon foundry", "halcyon microdevices"),
+_REFUTATION_REWRITE_HINTS = re.compile(
+    r"\b(says|claim|claims|claimed|because|whether|true|false|instead|rather|not|better\s+evidence)\b",
+    re.IGNORECASE,
+)
+_STATUS_OUTCOME_REWRITE_HINTS = re.compile(
+    r"\b(status|date|deadline|milestone|schedule|slip|slipped|delay|delayed|move|moved|outcome|result|final|approved|ready|readiness)\b|\b\d{4}\b",
+    re.IGNORECASE,
 )
 
 
@@ -194,22 +210,87 @@ def _query_terms(value: str) -> set[str]:
 
 
 def _augment_query_with_aliases(query: str) -> str:
-    normalized = _normalize_text(query)
-    additions: List[str] = []
-    for group in _ALIAS_GROUPS:
-        if any(alias in normalized for alias in group):
-            for alias in group:
-                if alias not in normalized and alias not in additions:
-                    additions.append(alias)
-    if not additions:
-        return query
-    return f"{query} {' '.join(additions)}"
+    return query
 
 
 def _emit_progress(progress_emitter: Any | None, event_type: str, **payload: Any) -> None:
     if progress_emitter is None or not hasattr(progress_emitter, "emit_progress"):
         return
     progress_emitter.emit_progress(event_type, **payload)
+
+
+class RetrievalBudget:
+    def __init__(self, *, budget_ms: int = 0, synthesis_reserve_ms: int = 30_000) -> None:
+        self.budget_ms = max(0, int(budget_ms or 0))
+        self.synthesis_reserve_ms = max(0, int(synthesis_reserve_ms or 0))
+        self.started_at = time.perf_counter()
+        self.stage_timings_ms: Dict[str, float] = {}
+        self.budget_exhausted = False
+
+    @contextmanager
+    def measure(self, stage: str):
+        name = str(stage or "unknown").strip() or "unknown"
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter() - started) * 1000.0
+            self.stage_timings_ms[name] = round(self.stage_timings_ms.get(name, 0.0) + elapsed, 3)
+            if self.budget_ms and self.elapsed_ms() >= self.budget_ms:
+                self.budget_exhausted = True
+
+    def elapsed_ms(self) -> float:
+        return (time.perf_counter() - self.started_at) * 1000.0
+
+    def remaining_ms(self) -> float:
+        if not self.budget_ms:
+            return float("inf")
+        return max(0.0, float(self.budget_ms) - self.elapsed_ms())
+
+    def should_cutoff(self, *, reserve_ms: int | None = None) -> bool:
+        if not self.budget_ms:
+            return False
+        reserve = self.synthesis_reserve_ms if reserve_ms is None else max(0, int(reserve_ms))
+        if self.remaining_ms() <= reserve:
+            self.budget_exhausted = True
+            return True
+        return False
+
+    def slow_stages(self, *, threshold_ms: int = 5_000, limit: int = 5) -> List[str]:
+        ranked = sorted(self.stage_timings_ms.items(), key=lambda item: item[1], reverse=True)
+        return [name for name, elapsed in ranked if elapsed >= threshold_ms][:limit]
+
+    def to_fields(self) -> Dict[str, Any]:
+        return {
+            "stage_timings_ms": dict(self.stage_timings_ms),
+            "budget_ms": int(self.budget_ms),
+            "budget_exhausted": bool(self.budget_exhausted),
+            "slow_stages": self.slow_stages(),
+        }
+
+
+def _new_retrieval_budget(settings: Any, controller_hints: Dict[str, Any]) -> RetrievalBudget:
+    raw_budget = (
+        controller_hints.get("rag_budget_ms")
+        or controller_hints.get("budget_ms")
+        or getattr(settings, "rag_budget_ms", 0)
+        or 0
+    )
+    raw_reserve = (
+        controller_hints.get("rag_budget_synthesis_reserve_ms")
+        or getattr(settings, "rag_budget_synthesis_reserve_ms", 30_000)
+        or 30_000
+    )
+    return RetrievalBudget(budget_ms=int(raw_budget or 0), synthesis_reserve_ms=int(raw_reserve or 0))
+
+
+@contextmanager
+def _measure_stage(stage_timer: RetrievalBudget | None, stage: str):
+    if stage_timer is None:
+        yield
+        return
+    with stage_timer.measure(stage):
+        yield
 
 
 def _chunk_id(doc: Document) -> str:
@@ -281,6 +362,17 @@ def _is_complex_query(question: str) -> bool:
     return len(question.split()) >= 18 or bool(_COMPLEX_HINTS.search(question) or _DISCOVERY_HINTS.search(question))
 
 
+def _looks_simple_fact_query(question: str) -> bool:
+    lowered = str(question or "").strip().lower()
+    if not lowered:
+        return False
+    if _COMPARISON_HINTS.search(lowered) or _DISCOVERY_HINTS.search(lowered):
+        return False
+    if re.search(r"\b(compare|contrast|extract|summarize|all|every|each|across|relationship|dependencies|inventory|list)\b", lowered):
+        return False
+    return bool(re.search(r"\b(what|when|where|who|which|how many|does|is|are)\b", lowered)) and len(lowered.split()) <= 24
+
+
 def _is_comparison_query(question: str) -> bool:
     return bool(_COMPARISON_HINTS.search(question))
 
@@ -339,8 +431,220 @@ def _keyword_projection(question: str) -> str:
     return " ".join(projected) or question.strip()
 
 
+def _compact_visible_projection(value: str, *, limit: int = 8) -> str:
+    terms: List[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[A-Za-z0-9_]{3,}", str(value or "").lower()):
+        if token in _STOPWORDS or token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+        if len(terms) >= max(1, int(limit)):
+            break
+    return " ".join(terms)
+
+
+def _visible_claim_from_question(question: str) -> str:
+    text = str(question or "").strip()
+    quoted = [item.strip() for item in re.findall(r'"([^"]+)"', text) if item.strip()]
+    if quoted:
+        return quoted[0]
+    patterns = (
+        r"\b(?:someone|they|the\s+source|the\s+document)\s+says?\s+(.+?)(?:,\s*(?:what|which|how|is)\b|\?\s*$|$)",
+        r"\bclaim(?:s|ed)?\s+(?:that\s+)?(.+?)(?:,\s*(?:what|which|how|is)\b|\?\s*$|$)",
+        r"\bif\s+(.+?)(?:,\s*(?:what|which|how|is)\b|\?\s*$|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            claim = re.sub(r"\s+", " ", match.group(1)).strip(" .,:;")
+            if claim:
+                return claim
+    return ""
+
+
+def _source_title_projection(conversation_context: str) -> str:
+    title_fragments: List[str] = []
+    for line in str(conversation_context or "").splitlines():
+        if "doc_id:" not in line and "candidate" not in line.lower():
+            continue
+        title_fragments.append(line)
+    if not title_fragments:
+        return ""
+    return _compact_visible_projection(" ".join(title_fragments), limit=8)
+
+
+def _generic_rewrite_candidates(
+    question: str,
+    *,
+    conversation_context: str,
+    round_index: int,
+) -> List[tuple[str, str, str]]:
+    base_terms = _compact_visible_projection(question, limit=8)
+    if not base_terms:
+        return []
+    variants: List[tuple[str, str, str]] = []
+    claim = _visible_claim_from_question(question)
+    if claim:
+        claim_terms = _compact_visible_projection(claim, limit=8)
+        if claim_terms:
+            variants.append((f"{claim_terms} evidence support refute", "keyword", "claim_focused_rewrite"))
+    variants.append((f"{base_terms} evidence support", "hybrid", "entity_focused_rewrite"))
+    if _REFUTATION_REWRITE_HINTS.search(question):
+        variants.append((f"{base_terms} support refute contradiction evidence", "keyword", "refutation_focused_rewrite"))
+    if _CAUSAL_REWRITE_HINTS.search(question):
+        variants.append((f"{base_terms} cause reason driver factor evidence", "keyword", "causal_factor_rewrite"))
+    if _STATUS_OUTCOME_REWRITE_HINTS.search(question):
+        variants.append((f"{base_terms} status outcome date milestone evidence", "keyword", "status_outcome_rewrite"))
+    if round_index > 1:
+        title_terms = _source_title_projection(conversation_context)
+        if title_terms:
+            variants.append((f"{base_terms} {title_terms}", "hybrid", "source_metadata_rewrite"))
+    return variants[:5]
+
+
 def _terms_from_text(value: str) -> List[str]:
     return [token for token in re.findall(r"[A-Za-z0-9_]{4,}", str(value or "").lower()) if token not in _STOPWORDS]
+
+
+def _facet_terms(value: str) -> List[str]:
+    return [token for token in re.findall(r"[A-Za-z0-9_]{2,}", str(value or "").lower()) if token not in _STOPWORDS]
+
+
+_FACET_SPAN_RE = re.compile(
+    r"\b(?:about|covering|including|includes?|regarding|concerning|related\s+to|focused\s+on|on)\b\s+(?P<span>[^.?!;]+)",
+    re.IGNORECASE,
+)
+_FACET_INSTRUCTION_RE = re.compile(
+    r"\b(?:cite|include|provide|show|return)\b.*\b(?:citations?|sources?|source\s+links?)\b.*$",
+    re.IGNORECASE,
+)
+_FACET_LEADING_VERB_RE = re.compile(
+    r"^\s*(?:answer|compose|create|design|draft|explain|generate|summari[sz]e|describe|write)\b\s*",
+    re.IGNORECASE,
+)
+
+
+def _clean_facet_label(value: str) -> str:
+    text = str(value or "").strip().strip("`'\"“”‘’[](){}")
+    text = _FACET_INSTRUCTION_RE.sub("", text).strip()
+    text = _FACET_LEADING_VERB_RE.sub("", text).strip()
+    text = re.sub(r"^\b(?:a|an|the|and|or|plus|also)\b\s+", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s+", " ", text).strip(" ,.;:")
+    return text
+
+
+def _extract_query_facets(question: str, *, max_facets: int = 6) -> List[Dict[str, Any]]:
+    text = str(question or "").strip()
+    if not text:
+        return []
+    spans = [match.group("span") for match in _FACET_SPAN_RE.finditer(text)]
+    candidate_text = spans[-1] if spans else text
+    candidate_text = _FACET_INSTRUCTION_RE.sub("", candidate_text).strip()
+    if not re.search(r"[,;/]|\b(?:and|or|plus)\b", candidate_text, flags=re.IGNORECASE):
+        return []
+    normalized = re.sub(r"\b(?:as\s+well\s+as|along\s+with|plus)\b", ",", candidate_text, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s*(?:,|;|/)\s*", ",", normalized)
+    normalized = re.sub(r"\s+\b(?:and|or)\b\s+", ",", normalized, flags=re.IGNORECASE)
+    labels: List[str] = []
+    seen: set[str] = set()
+    for raw_part in normalized.split(","):
+        label = _clean_facet_label(raw_part)
+        if not label:
+            continue
+        terms = _facet_terms(label)
+        if not terms:
+            continue
+        if len(label.split()) > 8 or len(label) > 90:
+            continue
+        key = " ".join(terms)
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+        if len(labels) >= max(2, int(max_facets)):
+            break
+    if len(labels) < 2:
+        return []
+    return [
+        {
+            "facet_id": f"facet_{index + 1}",
+            "label": label,
+            "query": f"{question} {label}",
+            "terms": _facet_terms(label),
+        }
+        for index, label in enumerate(labels)
+    ]
+
+
+def _doc_matches_facet(doc: Document, facet: Dict[str, Any]) -> bool:
+    terms = [str(item).lower() for item in (facet.get("terms") or []) if str(item)]
+    if not terms:
+        return False
+    metadata = dict(doc.metadata or {})
+    haystack = _normalize_text(
+        " ".join(
+            [
+                str(metadata.get("title") or ""),
+                str(metadata.get("source_path") or ""),
+                str(metadata.get("section_title") or ""),
+                doc.page_content,
+            ]
+        )
+    )
+    label = _normalize_text(str(facet.get("label") or ""))
+    if label and label in haystack:
+        return True
+    matches = [term for term in terms if term in haystack]
+    threshold = 1 if len(terms) <= 2 else 2
+    return len(matches) >= threshold
+
+
+def _select_facet_aware_evidence_docs(
+    question: str,
+    graded: Sequence[GradedChunk],
+    min_chunks: int,
+    facets: Sequence[Dict[str, Any]] | None,
+) -> List[Document]:
+    selected: List[Document] = []
+    selected_keys: set[str] = set()
+    facet_list = [dict(item) for item in (facets or []) if isinstance(item, dict)]
+    target = max(int(min_chunks), min(len(facet_list), 6) if facet_list else int(min_chunks))
+
+    for facet in facet_list:
+        matches = [
+            item
+            for item in graded
+            if item.relevance >= 1 and _doc_matches_facet(item.doc, facet)
+        ]
+        matches.sort(
+            key=lambda item: (
+                item.relevance,
+                _adaptive_score(item.doc),
+                _title_overlap_score(question, item.doc),
+            ),
+            reverse=True,
+        )
+        if not matches:
+            continue
+        doc = matches[0].doc
+        key = _chunk_id(doc) or f"{_doc_id(doc)}#{len(selected)}"
+        if key in selected_keys:
+            continue
+        selected.append(doc)
+        selected_keys.add(key)
+        if len(selected) >= target:
+            break
+
+    for doc in _select_evidence_docs(question, graded, target):
+        key = _chunk_id(doc) or f"{_doc_id(doc)}#{len(selected)}"
+        if key in selected_keys:
+            continue
+        selected.append(doc)
+        selected_keys.add(key)
+        if len(selected) >= target:
+            break
+    return selected
 
 
 def _phase_sequence(max_search_rounds: int) -> List[str]:
@@ -464,6 +768,7 @@ class EvidenceEntry:
     relevance: int = 0
     coverage_state: str = "candidate"
     grade_reason: str = ""
+    retrieval_lanes: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -471,6 +776,8 @@ class EvidenceLedger:
     question: str
     entries: Dict[str, EvidenceEntry] = field(default_factory=dict)
     documents: Dict[str, Document] = field(default_factory=dict)
+    facets: List[Dict[str, Any]] = field(default_factory=list)
+    facet_coverage: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     round_summaries: List[Dict[str, Any]] = field(default_factory=list)
     unresolved_subquestions: List[str] = field(default_factory=list)
     pruned_chunk_ids: List[str] = field(default_factory=list)
@@ -515,6 +822,7 @@ class EvidenceLedger:
                     score=float(score),
                     round_index=round_index,
                     snippet=candidate.page_content[:260],
+                    retrieval_lanes=dict((candidate.metadata or {}).get("_retrieval_lanes") or {}),
                 )
                 self.documents[chunk_id] = candidate
                 added += 1
@@ -526,6 +834,7 @@ class EvidenceLedger:
                 existing.rationale = rationale
                 existing.round_index = round_index
                 existing.snippet = candidate.page_content[:260]
+                existing.retrieval_lanes = dict((candidate.metadata or {}).get("_retrieval_lanes") or existing.retrieval_lanes or {})
                 self.documents[chunk_id] = candidate
         return added
 
@@ -619,11 +928,14 @@ class EvidenceLedger:
                     "relevance": entry.relevance,
                     "coverage_state": entry.coverage_state,
                     "grade_reason": entry.grade_reason,
+                    "retrieval_lanes": dict(entry.retrieval_lanes or {}),
                     "round_index": entry.round_index,
                     "snippet": entry.snippet,
                 }
                 for entry in sorted(self.entries.values(), key=lambda item: (item.round_index, -item.score))
             ],
+            "facets": [dict(item) for item in self.facets],
+            "facet_coverage": {str(key): dict(value) for key, value in self.facet_coverage.items()},
             "round_summaries": list(self.round_summaries),
             "unresolved_subquestions": list(self.unresolved_subquestions),
             "pruned_chunk_ids": list(self.pruned_chunk_ids),
@@ -660,6 +972,10 @@ class RetrievalRun:
     claim_ledger: Dict[str, Any] = field(default_factory=dict)
     verified_hops: List[str] = field(default_factory=list)
     retrieval_verification: Dict[str, Any] = field(default_factory=dict)
+    stage_timings_ms: Dict[str, float] = field(default_factory=dict)
+    budget_ms: int = 0
+    budget_exhausted: bool = False
+    slow_stages: List[str] = field(default_factory=list)
 
     def to_summary(self, *, citations_found: int) -> RetrievalSummary:
         return RetrievalSummary(
@@ -683,17 +999,30 @@ class RetrievalRun:
             claim_ledger=dict(self.claim_ledger),
             verified_hops=list(self.verified_hops),
             retrieval_verification=dict(self.retrieval_verification),
+            stage_timings_ms=dict(self.stage_timings_ms),
+            budget_ms=int(self.budget_ms),
+            budget_exhausted=bool(self.budget_exhausted),
+            slow_stages=list(self.slow_stages),
         )
 
 
 class CorpusRetrievalAdapter:
-    def __init__(self, stores: Any, *, settings: Any, session: Any, source_plan: SourcePlan | None = None) -> None:
+    def __init__(
+        self,
+        stores: Any,
+        *,
+        settings: Any,
+        session: Any,
+        source_plan: SourcePlan | None = None,
+        stage_timer: RetrievalBudget | None = None,
+    ) -> None:
         self.stores = stores
         self.settings = settings
         self.session = session
-        self.source_plan = source_plan or SourcePlan(query="")
+        self.source_plan = source_plan or _new_source_plan("")
         self.tenant_id = getattr(session, "tenant_id", getattr(settings, "default_tenant_id", "local-dev"))
         self._read_cache: Dict[tuple[str, str, str, int, int], List[Document]] = {}
+        self.stage_timer = stage_timer
 
     def _document_metadata(self, doc_id: str) -> Dict[str, Any]:
         try:
@@ -718,12 +1047,14 @@ class CorpusRetrievalAdapter:
             return None
         return store
 
-    def _graph_service(self) -> GraphService | None:
+    def _graph_service(self) -> Any | None:
         if not bool(getattr(self.settings, "graph_search_enabled", False)):
             return None
         if getattr(self.stores, "graph_index_store", None) is None:
             return None
         try:
+            from agentic_chatbot_next.graph.service import GraphService
+
             return GraphService(self.settings, self.stores, session=self.session)
         except Exception:
             return None
@@ -731,8 +1062,15 @@ class CorpusRetrievalAdapter:
     def _graph_capable_query(self, query: str) -> bool:
         lower = str(query or "").lower()
         return bool(
-            re.search(r"\b(vendor|role|system|depends on|reference|references|relationship|involving|approval from|cross-document)\b", lower)
-            or len(re.findall(r"\b[A-Z][A-Za-z0-9_-]{2,}\b", query or "")) >= 2
+            re.search(
+                r"\b("
+                r"knowledge\s+graph|graph|entity\s+neighbou?rhood|relationship|relationships|"
+                r"depends\s+on|dependency|dependencies|connected\s+to|connects?|path\s+between|"
+                r"requires?\s+.+\s+approval|approval\s+(?:from|by|dependency)|references?|cites?|"
+                r"source\s+list|graph\s+sources?|graph\s+inventory|cross-document"
+                r")\b",
+                lower,
+            )
         )
 
     def _graph_methods(self) -> List[str]:
@@ -746,7 +1084,10 @@ class CorpusRetrievalAdapter:
         return [str(item) for item in (self.source_plan.graph_ids or []) if str(item)]
 
     def _should_consult_graph(self, query: str) -> bool:
-        return bool("graph" in set(self.source_plan.sources_chosen) or self._graph_capable_query(query))
+        explicit_graph_scope = bool(self._graph_ids() or self.source_plan.graph_shortlist)
+        if explicit_graph_scope and self._graph_capable_query(query):
+            return True
+        return self._graph_capable_query(query)
 
     def _resolve_graph_hits(self, hits: Sequence[Any]) -> List[ScoredChunk]:
         resolved: List[ScoredChunk] = []
@@ -855,7 +1196,6 @@ class CorpusRetrievalAdapter:
     def _rerank_with_query_heuristics(self, query: str, chunks: Sequence[ScoredChunk]) -> List[ScoredChunk]:
         normalized_query = _normalize_text(query)
         query_tokens = _query_terms(query)
-        program_hits = [program for program in _PROGRAM_NAMES if program in normalized_query]
         wants_latest = bool(_LATEST_HINTS.search(query))
         wants_draft = bool(_DRAFT_HINTS.search(query))
         workbook_focus = bool(_WORKBOOK_FOCUS_HINTS.search(query))
@@ -878,12 +1218,6 @@ class CorpusRetrievalAdapter:
             normalized_haystack = _normalize_text(haystack)
             haystack_tokens = _query_terms(haystack)
             score = float(chunk.score)
-
-            if program_hits:
-                if any(program in normalized_haystack for program in program_hits):
-                    score += 0.18
-                else:
-                    score -= 0.04
 
             if workbook_focus:
                 if str(metadata.get("file_type") or "").lower() in {"xlsx", "xls"}:
@@ -909,6 +1243,47 @@ class CorpusRetrievalAdapter:
             boosted.append(ScoredChunk(doc=chunk.doc, score=score, method=chunk.method))
         return merge_dedupe(boosted)
 
+    def _structured_neighbor_chunks(
+        self,
+        chunks: Sequence[ScoredChunk],
+        *,
+        max_seed_chunks: int = 8,
+    ) -> List[ScoredChunk]:
+        expanded: List[ScoredChunk] = []
+        seen = {_chunk_id(chunk.doc) for chunk in chunks if _chunk_id(chunk.doc)}
+        structured_file_types = {"xlsx", "xls", "pdf", "docx", "doc"}
+        for chunk in list(chunks)[: max(1, int(max_seed_chunks))]:
+            metadata = dict(chunk.doc.metadata or {})
+            file_type = str(metadata.get("file_type") or "").strip().lower()
+            if file_type not in structured_file_types:
+                continue
+            doc_id = _doc_id(chunk.doc)
+            try:
+                chunk_index = int(metadata.get("chunk_index"))
+            except Exception:
+                continue
+            if not doc_id:
+                continue
+            window = 2 if file_type in {"xlsx", "xls"} else 1
+            for neighbor in self._read_chunk_range(doc_id, chunk_index - window, chunk_index + window):
+                neighbor_id = _chunk_id(neighbor)
+                if not neighbor_id or neighbor_id in seen:
+                    continue
+                seen.add(neighbor_id)
+                try:
+                    neighbor_index = int((neighbor.metadata or {}).get("chunk_index"))
+                except Exception:
+                    neighbor_index = chunk_index
+                distance = abs(neighbor_index - chunk_index)
+                expanded.append(
+                    ScoredChunk(
+                        doc=neighbor,
+                        score=max(0.01, float(chunk.score) - (0.02 * max(1, distance))),
+                        method="structured_neighbor",
+                    )
+                )
+        return expanded
+
     def search_corpus(
         self,
         query: str,
@@ -924,8 +1299,8 @@ class CorpusRetrievalAdapter:
     ) -> List[ScoredChunk]:
         strategy = str(strategy or "hybrid").strip().lower()
         query = _augment_query_with_aliases(query)
-        top_k_vector = max(1, int(top_k_vector or getattr(self.settings, "rag_top_k_vector", 12)))
-        top_k_keyword = max(1, int(top_k_keyword or getattr(self.settings, "rag_top_k_keyword", 12)))
+        top_k_vector = max(1, int(top_k_vector or getattr(self.settings, "rag_top_k_vector", 15)))
+        top_k_keyword = max(1, int(top_k_keyword or getattr(self.settings, "rag_top_k_keyword", 15)))
         collection_id = ""
         if filters is not None:
             collection_id = filters.collection_id
@@ -941,28 +1316,32 @@ class CorpusRetrievalAdapter:
             preferred = {str(item) for item in preferred_doc_ids if str(item)}
             allowed_doc_ids = sorted(set(allowed_doc_ids) & preferred) if allowed_doc_ids else sorted(preferred)
 
-        results: List[ScoredChunk] = []
+        vector_results: List[ScoredChunk] = []
+        keyword_results: List[ScoredChunk] = []
         fanout_limit = 10
         if allowed_doc_ids and len(allowed_doc_ids) <= fanout_limit:
-            for doc_id in allowed_doc_ids:
-                if strategy in {"vector", "hybrid"}:
-                    results.extend(
-                        self.stores.chunk_store.vector_search(
-                            query,
-                            top_k=max(2, min(6, top_k_vector)),
-                            doc_id_filter=doc_id,
-                            tenant_id=self.tenant_id,
+            if strategy in {"vector", "hybrid"}:
+                with _measure_stage(self.stage_timer, "vector_search"):
+                    for doc_id in allowed_doc_ids:
+                        vector_results.extend(
+                            self.stores.chunk_store.vector_search(
+                                query,
+                                top_k=max(2, min(6, top_k_vector)),
+                                doc_id_filter=doc_id,
+                                tenant_id=self.tenant_id,
+                            )
                         )
-                    )
-                if strategy in {"keyword", "hybrid"}:
-                    results.extend(
-                        self.stores.chunk_store.keyword_search(
-                            query,
-                            top_k=max(2, min(6, top_k_keyword)),
-                            doc_id_filter=doc_id,
-                            tenant_id=self.tenant_id,
+            if strategy in {"keyword", "hybrid"}:
+                with _measure_stage(self.stage_timer, "bm25_search"):
+                    for doc_id in allowed_doc_ids:
+                        keyword_results.extend(
+                            self.stores.chunk_store.keyword_search(
+                                query,
+                                top_k=max(2, min(6, top_k_keyword)),
+                                doc_id_filter=doc_id,
+                                tenant_id=self.tenant_id,
+                            )
                         )
-                    )
         elif strategy == "hybrid":
             retrieval = retrieve_candidates(
                 self.stores,
@@ -974,31 +1353,41 @@ class CorpusRetrievalAdapter:
                 top_k_keyword=top_k_keyword,
                 collection_id_filter=collection_id,
                 collection_ids_filter=collection_ids,
+                stage_timer=self.stage_timer,
             )
-            results = list(retrieval.get("merged") or [])
+            vector_results = list(retrieval.get("vector") or [])
+            keyword_results = list(retrieval.get("keyword") or [])
         else:
             active_collection_ids = collection_ids or ([collection_id] if collection_id else [""])
-            for active_collection_id in active_collection_ids:
-                if strategy in {"vector", "hybrid"}:
-                    results.extend(
-                        self.stores.chunk_store.vector_search(
-                            query,
-                            top_k=top_k_vector,
-                            collection_id_filter=active_collection_id or None,
-                            tenant_id=self.tenant_id,
+            if strategy in {"vector", "hybrid"}:
+                with _measure_stage(self.stage_timer, "vector_search"):
+                    for active_collection_id in active_collection_ids:
+                        vector_results.extend(
+                            self.stores.chunk_store.vector_search(
+                                query,
+                                top_k=top_k_vector,
+                                collection_id_filter=active_collection_id or None,
+                                tenant_id=self.tenant_id,
+                            )
                         )
-                    )
-                if strategy in {"keyword", "hybrid"}:
-                    results.extend(
-                        self.stores.chunk_store.keyword_search(
-                            query,
-                            top_k=top_k_keyword,
-                            collection_id_filter=active_collection_id or None,
-                            tenant_id=self.tenant_id,
+            if strategy in {"keyword", "hybrid"}:
+                with _measure_stage(self.stage_timer, "bm25_search"):
+                    for active_collection_id in active_collection_ids:
+                        keyword_results.extend(
+                            self.stores.chunk_store.keyword_search(
+                                query,
+                                top_k=top_k_keyword,
+                                collection_id_filter=active_collection_id or None,
+                                tenant_id=self.tenant_id,
+                            )
                         )
-                    )
 
-        merged = merge_dedupe(results)
+        merged = rank_fuse_dedupe(
+            {
+                "vector": vector_results,
+                "keyword": keyword_results,
+            }
+        )
         if allowed_doc_ids:
             allowed = set(allowed_doc_ids)
             merged = [item for item in merged if _doc_id(item.doc) in allowed]
@@ -1006,20 +1395,21 @@ class CorpusRetrievalAdapter:
             graph_service = self._graph_service()
             scoped_doc_ids = allowed_doc_ids or list(preferred_doc_ids or [])
             graph_hits: List[Any] = []
-            if graph_service is not None:
-                try:
-                    graph_payload = graph_service.query_across_graphs(
-                        query,
-                        collection_id=collection_id,
-                        graph_ids=self._graph_ids(),
-                        methods=self._graph_methods(),
-                        limit=max(4, int(limit)),
-                        top_k_graphs=max(1, len(self._graph_ids()) or 3),
-                        doc_ids=scoped_doc_ids,
-                    )
-                    graph_hits = [item for item in (graph_payload.get("results") or []) if isinstance(item, dict)]
-                except Exception:
-                    graph_hits = []
+            with _measure_stage(self.stage_timer, "graph_search"):
+                if graph_service is not None:
+                    try:
+                        graph_payload = graph_service.query_across_graphs(
+                            query,
+                            collection_id=collection_id,
+                            graph_ids=self._graph_ids(),
+                            methods=self._graph_methods(),
+                            limit=max(4, int(limit)),
+                            top_k_graphs=max(1, len(self._graph_ids()) or 3),
+                            doc_ids=scoped_doc_ids,
+                        )
+                        graph_hits = [item for item in (graph_payload.get("results") or []) if isinstance(item, dict)]
+                    except Exception:
+                        graph_hits = []
             if graph_hits:
                 resolved_hits = [
                     type(
@@ -1039,31 +1429,41 @@ class CorpusRetrievalAdapter:
                     )()
                     for item in graph_hits
                 ]
-                merged = merge_dedupe(list(merged) + self._resolve_graph_hits(resolved_hits))
+                graph_chunks = self._resolve_graph_hits(resolved_hits)
+                merged = rank_fuse_dedupe({"text": merged, "graph": graph_chunks})
             elif graph_service is None or str(getattr(self.settings, "graph_backend", "microsoft_graphrag") or "microsoft_graphrag").strip().lower() == "neo4j":
                 graph_store = self._graph_store()
                 if graph_store is not None and self._graph_capable_query(query):
-                    try:
-                        store_hits = graph_store.local_search(
-                            query,
-                            tenant_id=self.tenant_id,
-                            limit=max(4, int(limit)),
-                            doc_ids=scoped_doc_ids,
-                        )
-                        if len(store_hits) < 2:
-                            store_hits.extend(
-                                graph_store.global_search(
-                                    query,
-                                    tenant_id=self.tenant_id,
-                                    limit=max(4, int(limit)),
-                                    doc_ids=scoped_doc_ids,
-                                )
+                    with _measure_stage(self.stage_timer, "graph_search"):
+                        try:
+                            store_hits = graph_store.local_search(
+                                query,
+                                tenant_id=self.tenant_id,
+                                limit=max(4, int(limit)),
+                                doc_ids=scoped_doc_ids,
                             )
-                        merged = merge_dedupe(list(merged) + self._resolve_graph_hits(store_hits))
-                    except Exception:
-                        pass
+                            if len(store_hits) < 2:
+                                store_hits.extend(
+                                    graph_store.global_search(
+                                        query,
+                                        tenant_id=self.tenant_id,
+                                        limit=max(4, int(limit)),
+                                        doc_ids=scoped_doc_ids,
+                                    )
+                                )
+                            graph_chunks = self._resolve_graph_hits(store_hits)
+                            merged = rank_fuse_dedupe({"text": merged, "graph": graph_chunks})
+                        except Exception:
+                            pass
         if excluded:
             merged = [item for item in merged if _chunk_id(item.doc) not in excluded]
+        with _measure_stage(self.stage_timer, "neighbor_expansion"):
+            neighbor_chunks = self._structured_neighbor_chunks(
+                merged,
+                max_seed_chunks=min(8, max(1, int(limit))),
+            )
+        if neighbor_chunks:
+            merged = rank_fuse_dedupe({"retrieval": merged, "structured_neighbor": neighbor_chunks})
         merged = self._rerank_with_query_heuristics(query, merged)
         return merged[: max(1, int(limit))]
 
@@ -1081,7 +1481,7 @@ class CorpusRetrievalAdapter:
             exclude_chunk_ids=exclude_chunk_ids,
             strategy="keyword",
             limit=limit,
-            top_k_keyword=max(4, int(getattr(self.settings, "rag_top_k_keyword", 12))),
+            top_k_keyword=max(4, int(getattr(self.settings, "rag_top_k_keyword", 15))),
         )
 
     def document_chunk_count(self, doc_id: str) -> int:
@@ -1183,38 +1583,39 @@ class CorpusRetrievalAdapter:
         if cached is not None:
             return list(cached)
 
-        docs: List[Document] = []
-        count = self.document_chunk_count(doc_id)
-        if normalized_depth == "outline":
-            docs = self.outline_scan(doc_id, max_chunks=max_chunks)
-        elif normalized_depth == "full":
-            effective_limit = min(
-                count,
-                max(
-                    max(1, int(max_chunks)),
-                    max(1, int(full_read_chunk_threshold or 24)),
-                ),
-            )
-            docs = self._sample_full_document(
-                doc_id,
-                max_chunks=effective_limit,
-                total_chunks=count,
-            )
-        else:
-            results = self.search_corpus(
-                focus_query,
-                filters=SearchFilters(doc_ids=[doc_id]),
-                strategy="hybrid",
-                limit=max_chunks,
-                preferred_doc_ids=[doc_id],
-            )
-            docs = [item.doc for item in results]
-            if not docs and count > 0:
-                docs = self._read_chunk_range(
-                    doc_id,
-                    0,
-                    max(0, min(count, max_chunks) - 1),
+        with _measure_stage(self.stage_timer, "document_reads"):
+            docs: List[Document] = []
+            count = self.document_chunk_count(doc_id)
+            if normalized_depth == "outline":
+                docs = self.outline_scan(doc_id, max_chunks=max_chunks)
+            elif normalized_depth == "full":
+                effective_limit = min(
+                    count,
+                    max(
+                        max(1, int(max_chunks)),
+                        max(1, int(full_read_chunk_threshold or 24)),
+                    ),
                 )
+                docs = self._sample_full_document(
+                    doc_id,
+                    max_chunks=effective_limit,
+                    total_chunks=count,
+                )
+            else:
+                results = self.search_corpus(
+                    focus_query,
+                    filters=SearchFilters(doc_ids=[doc_id]),
+                    strategy="hybrid",
+                    limit=max_chunks,
+                    preferred_doc_ids=[doc_id],
+                )
+                docs = [item.doc for item in results]
+                if not docs and count > 0:
+                    docs = self._read_chunk_range(
+                        doc_id,
+                        0,
+                        max(0, min(count, max_chunks) - 1),
+                    )
 
         self._read_cache[cache_key] = list(docs)
         return list(docs)
@@ -1370,6 +1771,7 @@ def _build_decomposition(
     )
     if not canonical_entities:
         canonical_entities = list(source_plan.decomposition.get("canonical_entities") or [])
+    query_facets = _extract_query_facets(query)
     relationship_questions = [str(query or "")]
     if len(canonical_entities) >= 2:
         relationship_questions.extend(
@@ -1379,6 +1781,8 @@ def _build_decomposition(
             ]
         )
     source_confirmation_questions = [str(query or "")]
+    for facet in query_facets[:6]:
+        source_confirmation_questions.append(str(facet.get("query") or facet.get("label") or query))
     for entity in canonical_entities[:4]:
         source_confirmation_questions.append(
             f"Find grounded evidence mentioning {entity.get('canonical_name') or entity.get('matched_alias') or ''}."
@@ -1394,10 +1798,25 @@ def _build_decomposition(
             }
             for index, entity in enumerate(canonical_entities[:4])
         ]
+    existing_claim_questions = {str(item.get("question") or "").casefold() for item in claim_checklist if isinstance(item, dict)}
+    for facet in query_facets:
+        facet_query = str(facet.get("query") or facet.get("label") or query)
+        if facet_query.casefold() in existing_claim_questions:
+            continue
+        claim_checklist.append(
+            {
+                "claim_id": str(facet.get("facet_id") or f"facet_{len(claim_checklist) + 1}"),
+                "question": facet_query,
+                "entity": str(facet.get("label") or ""),
+                "priority": "high",
+            }
+        )
+        existing_claim_questions.add(facet_query.casefold())
     return {
         "canonical_entities": canonical_entities,
         "relationship_questions": relationship_questions[:6],
         "source_confirmation_questions": source_confirmation_questions[:6],
+        "query_facets": query_facets,
         "answer_goal": str(query or ""),
         "preferred_sources": list(source_plan.sources_chosen),
         "required_hops": list(source_plan.required_hops or []),
@@ -1409,6 +1828,17 @@ def _build_decomposition(
 
 def _initialize_claim_ledger(ledger: EvidenceLedger, decomposition: Dict[str, Any]) -> None:
     ledger.claims = [dict(item) for item in (decomposition.get("claim_checklist") or []) if isinstance(item, dict)]
+    ledger.facets = [dict(item) for item in (decomposition.get("query_facets") or []) if isinstance(item, dict)]
+    ledger.facet_coverage = {
+        str(facet.get("facet_id") or f"facet_{index + 1}"): {
+            "label": str(facet.get("label") or ""),
+            "query": str(facet.get("query") or ""),
+            "state": "missing",
+            "supporting_chunk_ids": [],
+            "supporting_doc_ids": [],
+        }
+        for index, facet in enumerate(ledger.facets)
+    }
     ledger.supported_claim_ids = []
     ledger.unsupported_claim_ids = []
     ledger.verified_hops = []
@@ -1417,6 +1847,33 @@ def _initialize_claim_ledger(ledger: EvidenceLedger, decomposition: Dict[str, An
         "phase": "entity_discovery",
         "prioritized_sections": [dict(item) for item in (decomposition.get("prioritized_sections") or []) if isinstance(item, dict)],
     }
+
+
+def _refresh_facet_coverage(ledger: EvidenceLedger, docs: Sequence[Document]) -> None:
+    if not ledger.facets:
+        return
+    coverage: Dict[str, Dict[str, Any]] = {}
+    for index, facet in enumerate(ledger.facets):
+        facet_id = str(facet.get("facet_id") or f"facet_{index + 1}")
+        supporting_chunks: List[str] = []
+        supporting_docs: List[str] = []
+        for doc in docs:
+            if not _doc_matches_facet(doc, facet):
+                continue
+            chunk_id = _chunk_id(doc)
+            doc_id = _doc_id(doc)
+            if chunk_id and chunk_id not in supporting_chunks:
+                supporting_chunks.append(chunk_id)
+            if doc_id and doc_id not in supporting_docs:
+                supporting_docs.append(doc_id)
+        coverage[facet_id] = {
+            "label": str(facet.get("label") or ""),
+            "query": str(facet.get("query") or ""),
+            "state": "covered" if supporting_chunks or supporting_docs else "missing",
+            "supporting_chunk_ids": supporting_chunks[:4],
+            "supporting_doc_ids": supporting_docs[:4],
+        }
+    ledger.facet_coverage = coverage
 
 
 def _refresh_claim_ledger(
@@ -1446,6 +1903,7 @@ def _refresh_claim_ledger(
             unsupported.append(claim_id)
     ledger.supported_claim_ids = supported
     ledger.unsupported_claim_ids = unsupported
+    _refresh_facet_coverage(ledger, strong_docs)
 
     verified_hops: List[str] = []
     unverified_hops: List[str] = []
@@ -1519,6 +1977,31 @@ def _phase_queries(
     return list(fallback_queries[:1])
 
 
+def _lane_candidate_counts(chunks: Sequence[ScoredChunk]) -> Dict[str, int]:
+    counts = {
+        "vector": 0,
+        "keyword": 0,
+        "graph": 0,
+        "structured_neighbor": 0,
+    }
+    for chunk in chunks:
+        metadata = dict(chunk.doc.metadata or {})
+        lanes = dict(metadata.get("_retrieval_lanes") or {})
+        method = str(chunk.method or "").lower()
+        if "vector" in lanes or "vector" in method:
+            counts["vector"] += 1
+        if "keyword" in lanes or "bm25" in method or "keyword" in method:
+            counts["keyword"] += 1
+        if ("retrieval" in lanes or method == "retrieval") and "vector" not in lanes and "keyword" not in lanes:
+            counts["vector"] += 1
+            counts["keyword"] += 1
+        if "graph" in lanes or "graph" in method:
+            counts["graph"] += 1
+        if "structured_neighbor" in lanes or "structured_neighbor" in method:
+            counts["structured_neighbor"] += 1
+    return counts
+
+
 def _build_fast_run(
     settings: Any,
     stores: Any,
@@ -1532,44 +2015,44 @@ def _build_fast_run(
     top_k_keyword: int,
     callbacks: List[Any],
     source_plan: SourcePlan | None = None,
+    stage_timer: RetrievalBudget | None = None,
 ) -> RetrievalRun:
     collection_id = _resolve_collection_id(settings, session)
     collection_ids = _resolve_collection_ids(settings, session, explicit_collection_id=collection_id)
     search_query = _augment_query_with_aliases(query)
-    plan = source_plan or SourcePlan(query=query)
+    plan = source_plan or _new_source_plan(query)
     preferred_doc_ids = list(dict.fromkeys([*preferred_doc_ids, *plan.preferred_doc_ids]))
-    retrieval = retrieve_candidates(
-        stores,
-        search_query,
-        tenant_id=getattr(session, "tenant_id", getattr(settings, "default_tenant_id", "local-dev")),
-        preferred_doc_ids=preferred_doc_ids,
-        must_include_uploads=must_include_uploads,
-        top_k_vector=top_k_vector,
-        top_k_keyword=top_k_keyword,
-        collection_id_filter=collection_id,
-        collection_ids_filter=collection_ids,
-    )
-    adapter = CorpusRetrievalAdapter(stores, settings=settings, session=session, source_plan=plan)
-    merged = adapter._rerank_with_query_heuristics(query, list(retrieval.get("merged") or []))
-    merged = adapter.search_corpus(
+    del collection_ids
+    adapter = CorpusRetrievalAdapter(stores, settings=settings, session=session, source_plan=plan, stage_timer=stage_timer)
+    with _measure_stage(stage_timer, "hybrid_retrieval"):
+        merged = adapter.search_corpus(
+            query,
+            filters=SearchFilters(doc_ids=list(preferred_doc_ids), collection_id=collection_id),
+            strategy="hybrid",
+            limit=max(12, top_k_vector + top_k_keyword),
+            top_k_vector=top_k_vector,
+            top_k_keyword=top_k_keyword,
+            preferred_doc_ids=list(preferred_doc_ids),
+            must_include_uploads=must_include_uploads,
+        )
+    with _measure_stage(stage_timer, "chunk_grading"):
+        graded = grade_chunks(
+            providers.judge,
+            settings=settings,
+            question=query,
+            chunks=[_with_adaptive_metadata(chunk.doc, score=chunk.score, strategy=chunk.method, query=query, rationale="fast_path") for chunk in merged],
+            max_chunks=max(12, min(len(merged), top_k_vector + top_k_keyword)),
+            callbacks=callbacks,
+        )
+    query_facets = _extract_query_facets(query)
+    selected_docs = _select_facet_aware_evidence_docs(
         query,
-        filters=SearchFilters(doc_ids=list(preferred_doc_ids), collection_id=collection_id),
-        strategy="hybrid",
-        limit=max(12, top_k_vector + top_k_keyword),
-        top_k_vector=top_k_vector,
-        top_k_keyword=top_k_keyword,
-        preferred_doc_ids=list(preferred_doc_ids),
-        must_include_uploads=must_include_uploads,
+        graded,
+        _desired_evidence_budget(query, settings),
+        query_facets,
     )
-    graded = grade_chunks(
-        providers.judge,
-        settings=settings,
-        question=query,
-        chunks=[_with_adaptive_metadata(chunk.doc, score=chunk.score, strategy=chunk.method, query=query, rationale="fast_path") for chunk in merged],
-        callbacks=callbacks,
-    )
-    selected_docs = _select_evidence_docs(query, graded, _desired_evidence_budget(query, settings))
     ledger = EvidenceLedger(question=query)
+    ledger.facets = list(query_facets)
     for chunk in merged:
         ledger.add_scored_chunks(
             [chunk],
@@ -1579,6 +2062,10 @@ def _build_fast_run(
             round_index=0,
         )
     ledger.apply_grades(graded)
+    _refresh_facet_coverage(ledger, [item.doc for item in graded if item.relevance >= 2] or selected_docs)
+    facet_coverage = dict(ledger.facet_coverage or {})
+    lane_counts = _lane_candidate_counts(merged)
+    timing_fields = stage_timer.to_fields() if stage_timer is not None else {}
     return RetrievalRun(
         selected_docs=list(selected_docs),
         candidate_docs=[item.doc for item in graded],
@@ -1588,19 +2075,25 @@ def _build_fast_run(
         rounds=1,
         tool_calls_used=3,
         tool_call_log=[
-            f"fast:vector:{len(retrieval.get('vector') or [])}",
-            f"fast:keyword:{len(retrieval.get('keyword') or [])}",
-            f"fast:graph:{sum(1 for item in merged if item.method == 'graph')}",
+            f"fast:vector:{lane_counts['vector']}",
+            f"fast:keyword:{lane_counts['keyword']}",
+            f"fast:graph:{lane_counts['graph']}",
             f"fast:graded:{len(graded)}",
         ],
         strategies_used=sorted({chunk.method for chunk in merged} | {"grade"}),
         candidate_counts=_fast_candidate_counts(
-            retrieval,
+            {"vector": [None] * lane_counts["vector"], "keyword": [None] * lane_counts["keyword"], "merged": merged},
             graded,
             selected_docs,
-            graph_hits=sum(1 for item in merged if item.method == "graph"),
+            graph_hits=lane_counts["graph"],
             sql_doc_hints=len(plan.preferred_doc_ids),
-        ),
+        )
+        | {
+            "structured_neighbor_hits": lane_counts["structured_neighbor"],
+            "query_facets": len(query_facets),
+            "covered_facets": sum(1 for item in facet_coverage.values() if str(item.get("state")) == "covered"),
+            "missing_facets": sum(1 for item in facet_coverage.values() if str(item.get("state")) == "missing"),
+        },
         evidence_ledger=ledger.to_dict(),
         source_plan=plan.to_dict(),
         sources_used=list(plan.sources_chosen),
@@ -1614,6 +2107,10 @@ def _build_fast_run(
         decomposition=dict(plan.decomposition or {}),
         claim_ledger=ledger.to_dict(),
         verified_hops=list(ledger.verified_hops),
+        stage_timings_ms=dict(timing_fields.get("stage_timings_ms") or {}),
+        budget_ms=int(timing_fields.get("budget_ms") or 0),
+        budget_exhausted=bool(timing_fields.get("budget_exhausted", False)),
+        slow_stages=[str(item) for item in (timing_fields.get("slow_stages") or []) if str(item)],
     )
 
 
@@ -1628,6 +2125,19 @@ def _should_escalate(
     controller_hints: Dict[str, Any] | None = None,
 ) -> bool:
     resolved_hints = coerce_controller_hints(controller_hints)
+    min_evidence = max(1, int(getattr(settings, "rag_min_evidence_chunks", 1)))
+    facet_coverage = dict((fast_run.evidence_ledger or {}).get("facet_coverage") or {})
+    strong_chunks = int(fast_run.candidate_counts.get("strong_chunks", 0))
+    if (
+        _looks_simple_fact_query(question)
+        and not _is_discovery_query(question)
+        and result_mode not in {"inventory", "comparison"}
+        and not bool(resolved_hints.get("force_deep_search"))
+        and not any(str(item.get("state") or "") == "missing" for item in facet_coverage.values())
+        and len(fast_run.selected_docs) >= min_evidence
+        and strong_chunks >= min_evidence
+    ):
+        return False
     if (
         _is_discovery_query(question)
         or _is_complex_query(question)
@@ -1637,10 +2147,11 @@ def _should_escalate(
         or bool(resolved_hints.get("force_deep_search"))
     ):
         return True
-    min_evidence = max(1, int(getattr(settings, "rag_min_evidence_chunks", 1)))
+    if any(str(item.get("state") or "") == "missing" for item in facet_coverage.values()):
+        return True
     if len(fast_run.selected_docs) < min_evidence:
         return True
-    if int(fast_run.candidate_counts.get("strong_chunks", 0)) < min_evidence:
+    if strong_chunks < min_evidence:
         return True
     if "LLM" in " ".join(fast_run.tool_call_log):
         return True
@@ -1696,6 +2207,14 @@ def _build_round_queries(
         candidates.append((keyword_query, "keyword", "keyword_projection"))
         if not _is_exact_match_query(question):
             candidates.append((keyword_query, "vector", "semantic_projection"))
+
+    candidates.extend(
+        _generic_rewrite_candidates(
+            question,
+            conversation_context=conversation_context,
+            round_index=round_index,
+        )
+    )
 
     if discovery and prefer_process_flow:
         if topic_seed_terms:
@@ -1937,6 +2456,7 @@ def _reflect_on_retrieval(
                 f"BEST_DOC_IDS: {best_doc_ids}\n"
                 f"UNSUPPORTED_CLAIMS: {ledger.unsupported_claim_ids}\n"
                 f"UNVERIFIED_HOPS: {ledger.unverified_hops}\n"
+                f"FACET_COVERAGE: {ledger.facet_coverage}\n"
                 f"CONTEXT: {conversation_context[:1000]}\n"
             )
             response = judge_model.invoke(prompt, config={"callbacks": []})
@@ -2016,6 +2536,16 @@ def _deep_path_sufficient(
         )
         if all_claims_supported and not ledger.unverified_hops and no_high_priority_gap:
             return True
+    if ledger.facets:
+        missing_facets = [
+            key
+            for key, value in dict(ledger.facet_coverage or {}).items()
+            if str(value.get("state") or "") != "covered"
+        ]
+        if not missing_facets and selected_docs:
+            return True
+        if missing_facets and round_index < max_rounds:
+            return False
     if _covers_requested_docs(selected_docs, resolved_hints):
         if strong >= min(desired, len(selected_docs)) or round_index >= max_rounds or new_chunks == 0:
             return True
@@ -2053,19 +2583,21 @@ def _run_deep_path(
     progress_emitter: Any | None,
     allow_internal_fanout: bool,
     source_plan: SourcePlan | None = None,
+    stage_timer: RetrievalBudget | None = None,
 ) -> RetrievalRun:
-    plan = source_plan or SourcePlan(query=query)
+    plan = source_plan or _new_source_plan(query)
     preferred_doc_ids = list(dict.fromkeys([*preferred_doc_ids, *plan.preferred_doc_ids]))
-    adapter = CorpusRetrievalAdapter(stores, settings=settings, session=session, source_plan=plan)
+    adapter = CorpusRetrievalAdapter(stores, settings=settings, session=session, source_plan=plan, stage_timer=stage_timer)
     ledger = EvidenceLedger(question=query)
-    decomposition = _build_decomposition(
-        query=query,
-        settings=settings,
-        stores=stores,
-        session=session,
-        controller_hints=controller_hints,
-        source_plan=plan,
-    )
+    with _measure_stage(stage_timer, "source_planning"):
+        decomposition = _build_decomposition(
+            query=query,
+            settings=settings,
+            stores=stores,
+            session=session,
+            controller_hints=controller_hints,
+            source_plan=plan,
+        )
     _initialize_claim_ledger(ledger, decomposition)
     tool_calls = 0
     tool_call_log: List[str] = []
@@ -2164,6 +2696,16 @@ def _run_deep_path(
 
     phase_sequence = _phase_sequence(max_search_rounds)
     for round_index, phase in enumerate(phase_sequence, start=1):
+        if stage_timer is not None and stage_timer.should_cutoff():
+            ledger.round_summaries.append(
+                {
+                    "round": round_index,
+                    "phase": phase,
+                    "new_chunks": 0,
+                    "mode": "budget_cutoff",
+                }
+            )
+            break
         _emit_progress(
             progress_emitter,
             "decision_point",
@@ -2181,18 +2723,19 @@ def _run_deep_path(
             agent="rag_worker",
             counts={"round": round_index, "phase": phase},
         )
-        round_queries = _build_round_queries(
-            query,
-            settings=settings,
-            providers=providers,
-            conversation_context=conversation_context,
-            callbacks=callbacks,
-            round_index=round_index,
-            discovery=discovery,
-            prefer_process_flow=prefer_process_flow,
-            controller_hints=controller_hints,
-            seen_queries=seen_queries,
-        )
+        with _measure_stage(stage_timer, "source_planning"):
+            round_queries = _build_round_queries(
+                query,
+                settings=settings,
+                providers=providers,
+                conversation_context=conversation_context,
+                callbacks=callbacks,
+                round_index=round_index,
+                discovery=discovery,
+                prefer_process_flow=prefer_process_flow,
+                controller_hints=controller_hints,
+                seen_queries=seen_queries,
+            )
         round_queries = _phase_queries(
             phase,
             query=query,
@@ -2420,14 +2963,15 @@ def _run_deep_path(
         latest_candidates = ledger.materialize_documents(
             max_chunks=max(12, (top_k_vector + top_k_keyword) * 2),
         )
-        latest_graded = grade_chunks(
-            providers.judge,
-            settings=settings,
-            question=query,
-            chunks=latest_candidates,
-            max_chunks=max(12, min(len(latest_candidates), 18)),
-            callbacks=callbacks,
-        )
+        with _measure_stage(stage_timer, "chunk_grading"):
+            latest_graded = grade_chunks(
+                providers.judge,
+                settings=settings,
+                question=query,
+                chunks=latest_candidates,
+                max_chunks=max(12, min(len(latest_candidates), max(18, top_k_vector + top_k_keyword))),
+                callbacks=callbacks,
+            )
         tool_calls += 1
         strategies.add("grade")
         tool_call_log.append(f"round{round_index}:grade_chunks:{len(latest_candidates)}")
@@ -2448,7 +2992,12 @@ def _run_deep_path(
         if discovery:
             latest_selected = _select_discovery_docs(query, ledger, latest_graded, settings)
         else:
-            latest_selected = _select_evidence_docs(query, latest_graded, _desired_evidence_budget(query, settings))
+            latest_selected = _select_facet_aware_evidence_docs(
+                query,
+                latest_graded,
+                _desired_evidence_budget(query, settings),
+                decomposition.get("query_facets") or [],
+            )
         _refresh_claim_ledger(
             ledger,
             decomposition=decomposition,
@@ -2511,14 +3060,15 @@ def _run_deep_path(
                     latest_candidates = ledger.materialize_documents(
                         max_chunks=max(12, (top_k_vector + top_k_keyword) * 2),
                     )
-                    latest_graded = grade_chunks(
-                        providers.judge,
-                        settings=settings,
-                        question=query,
-                        chunks=latest_candidates,
-                        max_chunks=max(12, min(len(latest_candidates), 18)),
-                        callbacks=callbacks,
-                    )
+                    with _measure_stage(stage_timer, "chunk_grading"):
+                        latest_graded = grade_chunks(
+                            providers.judge,
+                            settings=settings,
+                            question=query,
+                            chunks=latest_candidates,
+                            max_chunks=max(12, min(len(latest_candidates), max(18, top_k_vector + top_k_keyword))),
+                            callbacks=callbacks,
+                        )
                     tool_calls += 1
                     strategies.add("grade")
                     tool_call_log.append(f"round{round_index}:grade_chunks:merged_workers")
@@ -2538,7 +3088,12 @@ def _run_deep_path(
                     if discovery:
                         latest_selected = _select_discovery_docs(query, ledger, latest_graded, settings)
                     else:
-                        latest_selected = _select_evidence_docs(query, latest_graded, _desired_evidence_budget(query, settings))
+                        latest_selected = _select_facet_aware_evidence_docs(
+                            query,
+                            latest_graded,
+                            _desired_evidence_budget(query, settings),
+                            decomposition.get("query_facets") or [],
+                        )
                     _refresh_claim_ledger(
                         ledger,
                         decomposition=decomposition,
@@ -2577,7 +3132,7 @@ def _run_deep_path(
             discovery=discovery,
             controller_hints=controller_hints,
         )
-        if not sufficient and reflection_rounds_used < max_reflection_rounds:
+        if not sufficient and reflection_rounds_used < max_reflection_rounds and not (stage_timer and stage_timer.should_cutoff()):
             reflection = _reflect_on_retrieval(
                 providers=providers,
                 question=query,
@@ -2621,6 +3176,9 @@ def _run_deep_path(
         "worker_tasks": len([item for item in tool_call_log if ":worker:" in item]),
         "graph_hits": sum(1 for item in ledger.entries.values() if item.strategy == "graph"),
         "sql_doc_hints": len(plan.preferred_doc_ids),
+        "query_facets": len(ledger.facets),
+        "covered_facets": sum(1 for item in ledger.facet_coverage.values() if str(item.get("state")) == "covered"),
+        "missing_facets": sum(1 for item in ledger.facet_coverage.values() if str(item.get("state")) == "missing"),
     }
     _emit_progress(
         progress_emitter,
@@ -2631,6 +3189,7 @@ def _run_deep_path(
         docs=_doc_focus_from_documents(latest_selected or latest_candidates),
         counts=dict(candidate_counts),
     )
+    timing_fields = stage_timer.to_fields() if stage_timer is not None else {}
     return RetrievalRun(
         selected_docs=list(latest_selected),
         candidate_docs=list(latest_candidates or ledger.materialize_documents()),
@@ -2657,6 +3216,10 @@ def _run_deep_path(
         decomposition=decomposition,
         claim_ledger=ledger.to_dict(),
         verified_hops=list(ledger.verified_hops),
+        stage_timings_ms=dict(timing_fields.get("stage_timings_ms") or {}),
+        budget_ms=int(timing_fields.get("budget_ms") or 0),
+        budget_exhausted=bool(timing_fields.get("budget_exhausted", False)),
+        slow_stages=[str(item) for item in (timing_fields.get("slow_stages") or []) if str(item)],
     )
 
 
@@ -2691,6 +3254,7 @@ def run_retrieval_controller(
     normalized_coverage_goal = normalize_coverage_goal(coverage_goal)
     normalized_result_mode = normalize_result_mode(result_mode)
     resolved_controller_hints = coerce_controller_hints(controller_hints)
+    stage_timer = _new_retrieval_budget(settings, resolved_controller_hints)
     effective_rounds = max(1, int(max_search_rounds or max(2, min(4, int(max_retries or 1) + 1))))
     existing_selection = dict(resolved_controller_hints.get("collection_selection") or {})
     explicit_collection_id = str(
@@ -2699,15 +3263,16 @@ def run_retrieval_controller(
         or ""
     ).strip()
     if not preferred_doc_ids and not str(existing_selection.get("selected_collection_id") or "").strip():
-        collection_selection = select_collection_for_query(
-            stores,
-            settings,
-            session,
-            query,
-            source_type="kb",
-            explicit_collection_id=explicit_collection_id,
-            event_sink=event_sink,
-        )
+        with stage_timer.measure("collection_scope"):
+            collection_selection = select_collection_for_query(
+                stores,
+                settings,
+                session,
+                query,
+                source_type="kb",
+                explicit_collection_id=explicit_collection_id,
+                event_sink=event_sink,
+            )
         if collection_selection.resolved:
             apply_selection_to_session(session, collection_selection)
         resolved_controller_hints = {
@@ -2728,15 +3293,16 @@ def run_retrieval_controller(
             session.metadata = metadata
         except Exception:
             pass
-    source_plan = plan_sources(
-        query,
-        settings=settings,
-        stores=stores,
-        session=session,
-        controller_hints=resolved_controller_hints,
-        collection_id=_resolve_collection_id(settings, session),
-        preferred_doc_ids=preferred_doc_ids,
-    )
+    with stage_timer.measure("source_planning"):
+        source_plan = _plan_sources(
+            query,
+            settings=settings,
+            stores=stores,
+            session=session,
+            controller_hints=resolved_controller_hints,
+            collection_id=_resolve_collection_id(settings, session),
+            preferred_doc_ids=preferred_doc_ids,
+        )
     merged_controller_hints = {
         **dict(resolved_controller_hints),
         **dict(source_plan.to_controller_hints()),
@@ -2774,6 +3340,7 @@ def run_retrieval_controller(
         top_k_keyword=top_k_keyword,
         callbacks=callbacks,
         source_plan=source_plan,
+        stage_timer=stage_timer,
     )
     if normalized_mode == "fast":
         _emit_progress(
@@ -2785,6 +3352,21 @@ def run_retrieval_controller(
             docs=_doc_focus_from_documents(fast_run.selected_docs or fast_run.candidate_docs),
             counts=dict(fast_run.candidate_counts),
         )
+        return fast_run
+    if stage_timer.should_cutoff():
+        _emit_progress(
+            progress_emitter,
+            "phase_end",
+            label="Search complete",
+            detail="Budget cutoff after fast path",
+            agent="rag_worker",
+            docs=_doc_focus_from_documents(fast_run.selected_docs or fast_run.candidate_docs),
+            counts=dict(fast_run.candidate_counts),
+        )
+        fast_run.budget_exhausted = True
+        fast_run.budget_ms = int(stage_timer.budget_ms)
+        fast_run.stage_timings_ms = dict(stage_timer.stage_timings_ms)
+        fast_run.slow_stages = stage_timer.slow_stages()
         return fast_run
     if normalized_mode == "deep" or _should_escalate(
         query,
@@ -2832,19 +3414,23 @@ def run_retrieval_controller(
             progress_emitter=progress_emitter,
             allow_internal_fanout=allow_internal_fanout,
             source_plan=source_plan,
+            stage_timer=stage_timer,
         )
         if bool(getattr(settings, "retrieval_quality_verifier_enabled", False)):
             from agentic_chatbot_next.rag.citations import build_citations
 
-            verification = verify_retrieval_quality(
-                settings=settings,
-                stores=stores,
-                session=session,
-                query=query,
-                retrieval_run=deep_run,
-                citations=build_citations(deep_run.selected_docs),
-                controller_hints=merged_controller_hints,
-            )
+            with stage_timer.measure("citation_building"):
+                verification_citations = build_citations(deep_run.selected_docs)
+            with stage_timer.measure("retrieval_verification"):
+                verification = verify_retrieval_quality(
+                    settings=settings,
+                    stores=stores,
+                    session=session,
+                    query=query,
+                    retrieval_run=deep_run,
+                    citations=verification_citations,
+                    controller_hints=merged_controller_hints,
+                )
             deep_run.retrieval_verification = verification
             deep_run.claim_ledger = deep_run.claim_ledger or dict(deep_run.evidence_ledger or {})
             if verification.get("retryable") and not merged_controller_hints.get("retrieval_verification_retry_used"):
@@ -2883,16 +3469,25 @@ def run_retrieval_controller(
                     progress_emitter=progress_emitter,
                     allow_internal_fanout=False,
                     source_plan=source_plan,
+                    stage_timer=stage_timer,
                 )
-                deep_run.retrieval_verification = verify_retrieval_quality(
-                    settings=settings,
-                    stores=stores,
-                    session=session,
-                    query=query,
-                    retrieval_run=deep_run,
-                    citations=build_citations(deep_run.selected_docs),
-                    controller_hints=retry_controller_hints,
-                )
+                with stage_timer.measure("citation_building"):
+                    retry_citations = build_citations(deep_run.selected_docs)
+                with stage_timer.measure("retrieval_verification"):
+                    deep_run.retrieval_verification = verify_retrieval_quality(
+                        settings=settings,
+                        stores=stores,
+                        session=session,
+                        query=query,
+                        retrieval_run=deep_run,
+                        citations=retry_citations,
+                        controller_hints=retry_controller_hints,
+                    )
+        timing_fields = stage_timer.to_fields()
+        deep_run.stage_timings_ms = dict(timing_fields.get("stage_timings_ms") or {})
+        deep_run.budget_ms = int(timing_fields.get("budget_ms") or 0)
+        deep_run.budget_exhausted = bool(timing_fields.get("budget_exhausted", False))
+        deep_run.slow_stages = [str(item) for item in (timing_fields.get("slow_stages") or []) if str(item)]
         return deep_run
     _emit_progress(
         progress_emitter,

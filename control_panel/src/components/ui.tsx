@@ -21,22 +21,24 @@ function cx(...parts: Array<string | false | null | undefined>): string {
 }
 
 export function AppShell(props: {
-  sidebar: ReactNode
+  sidebar?: ReactNode
   header: ReactNode
+  topNav?: ReactNode
   toolbar?: ReactNode
   children: ReactNode
   className?: string
 }) {
   return (
-    <div className={cx('app-shell', props.className)}>
+    <div className={cx('app-shell', props.topNav ? 'app-shell-grouped' : false, !props.sidebar ? 'app-shell-no-sidebar' : false, props.className)}>
       <div className="app-topbar">
+        {props.topNav && <div className="app-primary-nav">{props.topNav}</div>}
         <div className="app-topbar-inner">
           {props.header}
           {props.toolbar && <div className="app-toolbar">{props.toolbar}</div>}
         </div>
       </div>
       <div className="app-layout">
-        <aside className="app-sidebar">{props.sidebar}</aside>
+        {props.sidebar && <aside className="app-sidebar">{props.sidebar}</aside>}
         <main className="app-main">
           <div className="app-content">{props.children}</div>
         </main>
@@ -1073,5 +1075,541 @@ export function Tooltip(props: {
         </span>
       )}
     </span>
+  )
+}
+
+export interface SegmentedOption<T extends string = string> {
+  value: T
+  label: ReactNode
+  icon?: ReactNode
+}
+
+export function SegmentedControl<T extends string = string>(props: {
+  options: Array<SegmentedOption<T>>
+  value: T
+  onChange: (value: T) => void
+  size?: 'sm' | 'md'
+  ariaLabel?: string
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={props.ariaLabel}
+      className={cx('segmented', props.size === 'sm' && 'segmented-sm')}
+    >
+      {props.options.map(option => {
+        const selected = option.value === props.value
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            className={cx('segmented-option', selected && 'segmented-option-active')}
+            onClick={() => props.onChange(option.value)}
+          >
+            {option.icon && <span className="segmented-icon" aria-hidden="true">{option.icon}</span>}
+            <span>{option.label}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+export function FilterChip(props: {
+  label: ReactNode
+  count?: number
+  onRemove?: () => void
+  tone?: 'neutral' | 'accent'
+}) {
+  return (
+    <span className={cx('filter-chip', props.tone && `filter-chip-${props.tone}`)}>
+      <span className="filter-chip-label">{props.label}</span>
+      {typeof props.count === 'number' && <span className="filter-chip-count">{props.count}</span>}
+      {props.onRemove && (
+        <button
+          type="button"
+          aria-label="Remove filter"
+          className="filter-chip-remove"
+          onClick={props.onRemove}
+        >
+          <svg viewBox="0 0 12 12" width="10" height="10" fill="currentColor" aria-hidden="true">
+            <path d="M2.3 2.3a1 1 0 0 1 1.4 0L6 4.6l2.3-2.3a1 1 0 0 1 1.4 1.4L7.4 6l2.3 2.3a1 1 0 1 1-1.4 1.4L6 7.4 3.7 9.7a1 1 0 0 1-1.4-1.4L4.6 6 2.3 3.7a1 1 0 0 1 0-1.4" />
+          </svg>
+        </button>
+      )}
+    </span>
+  )
+}
+
+export function Pagination(props: {
+  page: number
+  total: number
+  pageSize: number
+  onPageChange: (page: number) => void
+  ariaLabel?: string
+}) {
+  const pageCount = Math.max(1, Math.ceil(props.total / props.pageSize))
+  const current = Math.min(Math.max(1, props.page), pageCount)
+  if (pageCount <= 1) return null
+  const pages: Array<number | 'gap'> = []
+  const pushRange = (from: number, to: number) => {
+    for (let i = from; i <= to; i++) pages.push(i)
+  }
+  if (pageCount <= 7) {
+    pushRange(1, pageCount)
+  } else {
+    pages.push(1)
+    if (current > 4) pages.push('gap')
+    pushRange(Math.max(2, current - 1), Math.min(pageCount - 1, current + 1))
+    if (current < pageCount - 3) pages.push('gap')
+    pages.push(pageCount)
+  }
+  const go = (n: number) => props.onPageChange(Math.min(Math.max(1, n), pageCount))
+  return (
+    <nav className="pagination" aria-label={props.ariaLabel ?? 'Pagination'}>
+      <button type="button" className="pagination-step" onClick={() => go(current - 1)} disabled={current === 1} aria-label="Previous page">
+        ‹
+      </button>
+      {pages.map((p, i) => p === 'gap' ? (
+        <span key={`gap-${i}`} className="pagination-gap" aria-hidden="true">…</span>
+      ) : (
+        <button
+          key={p}
+          type="button"
+          className={cx('pagination-page', p === current && 'pagination-page-active')}
+          aria-current={p === current ? 'page' : undefined}
+          onClick={() => go(p)}
+        >
+          {p}
+        </button>
+      ))}
+      <button type="button" className="pagination-step" onClick={() => go(current + 1)} disabled={current === pageCount} aria-label="Next page">
+        ›
+      </button>
+    </nav>
+  )
+}
+
+export interface MenuItem {
+  id?: string
+  label: ReactNode
+  icon?: ReactNode
+  hint?: ReactNode
+  tone?: 'neutral' | 'danger'
+  disabled?: boolean
+  onSelect: () => void
+}
+
+export function Menu(props: {
+  items: MenuItem[]
+  trigger: (openProps: { open: boolean; toggle: () => void; ref: (node: HTMLElement | null) => void }) => ReactNode
+  placement?: 'bottom-start' | 'bottom-end'
+  ariaLabel?: string
+}) {
+  const placement = props.placement ?? 'bottom-end'
+  const [open, setOpen] = useState(false)
+  const [coords, setCoords] = useState<{ top: number; left: number; minWidth: number } | null>(null)
+  const triggerRef = useRef<HTMLElement | null>(null)
+  const listRef = useRef<HTMLUListElement | null>(null)
+  const [focusIndex, setFocusIndex] = useState(0)
+
+  const toggle = useCallback(() => setOpen(prev => !prev), [])
+
+  useEffect(() => {
+    if (!open) return
+    const target = triggerRef.current
+    if (!target) return
+    const rect = target.getBoundingClientRect()
+    const gap = 6
+    setCoords({
+      top: rect.bottom + gap,
+      left: placement === 'bottom-end' ? rect.right : rect.left,
+      minWidth: rect.width,
+    })
+    setFocusIndex(0)
+  }, [open, placement])
+
+  useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      const t = e.target as Node
+      if (triggerRef.current?.contains(t)) return
+      if (listRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setFocusIndex(i => {
+          let n = i
+          for (let k = 0; k < props.items.length; k++) {
+            n = (n + 1) % props.items.length
+            if (!props.items[n].disabled) return n
+          }
+          return i
+        })
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setFocusIndex(i => {
+          let n = i
+          for (let k = 0; k < props.items.length; k++) {
+            n = (n - 1 + props.items.length) % props.items.length
+            if (!props.items[n].disabled) return n
+          }
+          return i
+        })
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open, props.items])
+
+  useEffect(() => {
+    if (!open || !listRef.current) return
+    const items = listRef.current.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')
+    items[focusIndex]?.focus()
+  }, [open, focusIndex])
+
+  const setTriggerRef = useCallback((node: HTMLElement | null) => { triggerRef.current = node }, [])
+
+  return (
+    <>
+      {props.trigger({ open, toggle, ref: setTriggerRef })}
+      {open && coords && (
+        <ul
+          ref={listRef}
+          role="menu"
+          aria-label={props.ariaLabel}
+          className={cx('menu-list', `menu-${placement}`)}
+          style={{
+            top: coords.top,
+            left: placement === 'bottom-end' ? undefined : coords.left,
+            right: placement === 'bottom-end' ? window.innerWidth - coords.left : undefined,
+            minWidth: Math.max(coords.minWidth, 180),
+          }}
+        >
+          {props.items.map((item, i) => (
+            <li key={item.id ?? i} role="none">
+              <button
+                type="button"
+                role="menuitem"
+                disabled={item.disabled}
+                tabIndex={i === focusIndex ? 0 : -1}
+                className={cx('menu-item', item.tone === 'danger' && 'menu-item-danger')}
+                onClick={() => { setOpen(false); item.onSelect() }}
+              >
+                {item.icon && <span className="menu-item-icon" aria-hidden="true">{item.icon}</span>}
+                <span className="menu-item-label">{item.label}</span>
+                {item.hint && <span className="menu-item-hint">{item.hint}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  )
+}
+
+export function Popover(props: {
+  trigger: (openProps: { open: boolean; toggle: () => void; ref: (node: HTMLElement | null) => void }) => ReactNode
+  children: ReactNode
+  placement?: 'bottom-start' | 'bottom-end' | 'top-start' | 'top-end'
+  width?: number | string
+  ariaLabel?: string
+}) {
+  const placement = props.placement ?? 'bottom-start'
+  const [open, setOpen] = useState(false)
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null)
+  const triggerRef = useRef<HTMLElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
+
+  const toggle = useCallback(() => setOpen(prev => !prev), [])
+
+  useEffect(() => {
+    if (!open) return
+    const target = triggerRef.current
+    const panel = panelRef.current
+    if (!target || !panel) return
+    const rect = target.getBoundingClientRect()
+    const pRect = panel.getBoundingClientRect()
+    const gap = 6
+    let top = 0
+    let left = 0
+    if (placement.startsWith('top')) {
+      top = rect.top - pRect.height - gap
+    } else {
+      top = rect.bottom + gap
+    }
+    if (placement.endsWith('end')) {
+      left = rect.right - pRect.width
+    } else {
+      left = rect.left
+    }
+    const margin = 8
+    left = Math.max(margin, Math.min(left, window.innerWidth - pRect.width - margin))
+    top = Math.max(margin, Math.min(top, window.innerHeight - pRect.height - margin))
+    setCoords({ top, left })
+  }, [open, placement])
+
+  useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      const t = e.target as Node
+      if (triggerRef.current?.contains(t)) return
+      if (panelRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const setTriggerRef = useCallback((node: HTMLElement | null) => { triggerRef.current = node }, [])
+
+  return (
+    <>
+      {props.trigger({ open, toggle, ref: setTriggerRef })}
+      {open && (
+        <div
+          ref={panelRef}
+          role="dialog"
+          aria-label={props.ariaLabel}
+          className="popover"
+          style={{
+            top: coords?.top ?? -9999,
+            left: coords?.left ?? -9999,
+            width: props.width,
+            visibility: coords ? 'visible' : 'hidden',
+          }}
+        >
+          {props.children}
+        </div>
+      )}
+    </>
+  )
+}
+
+export interface DataTableColumn<T> {
+  key: string
+  header: ReactNode
+  accessor?: (row: T) => unknown
+  sortable?: boolean
+  width?: number | string
+  align?: 'left' | 'right' | 'center'
+  render?: (row: T, index: number) => ReactNode
+}
+
+export function DataTable<T>(props: {
+  columns: Array<DataTableColumn<T>>
+  rows: T[]
+  rowKey: (row: T) => string
+  selectable?: boolean
+  selected?: Set<string>
+  onSelectionChange?: (selected: Set<string>) => void
+  onRowClick?: (row: T) => void
+  rowActions?: (row: T) => MenuItem[]
+  emptyState?: ReactNode
+  loading?: boolean
+  dense?: boolean
+  stickyHeader?: boolean
+  pageSize?: number
+  ariaLabel?: string
+}) {
+  const [sortKey, setSortKey] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  const [page, setPage] = useState(1)
+
+  const sortedRows = useMemo(() => {
+    if (!sortKey) return props.rows
+    const col = props.columns.find(c => c.key === sortKey)
+    if (!col) return props.rows
+    const acc = col.accessor
+    const copy = [...props.rows]
+    copy.sort((a, b) => {
+      const av = acc ? acc(a) : (a as Record<string, unknown>)[sortKey]
+      const bv = acc ? acc(b) : (b as Record<string, unknown>)[sortKey]
+      if (av == null && bv == null) return 0
+      if (av == null) return 1
+      if (bv == null) return -1
+      if (av === bv) return 0
+      return (av < bv ? -1 : 1) * (sortDir === 'asc' ? 1 : -1)
+    })
+    return copy
+  }, [props.rows, props.columns, sortKey, sortDir])
+
+  const pageSize = props.pageSize ?? 0
+  const pageRows = pageSize > 0
+    ? sortedRows.slice((page - 1) * pageSize, page * pageSize)
+    : sortedRows
+
+  useEffect(() => { setPage(1) }, [props.rows.length, sortKey, sortDir])
+
+  function toggleSort(key: string) {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(key)
+      setSortDir('asc')
+    }
+  }
+
+  const allSelected = props.selectable && props.selected && pageRows.length > 0
+    && pageRows.every(r => props.selected!.has(props.rowKey(r)))
+  const someSelected = props.selectable && props.selected && pageRows.some(r => props.selected!.has(props.rowKey(r)))
+
+  function toggleAll() {
+    if (!props.onSelectionChange || !props.selected) return
+    const next = new Set(props.selected)
+    if (allSelected) {
+      pageRows.forEach(r => next.delete(props.rowKey(r)))
+    } else {
+      pageRows.forEach(r => next.add(props.rowKey(r)))
+    }
+    props.onSelectionChange(next)
+  }
+  function toggleRow(row: T) {
+    if (!props.onSelectionChange || !props.selected) return
+    const key = props.rowKey(row)
+    const next = new Set(props.selected)
+    if (next.has(key)) next.delete(key); else next.add(key)
+    props.onSelectionChange(next)
+  }
+
+  if (!props.loading && props.rows.length === 0 && props.emptyState) {
+    return <>{props.emptyState}</>
+  }
+
+  return (
+    <div className={cx('data-table-wrap', props.dense && 'data-table-dense')}>
+      <table className={cx('data-table', props.stickyHeader !== false && 'data-table-sticky')} aria-label={props.ariaLabel}>
+        <thead>
+          <tr>
+            {props.selectable && (
+              <th className="data-table-check">
+                <input
+                  type="checkbox"
+                  aria-label="Select all rows"
+                  checked={Boolean(allSelected)}
+                  ref={el => { if (el) el.indeterminate = Boolean(!allSelected && someSelected) }}
+                  onChange={toggleAll}
+                />
+              </th>
+            )}
+            {props.columns.map(col => {
+              const active = sortKey === col.key
+              return (
+                <th
+                  key={col.key}
+                  style={{ width: col.width, textAlign: col.align }}
+                  aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined}
+                  className={cx(col.sortable && 'data-table-sortable')}
+                >
+                  {col.sortable ? (
+                    <button type="button" className="data-table-sort" onClick={() => toggleSort(col.key)}>
+                      <span>{col.header}</span>
+                      <span className="data-table-sort-icon" aria-hidden="true">
+                        {active ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}
+                      </span>
+                    </button>
+                  ) : col.header}
+                </th>
+              )
+            })}
+            {props.rowActions && <th className="data-table-actions" aria-label="Actions" />}
+          </tr>
+        </thead>
+        <tbody>
+          {props.loading && Array.from({ length: 5 }).map((_, i) => (
+            <tr key={`skeleton-${i}`} className="data-table-row-skeleton">
+              {props.selectable && <td><Skeleton width={14} height={14} /></td>}
+              {props.columns.map(col => (
+                <td key={col.key}><Skeleton width="80%" height={12} /></td>
+              ))}
+              {props.rowActions && <td />}
+            </tr>
+          ))}
+          {!props.loading && pageRows.map((row, i) => {
+            const key = props.rowKey(row)
+            const isSelected = Boolean(props.selected?.has(key))
+            return (
+              <tr
+                key={key}
+                className={cx(isSelected && 'data-table-row-selected', props.onRowClick && 'data-table-row-clickable')}
+                onClick={props.onRowClick ? () => props.onRowClick!(row) : undefined}
+              >
+                {props.selectable && (
+                  <td className="data-table-check" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select row ${key}`}
+                      checked={isSelected}
+                      onChange={() => toggleRow(row)}
+                    />
+                  </td>
+                )}
+                {props.columns.map(col => {
+                  const value = col.render
+                    ? col.render(row, i)
+                    : col.accessor
+                      ? (col.accessor(row) as ReactNode)
+                      : ((row as Record<string, unknown>)[col.key] as ReactNode)
+                  return (
+                    <td key={col.key} style={{ textAlign: col.align }}>
+                      {value == null ? '' : value}
+                    </td>
+                  )
+                })}
+                {props.rowActions && (
+                  <td className="data-table-actions" onClick={e => e.stopPropagation()}>
+                    <Menu
+                      items={props.rowActions(row)}
+                      ariaLabel="Row actions"
+                      trigger={({ toggle, ref }) => (
+                        <button
+                          type="button"
+                          aria-label="Row actions"
+                          title="Row actions"
+                          ref={el => ref(el)}
+                          onClick={toggle}
+                          className="icon-btn icon-btn-ghost icon-btn-md"
+                        >
+                          <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+                            <circle cx="3" cy="8" r="1.4" />
+                            <circle cx="8" cy="8" r="1.4" />
+                            <circle cx="13" cy="8" r="1.4" />
+                          </svg>
+                        </button>
+                      )}
+                    />
+                  </td>
+                )}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      {pageSize > 0 && sortedRows.length > pageSize && (
+        <div className="data-table-footer">
+          <span className="data-table-hint">
+            Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, sortedRows.length)} of {sortedRows.length.toLocaleString()}
+          </span>
+          <Pagination page={page} total={sortedRows.length} pageSize={pageSize} onPageChange={setPage} />
+        </div>
+      )}
+    </div>
   )
 }

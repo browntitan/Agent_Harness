@@ -56,6 +56,7 @@ from agentic_chatbot_next.runtime.research_packet import build_research_packet
 from agentic_chatbot_next.runtime.task_plan import normalise_task_plan
 from agentic_chatbot_next.runtime.turn_contracts import (
     filter_context_messages,
+    resolved_turn_intent_from_metadata,
     resolved_turn_intent_prompt_block,
 )
 from agentic_chatbot_next.prompt_fallbacks import compose_fallback_prompt
@@ -915,6 +916,7 @@ class QueryLoop:
                 summary = str(artifact_data.get("summary") or "").strip()
                 if summary:
                     handoff_context_parts.append(f"evidence_response:\n{summary[:2000]}")
+        resolved_turn_intent = resolved_turn_intent_from_metadata(dict(session_state.metadata or {}))
         execution_hints = resolve_rag_execution_hints(
             self.settings,
             self.stores,
@@ -947,6 +949,7 @@ class QueryLoop:
                 or ""
             ),
             controller_hints=explicit_controller_hints,
+            answer_contract=getattr(resolved_turn_intent, "answer_contract", None),
         )
         execution_hints.controller_hints = {
             **deep_rag_controller_hints(route_context),
@@ -1064,6 +1067,7 @@ class QueryLoop:
             "coverage_goal": execution_hints.coverage_goal,
             "result_mode": execution_hints.result_mode,
             "controller_hints": execution_hints.controller_hints,
+            "answer_contract": getattr(resolved_turn_intent, "answer_contract", None),
         }
         if runtime_bridge is not None:
             contract_kwargs["runtime_bridge"] = runtime_bridge
@@ -1117,6 +1121,19 @@ class QueryLoop:
             text=rendered_text,
             clarification=clarification,
         )
+        retrieval_summary_obj = getattr(contract, "retrieval_summary", None)
+        retrieval_summary = (
+            retrieval_summary_obj.to_dict()
+            if retrieval_summary_obj is not None and hasattr(retrieval_summary_obj, "to_dict")
+            else {}
+        )
+        if retrieval_summary:
+            assistant_metadata = {
+                **dict(assistant_metadata),
+                "rag_retrieval_summary": retrieval_summary,
+                "retrieval_mode": str(retrieval_summary.get("search_mode") or ""),
+                "tool_calls_used": int(retrieval_summary.get("tool_calls_used") or 0),
+            }
         doc_focus_result = None
         if str(explicit_controller_hints.get("summary_scope") or "").strip().lower() == "active_doc_focus":
             doc_focus_result = build_doc_focus_result(

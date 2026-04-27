@@ -83,6 +83,199 @@ class _JudgeModel:
         return SimpleNamespace(content=json.dumps({"grades": grades}))
 
 
+class _FacetJudgeModel:
+    def invoke(self, prompt, config=None):  # noqa: D401 - test double
+        del config
+        text = str(prompt)
+        if "rewritten_query" in text:
+            return SimpleNamespace(content='{"rewritten_query":""}')
+        chunk_ids = re.findall(r'"chunk_id":\s*"([^"]+)"', text)
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "grades": [
+                        {"chunk_id": chunk_id, "relevance": 3, "reason": "facet evidence"}
+                        for chunk_id in chunk_ids
+                    ]
+                }
+            )
+        )
+
+
+def test_retrieval_controller_selects_generic_facet_coverage() -> None:
+    chunks = [
+        _scored_chunk(
+            doc_id="doc-alpha",
+            chunk_id="doc-alpha#chunk0001",
+            title="alpha.md",
+            text="Alpha evidence is covered in this document.",
+            score=0.9,
+        ),
+        _scored_chunk(
+            doc_id="doc-beta",
+            chunk_id="doc-beta#chunk0001",
+            title="beta.md",
+            text="Beta evidence is covered in this document.",
+            score=0.88,
+        ),
+        _scored_chunk(
+            doc_id="doc-gamma",
+            chunk_id="doc-gamma#chunk0001",
+            title="gamma.md",
+            text="Gamma evidence is covered in this document.",
+            score=0.86,
+        ),
+    ]
+    records = {
+        chunk.doc.metadata["chunk_id"]: _chunk_record(
+            doc_id=chunk.doc.metadata["doc_id"],
+            chunk_id=chunk.doc.metadata["chunk_id"],
+            index=0,
+            content=chunk.doc.page_content,
+        )
+        for chunk in chunks
+    }
+
+    def search(query, **kwargs):
+        del kwargs
+        lowered = str(query).lower()
+        hits = [chunk for chunk in chunks if chunk.doc.metadata["title"].split(".", 1)[0] in lowered]
+        return hits or list(chunks)
+
+    stores = SimpleNamespace(
+        chunk_store=SimpleNamespace(
+            vector_search=search,
+            keyword_search=search,
+            chunk_count=lambda doc_id=None, tenant_id="tenant-123": 1,
+            get_chunk_by_id=lambda chunk_id, tenant_id: records.get(chunk_id),
+            get_chunks_by_index_range=lambda doc_id, min_idx, max_idx, tenant_id: [
+                record
+                for record in records.values()
+                if record.doc_id == doc_id and min_idx <= record.chunk_index <= max_idx
+            ],
+        ),
+        doc_store=SimpleNamespace(
+            fuzzy_search_title=lambda hint, tenant_id, limit=5, collection_id="": [],
+            get_document=lambda doc_id, tenant_id: SimpleNamespace(
+                doc_id=doc_id,
+                title=f"{doc_id}.md",
+                source_type="kb",
+                source_path=f"/tmp/{doc_id}.md",
+            ),
+        ),
+    )
+    settings = SimpleNamespace(
+        default_collection_id="default",
+        default_tenant_id="tenant-123",
+        rag_min_evidence_chunks=1,
+        rag_top_k_vector=3,
+        rag_top_k_keyword=3,
+        prompts_backend="local",
+        judge_rewrite_prompt_path=Path("missing"),
+        judge_grading_prompt_path=Path("missing"),
+    )
+
+    result = run_retrieval_controller(
+        settings,
+        stores,
+        providers=SimpleNamespace(judge=_FacetJudgeModel(), chat=object()),
+        session=SimpleNamespace(tenant_id="tenant-123", metadata={"kb_collection_id": "default"}),
+        query="Draft a grounded answer about alpha, beta, and gamma. Cite sources.",
+        conversation_context="",
+        preferred_doc_ids=[],
+        must_include_uploads=False,
+        top_k_vector=3,
+        top_k_keyword=3,
+        max_retries=1,
+        callbacks=[],
+        search_mode="fast",
+        max_search_rounds=1,
+    )
+
+    selected_chunk_ids = {doc.metadata["chunk_id"] for doc in result.selected_docs}
+    assert selected_chunk_ids == {
+        "doc-alpha#chunk0001",
+        "doc-beta#chunk0001",
+        "doc-gamma#chunk0001",
+    }
+    assert result.candidate_counts["covered_facets"] == 3
+    assert result.evidence_ledger["facet_coverage"]
+
+
+def test_fast_path_runs_one_hybrid_retrieval_pass() -> None:
+    calls: list[str] = []
+    chunk = _scored_chunk(
+        doc_id="doc-alpha",
+        chunk_id="doc-alpha#chunk0001",
+        title="alpha.md",
+        text="Alpha policy states the release tier is standard for this customer.",
+        score=0.91,
+    )
+
+    def vector_search(query, *, top_k, tenant_id, doc_id_filter=None, collection_id_filter=None):
+        del query, top_k, tenant_id, doc_id_filter, collection_id_filter
+        calls.append("vector")
+        return [chunk]
+
+    def keyword_search(query, *, top_k, tenant_id, doc_id_filter=None, collection_id_filter=None):
+        del query, top_k, tenant_id, doc_id_filter, collection_id_filter
+        calls.append("keyword")
+        return [ScoredChunk(doc=chunk.doc, score=0.87, method="keyword")]
+
+    stores = SimpleNamespace(
+        chunk_store=SimpleNamespace(
+            vector_search=vector_search,
+            keyword_search=keyword_search,
+            get_chunks_by_index_range=lambda doc_id, min_idx, max_idx, tenant_id: [],
+        ),
+        doc_store=SimpleNamespace(
+            fuzzy_search_title=lambda hint, tenant_id, limit=5, collection_id="": [],
+            list_documents=lambda tenant_id="tenant-123", collection_id="default", source_type="": [],
+            get_document=lambda doc_id, tenant_id: SimpleNamespace(
+                doc_id=doc_id,
+                title="alpha.md",
+                source_type="kb",
+                source_path="/tmp/alpha.md",
+                file_type="md",
+                doc_structure_type="general",
+            ),
+        ),
+    )
+    settings = SimpleNamespace(
+        default_collection_id="default",
+        default_tenant_id="tenant-123",
+        rag_min_evidence_chunks=1,
+        rag_top_k_vector=4,
+        rag_top_k_keyword=4,
+        prompts_backend="local",
+        judge_rewrite_prompt_path=Path("missing"),
+        judge_grading_prompt_path=Path("missing"),
+        graph_search_enabled=False,
+        rag_budget_ms=0,
+    )
+
+    result = run_retrieval_controller(
+        settings,
+        stores,
+        providers=SimpleNamespace(judge=_FacetJudgeModel(), chat=object()),
+        session=SimpleNamespace(tenant_id="tenant-123", metadata={"kb_collection_id": "default"}),
+        query="What release tier applies to Alpha?",
+        conversation_context="",
+        preferred_doc_ids=[],
+        must_include_uploads=False,
+        top_k_vector=4,
+        top_k_keyword=4,
+        max_retries=1,
+        callbacks=[],
+        search_mode="fast",
+        max_search_rounds=1,
+    )
+
+    assert calls.count("vector") == 1
+    assert calls.count("keyword") == 1
+    assert result.search_mode == "fast"
+
+
 def test_corpus_retrieval_adapter_full_read_samples_long_document():
     chunks = [
         _chunk_record(
@@ -177,6 +370,68 @@ def test_corpus_retrieval_adapter_uses_selected_kb_collection_not_upload_scope()
     adapter.search_corpus("rate limit policy", strategy="hybrid", top_k_vector=2, top_k_keyword=2)
 
     assert calls == [("vector", "policy"), ("keyword", "policy")]
+
+
+def test_corpus_retrieval_adapter_expands_structured_neighbors() -> None:
+    seed = ScoredChunk(
+        doc=Document(
+            page_content="Workbook row 3 has the matched beta schedule value.",
+            metadata={
+                "doc_id": "doc-sheet",
+                "chunk_id": "doc-sheet#chunk0003",
+                "chunk_index": 3,
+                "title": "schedule.xlsx",
+                "file_type": "xlsx",
+                "sheet_name": "Schedule",
+                "source_type": "kb",
+            },
+        ),
+        score=0.92,
+        method="vector",
+    )
+    records = [
+        _chunk_record(
+            doc_id="doc-sheet",
+            chunk_id=f"doc-sheet#chunk{index:04d}",
+            index=index,
+            content=f"Workbook row {index} adjacent schedule context.",
+        )
+        for index in range(1, 6)
+    ]
+
+    stores = SimpleNamespace(
+        chunk_store=SimpleNamespace(
+            vector_search=lambda *args, **kwargs: [seed],
+            keyword_search=lambda *args, **kwargs: [],
+            get_chunks_by_index_range=lambda doc_id, min_idx, max_idx, tenant_id: [
+                record
+                for record in records
+                if record.doc_id == doc_id and min_idx <= record.chunk_index <= max_idx
+            ],
+        ),
+        doc_store=SimpleNamespace(
+            fuzzy_search_title=lambda hint, tenant_id, limit=5, collection_id="": [],
+            get_document=lambda doc_id, tenant_id: SimpleNamespace(
+                doc_id=doc_id,
+                title="schedule.xlsx",
+                source_type="kb",
+                source_path="/tmp/schedule.xlsx",
+                file_type="xlsx",
+                doc_structure_type="spreadsheet",
+            ),
+        ),
+    )
+    adapter = CorpusRetrievalAdapter(
+        stores,
+        settings=SimpleNamespace(default_collection_id="default", rag_top_k_vector=2, rag_top_k_keyword=2),
+        session=SimpleNamespace(tenant_id="tenant-123", metadata={"kb_collection_id": "default"}),
+    )
+
+    hits = adapter.search_corpus("beta schedule", strategy="hybrid", limit=8)
+    hit_ids = {hit.doc.metadata["chunk_id"] for hit in hits}
+
+    assert "doc-sheet#chunk0003" in hit_ids
+    assert {"doc-sheet#chunk0001", "doc-sheet#chunk0002", "doc-sheet#chunk0004", "doc-sheet#chunk0005"} <= hit_ids
 
 
 def test_run_retrieval_controller_escalates_to_deep_for_process_flow_discovery():
@@ -503,6 +758,37 @@ def test_build_round_queries_preserves_topic_anchor_for_workflow_discovery() -> 
     assert "process flow workflow approval flow handoff escalation path" not in fallback_queries.values()
 
 
+def test_build_round_queries_generates_visible_info_rewrites_for_weak_causal_claims() -> None:
+    question = (
+        "If someone says Aurora Portal slipped because the payment API was faulty, "
+        "what is the better evidence-based answer?"
+    )
+    queries = _build_round_queries(
+        question,
+        settings=SimpleNamespace(prompts_backend="local", judge_rewrite_prompt_path=Path("missing")),
+        providers=SimpleNamespace(judge=_JudgeModel()),
+        conversation_context="Candidate sources: portal_release_readiness.md (doc_id: DOC-1)",
+        callbacks=[],
+        round_index=1,
+        discovery=False,
+        prefer_process_flow=False,
+        controller_hints={},
+        seen_queries=set(),
+    )
+
+    assert queries[0] == (question, "hybrid", "original")
+    rationales = {rationale for _query_text, _strategy, rationale in queries}
+    assert "claim_focused_rewrite" in rationales
+    assert "refutation_focused_rewrite" in rationales
+    assert "causal_factor_rewrite" in rationales
+    assert "status_outcome_rewrite" in rationales
+    joined_queries = "\n".join(query_text for query_text, _strategy, _rationale in queries).lower()
+    assert "support refute" in joined_queries
+    assert "cause reason driver factor evidence" in joined_queries
+    assert "certificate" not in joined_queries
+    assert "serialized" not in joined_queries
+
+
 def test_corpus_adapter_excludes_seen_chunks_and_returns_window_context():
     main_chunk = _scored_chunk(
         doc_id="doc-a",
@@ -769,6 +1055,65 @@ def test_corpus_retrieval_adapter_uses_graph_hits_when_enabled():
     assert hits
     assert any(item.method == "graph" for item in hits)
     assert any(item.doc.metadata.get("doc_id") == "doc-graph" for item in hits)
+
+
+def test_corpus_retrieval_adapter_skips_graph_for_simple_fact_queries():
+    graph_calls: list[str] = []
+    chunk = _scored_chunk(
+        doc_id="doc-fact",
+        chunk_id="doc-fact#chunk0001",
+        title="fact.md",
+        text="The alpha service uses the standard retention setting.",
+        score=0.9,
+    )
+
+    class _GraphStore:
+        available = True
+
+        def local_search(self, query, *, tenant_id, limit=8, doc_ids=None):
+            del query, tenant_id, limit, doc_ids
+            graph_calls.append("local")
+            return []
+
+        def global_search(self, query, *, tenant_id, limit=8, doc_ids=None):
+            del query, tenant_id, limit, doc_ids
+            graph_calls.append("global")
+            return []
+
+    stores = SimpleNamespace(
+        graph_store=_GraphStore(),
+        chunk_store=SimpleNamespace(
+            vector_search=lambda *args, **kwargs: [chunk],
+            keyword_search=lambda *args, **kwargs: [],
+            get_chunks_by_index_range=lambda doc_id, min_idx, max_idx, tenant_id: [],
+        ),
+        doc_store=SimpleNamespace(
+            fuzzy_search_title=lambda hint, tenant_id, limit=5, collection_id="": [],
+            get_document=lambda doc_id, tenant_id: SimpleNamespace(
+                doc_id=doc_id,
+                title="fact.md",
+                source_type="kb",
+                source_path="/tmp/fact.md",
+            ),
+            list_documents=lambda tenant_id="tenant-123", collection_id="default": [],
+        ),
+    )
+    adapter = CorpusRetrievalAdapter(
+        stores,
+        settings=SimpleNamespace(
+            default_collection_id="default",
+            default_tenant_id="tenant-123",
+            rag_top_k_vector=4,
+            rag_top_k_keyword=4,
+            graph_search_enabled=True,
+        ),
+        session=SimpleNamespace(tenant_id="tenant-123", metadata={"active_graph_ids": ["graph-a"]}),
+    )
+
+    hits = adapter.search_corpus("What retention setting does the alpha service use?", strategy="hybrid", limit=6)
+
+    assert hits
+    assert graph_calls == []
 
 
 def test_run_retrieval_controller_records_decomposition_claims_and_verification():

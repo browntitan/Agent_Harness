@@ -13,6 +13,7 @@ Operators and admins who need step-by-step instructions for the most important c
 ## What To Read Next
 
 - Use the [Access Operator Guide](access-operator-guide.md) when you need the full RBAC rollout, validation, and troubleshooting runbook.
+- Use [Testing Routines](testing-routines.md) when you need a repeatable QA checklist for permissions, ingest, graphs, skills, tools, and live chat validation.
 - Use the [Section Reference](section-reference.md) when you want a quick explanation of a page before following a workflow.
 - Use the [Technical Reference](technical-reference.md) when you need to understand why a workflow behaves the way it does.
 - Use [Troubleshooting](troubleshooting.md) if a step fails.

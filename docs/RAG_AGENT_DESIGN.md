@@ -140,6 +140,23 @@ The live path does more than fetch top-k chunks and stop.
 - prompt catalogs, question-echo chunks, and irrelevant operational runbooks can be demoted during grading
 - deep retrieval re-grades evidence, tracks coverage in an evidence ledger, and selects a bounded evidence set before final synthesis
 
+## Performance controls
+
+The controller is accuracy-first by default, but it now avoids avoidable repeated work:
+
+- fast mode performs one fused hybrid retrieval pass, then optional graph/neighbor expansion
+- vector and BM25 breadth stay configurable with `RAG_TOPK_VECTOR` and `RAG_TOPK_BM25`
+- `RAG_BUDGET_MS` gives the RAG controller a soft per-request budget before the HTTP client timeout
+- `RAG_BUDGET_SYNTHESIS_RESERVE_MS` reserves time for cited answer construction
+- `RAG_HEURISTIC_GRADING_ENABLED` allows deterministic pre-grading to skip slow judge grading when evidence is already decisive
+- `RAG_JUDGE_GRADE_MAX_CHUNKS` caps the uncertain candidate window sent to the judge model
+- `RAG_EXTRACTIVE_FALLBACK_ENABLED` allows a concise cited extractive answer when the budget is exhausted before synthesis
+
+For local Ollama-heavy runs, keep model-provider tuning outside the retrieval contract:
+increase Ollama keep-alive, tune provider parallelism to available memory, and avoid loading
+more large chat/judge models than the machine can keep resident. Langfuse callbacks are skipped
+when the configured host cannot be resolved, unless `LANGFUSE_ALLOW_UNREACHABLE=true` is set.
+
 ## Skill-driven execution hints
 
 RAG skill packs now support machine-readable metadata in addition to prose guidance:

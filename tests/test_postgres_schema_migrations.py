@@ -50,6 +50,48 @@ def test_documents_table_precedes_collection_policy_backfill() -> None:
     assert documents_table < collection_policy_backfill
 
 
+def test_requirement_statement_backfill_columns_precede_indexes() -> None:
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "agentic_chatbot_next"
+        / "persistence"
+        / "postgres"
+        / "schema.sql"
+    )
+    sql = schema_path.read_text(encoding="utf-8")
+
+    requirement_statements_table = sql.index("CREATE TABLE IF NOT EXISTS requirement_statements")
+    source_excerpt_alter = sql.index(
+        "ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS source_excerpt TEXT NOT NULL DEFAULT '';"
+    )
+    merged_locations_alter = sql.index(
+        "ALTER TABLE requirement_statements ADD COLUMN IF NOT EXISTS merged_source_locations TEXT NOT NULL DEFAULT '';"
+    )
+    requirement_index = sql.index("CREATE INDEX IF NOT EXISTS requirement_statements_tenant_doc_idx")
+
+    assert requirement_statements_table < source_excerpt_alter < requirement_index
+    assert merged_locations_alter < requirement_index
+
+
+def test_chunks_metadata_json_backfill_precedes_gin_index() -> None:
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "agentic_chatbot_next"
+        / "persistence"
+        / "postgres"
+        / "schema.sql"
+    )
+    sql = schema_path.read_text(encoding="utf-8")
+
+    chunks_table = sql.index("CREATE TABLE IF NOT EXISTS chunks")
+    metadata_alter = sql.index("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata_json JSONB;")
+    metadata_index = sql.index("CREATE INDEX IF NOT EXISTS chunks_metadata_json_gin_idx")
+
+    assert chunks_table < metadata_alter < metadata_index
+
+
 def test_apply_schema_reports_legacy_graph_indexes_upgrade_error(monkeypatch, tmp_path: Path) -> None:
     db_connection.close_pool()
     schema_path = tmp_path / "schema.sql"

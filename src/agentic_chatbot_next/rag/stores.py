@@ -7,6 +7,7 @@ from typing import Callable, List
 from agentic_chatbot_next.authz.service import AuthorizationService
 from agentic_chatbot_next.config import Settings
 from agentic_chatbot_next.persistence.postgres.access import AccessControlStore
+from agentic_chatbot_next.persistence.postgres.capabilities import PostgresCapabilityProfileStore
 from agentic_chatbot_next.persistence.postgres.chunks import ChunkStore
 from agentic_chatbot_next.persistence.postgres.collections import CollectionStore
 from agentic_chatbot_next.persistence.postgres.connection import apply_schema, init_pool
@@ -58,6 +59,7 @@ class KnowledgeStores:
     graph_query_cache_store: GraphQueryCacheStore | None = None
     entity_store: CanonicalEntityStore | None = None
     mcp_connection_store: McpConnectionStore | None = None
+    capability_profile_store: PostgresCapabilityProfileStore | None = None
 
 
 def load_stores(settings: Settings, embeddings: object) -> KnowledgeStores:
@@ -90,6 +92,7 @@ def load_stores(settings: Settings, embeddings: object) -> KnowledgeStores:
         graph_query_cache_store=GraphQueryCacheStore(),
         entity_store=CanonicalEntityStore(),
         mcp_connection_store=McpConnectionStore(),
+        capability_profile_store=PostgresCapabilityProfileStore(),
     )
     stores.authorization_service = AuthorizationService(settings, stores.access_store)
     return stores

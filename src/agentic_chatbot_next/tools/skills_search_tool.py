@@ -8,6 +8,7 @@ from typing import Any, List, Tuple
 from langchain_core.tools import tool
 
 from agentic_chatbot_next.authz import access_summary_allowed_ids, access_summary_authz_enabled
+from agentic_chatbot_next.capabilities import coerce_effective_capabilities
 from agentic_chatbot_next.skills.base_loader import SkillsLoader
 from agentic_chatbot_next.skills.indexer import SkillContextResolver
 
@@ -121,9 +122,11 @@ def make_skills_search_tool(settings: object, *, stores: Any | None = None, sess
         """Search the skills library for operational guidance."""
 
         bounded_top_k = min(max(1, top_k), 5)
+        session_metadata = dict(getattr(session, "metadata", {}) or {})
+        effective_capabilities = coerce_effective_capabilities(session_metadata.get("effective_capabilities"))
         if resolver is not None:
             try:
-                access_summary = dict(getattr(session, "metadata", {}) or {}).get("access_summary") or {}
+                access_summary = session_metadata.get("access_summary") or {}
                 accessible_skill_family_ids = (
                     list(access_summary_allowed_ids(access_summary, "skill_family", action="use"))
                     if access_summary_authz_enabled(access_summary)
@@ -139,12 +142,22 @@ def make_skills_search_tool(settings: object, *, stores: Any | None = None, sess
                 )
                 if context.matches:
                     parts = []
-                    for match in context.matches[:bounded_top_k]:
+                    for match in context.matches:
+                        family_id = str(getattr(match, "version_parent", "") or getattr(match, "skill_id", "") or "")
+                        if effective_capabilities is not None and not effective_capabilities.allows_skill(
+                            match.skill_id,
+                            family_id=family_id,
+                        ):
+                            continue
                         body = match.content
                         if len(body) > 800:
                             body = body[:800] + "\n...[truncated]"
                         parts.append(f"[{match.name} | {match.skill_id} | {match.agent_scope}]\n{body}")
-                    return "\n\n---\n\n".join(parts)
+                        if len(parts) >= bounded_top_k:
+                            break
+                    if parts:
+                        return "\n\n---\n\n".join(parts)
+                    return "No matching skill sections found in the enabled skill packs."
             except Exception as exc:
                 logger.warning("DB-backed search_skills failed, falling back to lexical index: %s", exc)
 
@@ -152,7 +165,15 @@ def make_skills_search_tool(settings: object, *, stores: Any | None = None, sess
         if not query_tokens:
             return "No results: query produced no searchable tokens."
 
-        candidates = [section for section in index if not agent_filter or section.agent_key == agent_filter.strip()]
+        candidates = [
+            section
+            for section in index
+            if (not agent_filter or section.agent_key == agent_filter.strip())
+            and (
+                effective_capabilities is None
+                or effective_capabilities.allows_skill(section.agent_key, family_id=section.agent_key)
+            )
+        ]
         if not candidates:
             return f"No sections found for agent_filter={agent_filter!r}."
 

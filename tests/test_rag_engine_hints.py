@@ -132,6 +132,257 @@ def test_run_rag_contract_uses_inventory_mode_answer(monkeypatch):
     assert contract.used_citation_ids == ["doc-1#chunk0001"]
 
 
+def test_answer_contract_prevents_inventory_output_shape(monkeypatch):
+    captured: dict[str, object] = {}
+    selected_doc = Document(
+        page_content="Alpha, beta, and gamma are covered by this source.",
+        metadata={
+            "doc_id": "doc-1",
+            "chunk_id": "doc-1#chunk0001",
+            "title": "source.md",
+            "source_type": "kb",
+            "chunk_index": 1,
+        },
+    )
+
+    def fake_run_retrieval_controller(*args, **kwargs):
+        del args
+        captured["result_mode"] = kwargs.get("result_mode")
+        captured["controller_hints"] = dict(kwargs.get("controller_hints") or {})
+        return SimpleNamespace(
+            selected_docs=[selected_doc],
+            candidate_docs=[selected_doc],
+            graded=[GradedChunk(doc=selected_doc, relevance=3, reason="test")],
+            query_used="Draft an answer about alpha, beta, and gamma",
+            search_mode="deep",
+            rounds=1,
+            tool_calls_used=2,
+            tool_call_log=[],
+            strategies_used=["hybrid"],
+            candidate_counts={"unique_docs": 1, "selected_docs": 1},
+            evidence_ledger={"round_summaries": [], "entries": []},
+            parallel_workers_used=False,
+            retrieval_verification={},
+            to_summary=lambda citations_found: SimpleNamespace(
+                to_dict=lambda: {},
+                query_used="Draft an answer about alpha, beta, and gamma",
+                steps=2,
+                tool_calls_used=2,
+                tool_call_log=[],
+                citations_found=citations_found,
+                search_mode="deep",
+                rounds=1,
+                strategies_used=["hybrid"],
+                candidate_counts={"unique_docs": 1, "selected_docs": 1},
+                parallel_workers_used=False,
+                retrieval_verification={},
+            ),
+        )
+
+    monkeypatch.setattr("agentic_chatbot_next.rag.engine.run_retrieval_controller", fake_run_retrieval_controller)
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.get_collection_readiness_status",
+        lambda *args, **kwargs: SimpleNamespace(ready=True),
+    )
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.generate_grounded_answer",
+        lambda *args, **kwargs: {
+            "answer": "Grounded answer. (doc-1#chunk0001)",
+            "used_citation_ids": ["doc-1#chunk0001"],
+            "followups": [],
+            "warnings": [],
+            "confidence_hint": 0.8,
+        },
+    )
+
+    contract = run_rag_contract(
+        _settings(),
+        SimpleNamespace(),
+        providers=SimpleNamespace(chat=SimpleNamespace(invoke=lambda *args, **kwargs: None), judge=SimpleNamespace()),
+        session=SimpleNamespace(tenant_id="tenant", scratchpad={}, metadata={"kb_collection_id": "default"}),
+        query="Draft a concise grounded answer about alpha, beta, and gamma. Cite sources.",
+        conversation_context="",
+        preferred_doc_ids=[],
+        must_include_uploads=False,
+        top_k_vector=4,
+        top_k_keyword=4,
+        max_retries=1,
+        callbacks=[],
+        result_mode="inventory",
+        controller_hints={"prefer_inventory_output": True},
+        answer_contract=SimpleNamespace(kind="grounded_synthesis", broad_coverage=False),
+    )
+
+    assert "Documents with grounded evidence relevant to the request" not in contract.answer
+    assert contract.answer.startswith("Grounded answer.")
+    assert captured["result_mode"] == "answer"
+    assert "prefer_inventory_output" not in captured["controller_hints"]
+
+
+def test_answer_mode_does_not_attach_uncited_synthesis_to_first_citation(monkeypatch):
+    selected_doc = Document(
+        page_content="Alpha policy evidence is present in this retrieved chunk.",
+        metadata={
+            "doc_id": "doc-1",
+            "chunk_id": "doc-1#chunk0001",
+            "title": "alpha.md",
+            "source_type": "kb",
+            "chunk_index": 1,
+        },
+    )
+
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.run_retrieval_controller",
+        lambda *args, **kwargs: SimpleNamespace(
+            selected_docs=[selected_doc],
+            candidate_docs=[selected_doc],
+            graded=[GradedChunk(doc=selected_doc, relevance=3, reason="test")],
+            query_used="Explain alpha",
+            search_mode="deep",
+            rounds=1,
+            tool_calls_used=2,
+            tool_call_log=[],
+            strategies_used=["hybrid"],
+            candidate_counts={"unique_docs": 1, "selected_docs": 1},
+            evidence_ledger={"round_summaries": [], "entries": []},
+            parallel_workers_used=False,
+            retrieval_verification={},
+            to_summary=lambda citations_found: SimpleNamespace(
+                to_dict=lambda: {},
+                query_used="Explain alpha",
+                steps=2,
+                tool_calls_used=2,
+                tool_call_log=[],
+                citations_found=citations_found,
+                search_mode="deep",
+                rounds=1,
+                strategies_used=["hybrid"],
+                candidate_counts={"unique_docs": 1, "selected_docs": 1},
+                parallel_workers_used=False,
+                retrieval_verification={},
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.get_collection_readiness_status",
+        lambda *args, **kwargs: SimpleNamespace(ready=True),
+    )
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.generate_grounded_answer",
+        lambda *args, **kwargs: {
+            "answer": "This uncited synthesis should not be shipped as-is.",
+            "used_citation_ids": [],
+            "followups": [],
+            "warnings": [],
+            "confidence_hint": 0.7,
+        },
+    )
+
+    contract = run_rag_contract(
+        _settings(),
+        SimpleNamespace(),
+        providers=SimpleNamespace(chat=SimpleNamespace(invoke=lambda *args, **kwargs: None), judge=SimpleNamespace()),
+        session=SimpleNamespace(tenant_id="tenant", scratchpad={}, metadata={"kb_collection_id": "default"}),
+        query="Explain alpha. Cite sources.",
+        conversation_context="",
+        preferred_doc_ids=[],
+        must_include_uploads=False,
+        top_k_vector=4,
+        top_k_keyword=4,
+        max_retries=1,
+        callbacks=[],
+        answer_contract=SimpleNamespace(kind="grounded_synthesis", broad_coverage=False),
+    )
+
+    assert "uncited synthesis" not in contract.answer
+    assert "could not produce a fully cited synthesis" in contract.answer
+    assert contract.used_citation_ids == ["doc-1#chunk0001"]
+    assert "MISSING_VALID_CITATIONS_FALLBACK" in contract.warnings
+
+
+def test_answer_mode_uses_extractive_fallback_when_budget_exhausted(monkeypatch):
+    selected_doc = Document(
+        page_content="The alpha retention setting is 30 days for standard plans.",
+        metadata={
+            "doc_id": "doc-1",
+            "chunk_id": "doc-1#chunk0001",
+            "title": "alpha.md",
+            "source_type": "kb",
+            "chunk_index": 1,
+        },
+    )
+
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.run_retrieval_controller",
+        lambda *args, **kwargs: SimpleNamespace(
+            selected_docs=[selected_doc],
+            candidate_docs=[selected_doc],
+            graded=[GradedChunk(doc=selected_doc, relevance=3, reason="test")],
+            query_used="What is the alpha retention setting?",
+            search_mode="fast",
+            rounds=1,
+            tool_calls_used=2,
+            tool_call_log=[],
+            strategies_used=["hybrid"],
+            candidate_counts={"unique_docs": 1, "selected_docs": 1},
+            evidence_ledger={"round_summaries": [], "entries": []},
+            parallel_workers_used=False,
+            retrieval_verification={},
+            stage_timings_ms={"hybrid_retrieval": 205000.0},
+            budget_ms=210000,
+            budget_exhausted=True,
+            slow_stages=["hybrid_retrieval"],
+            to_summary=lambda citations_found: SimpleNamespace(
+                to_dict=lambda: {},
+                query_used="What is the alpha retention setting?",
+                steps=2,
+                tool_calls_used=2,
+                tool_call_log=[],
+                citations_found=citations_found,
+                search_mode="fast",
+                rounds=1,
+                strategies_used=["hybrid"],
+                candidate_counts={"unique_docs": 1, "selected_docs": 1},
+                parallel_workers_used=False,
+                retrieval_verification={},
+                stage_timings_ms={"hybrid_retrieval": 205000.0},
+                budget_ms=210000,
+                budget_exhausted=True,
+                slow_stages=["hybrid_retrieval"],
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.get_collection_readiness_status",
+        lambda *args, **kwargs: SimpleNamespace(ready=True),
+    )
+
+    def fail_synthesis(*args, **kwargs):
+        raise AssertionError("synthesis should be skipped after budget exhaustion")
+
+    monkeypatch.setattr("agentic_chatbot_next.rag.engine.generate_grounded_answer", fail_synthesis)
+
+    contract = run_rag_contract(
+        _settings(),
+        SimpleNamespace(),
+        providers=SimpleNamespace(chat=SimpleNamespace(invoke=lambda *args, **kwargs: None), judge=SimpleNamespace()),
+        session=SimpleNamespace(tenant_id="tenant", scratchpad={}, metadata={"kb_collection_id": "default"}),
+        query="What is the alpha retention setting? Cite sources.",
+        conversation_context="",
+        preferred_doc_ids=[],
+        must_include_uploads=False,
+        top_k_vector=4,
+        top_k_keyword=4,
+        max_retries=1,
+        callbacks=[],
+        answer_contract=SimpleNamespace(kind="grounded_synthesis", broad_coverage=False),
+    )
+
+    assert "30 days" in contract.answer
+    assert contract.used_citation_ids == ["doc-1#chunk0001"]
+    assert "BUDGET_EXTRACTIVE_FALLBACK" in contract.warnings
+
+
 def test_run_rag_contract_applies_deep_rag_route_context(monkeypatch):
     captured: dict[str, object] = {}
     selected_doc = Document(

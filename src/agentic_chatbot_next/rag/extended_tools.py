@@ -23,7 +23,7 @@ def make_extended_rag_tools(
     settings: Optional[Settings] = None,
 ) -> List[Any]:
     tenant_id = getattr(session, "tenant_id", getattr(settings, "default_tenant_id", "local-dev"))
-    top_k_vector = max(1, int(getattr(settings, "rag_top_k_vector", 8)))
+    top_k_vector = max(1, int(getattr(settings, "rag_top_k_vector", 15)))
     web_search_enabled = bool(getattr(settings, "web_search_enabled", False))
     tavily_api_key = getattr(settings, "tavily_api_key", None)
 

@@ -250,6 +250,19 @@ class DummyBot:
         return self.kb_status
 
 
+class _SourceDocStore:
+    def __init__(self, records):
+        self.records = {str(record.doc_id): record for record in records}
+
+    def get_document(self, doc_id: str, tenant_id: str = "local-dev"):
+        record = self.records.get(str(doc_id))
+        if record is None:
+            return None
+        if str(getattr(record, "tenant_id", tenant_id) or tenant_id) != str(tenant_id):
+            return None
+        return record
+
+
 class _StaticAuthorizationService:
     def __init__(self, grants_by_email: dict[str, dict[str, dict[str, object]]]):
         self.grants_by_email = {
@@ -1218,7 +1231,7 @@ async def test_ingest_documents_expands_directories_and_passes_collection_id(tmp
     file_path.write_text("hello world", encoding="utf-8")
     captured: dict[str, object] = {}
 
-    def fake_ingest_paths(settings, stores, paths, *, source_type, tenant_id, collection_id=None):
+    def fake_ingest_paths(settings, stores, paths, *, source_type, tenant_id, collection_id=None, **kwargs):
         del settings, stores
         captured["paths"] = [Path(item) for item in paths]
         captured["source_type"] = source_type
@@ -1246,6 +1259,39 @@ async def test_ingest_documents_expands_directories_and_passes_collection_id(tmp
     assert payload["collection_id"] == "defense-rag-test"
     assert captured["collection_id"] == "defense-rag-test"
     assert captured["paths"] == [file_path.resolve()]
+
+
+@pytest.mark.asyncio
+async def test_ingest_documents_preview_returns_metadata_without_ingesting(tmp_path, monkeypatch):
+    client, _, _ = _make_client(tmp_path)
+    source = tmp_path / "preview.md"
+    source.write_text("# Preview\n\nREQ-001 The gateway shall authenticate users.", encoding="utf-8")
+
+    def fail_ingest_paths(*args, **kwargs):
+        raise AssertionError("index preview should not call ingest_paths")
+
+    monkeypatch.setattr(api_main, "ingest_paths", fail_ingest_paths)
+    try:
+        response = await client.post(
+            "/v1/ingest/documents",
+            json={
+                "paths": [str(source)],
+                "collection_id": "preview-collection",
+                "metadata_profile": "auto",
+                "index_preview": True,
+            },
+        )
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "ingest.preview"
+    assert payload["preview"] is True
+    assert payload["ingested_count"] == 0
+    assert payload["files"][0]["outcome"] == "previewed"
+    assert payload["metadata_summary"]["document_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -2182,7 +2228,7 @@ async def test_connector_chat_bridges_ai_sdk_file_parts_into_upload_endpoint(tmp
 
     captured: dict[str, object] = {}
 
-    def fake_ingest_paths(settings, stores, paths, *, source_type, tenant_id, collection_id=None):
+    def fake_ingest_paths(settings, stores, paths, *, source_type, tenant_id, collection_id=None, **kwargs):
         del settings, stores, source_type
         resolved = [Path(item) for item in paths]
         captured["paths"] = resolved
@@ -2256,7 +2302,7 @@ async def test_connector_chat_accepts_multipart_payload_and_files(tmp_path, monk
 
     captured: dict[str, object] = {}
 
-    def fake_ingest_paths(settings, stores, paths, *, source_type, tenant_id, collection_id=None):
+    def fake_ingest_paths(settings, stores, paths, *, source_type, tenant_id, collection_id=None, **kwargs):
         del settings, stores, source_type
         captured["paths"] = [Path(item) for item in paths]
         captured["tenant_id"] = tenant_id
@@ -2956,7 +3002,7 @@ async def test_ingest_documents_indexes_files_and_copies_them_into_existing_work
 
     captured: dict[str, object] = {}
 
-    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None):
+    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None, **kwargs):
         captured["settings"] = settings_arg
         captured["stores"] = stores_arg
         captured["paths"] = [str(path) for path in paths]
@@ -3000,7 +3046,7 @@ async def test_upload_files_copies_into_canonical_session_workspace(tmp_path, mo
     client, _, settings = _make_client(tmp_path)
     captured: dict[str, object] = {}
 
-    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None):
+    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None, **kwargs):
         del settings_arg, stores_arg
         captured["paths"] = [str(path) for path in paths]
         captured["source_type"] = source_type
@@ -3030,6 +3076,33 @@ async def test_upload_files_copies_into_canonical_session_workspace(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_upload_files_preview_returns_metadata_without_ingesting(tmp_path, monkeypatch):
+    client, _, _ = _make_client(tmp_path)
+
+    def fail_ingest_paths(*args, **kwargs):
+        raise AssertionError("upload preview should not call ingest_paths")
+
+    monkeypatch.setattr(api_main, "ingest_paths", fail_ingest_paths)
+
+    try:
+        response = await client.post(
+            "/v1/upload?index_preview=true",
+            files={"files": ("preview.md", b"# Preview\n\nREQ-001 The gateway shall authenticate users.", "text/markdown")},
+        )
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "upload.preview"
+    assert payload["preview"] is True
+    assert payload["ingested_count"] == 0
+    assert payload["files"][0]["outcome"] == "previewed"
+    assert payload["metadata_summary"]["document_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_upload_files_skips_already_seen_openwebui_source_ids(tmp_path, monkeypatch):
     client, bot, settings = _make_client(tmp_path)
     session_id = "local-dev:local-cli:conv-009"
@@ -3043,7 +3116,7 @@ async def test_upload_files_skips_already_seen_openwebui_source_ids(tmp_path, mo
     )
     ingest_calls: list[list[str]] = []
 
-    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None):
+    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None, **kwargs):
         del settings_arg, stores_arg, source_type, tenant_id, collection_id
         ingest_calls.append([str(path) for path in paths])
         return ["doc-upload-3"]
@@ -3111,7 +3184,7 @@ async def test_upload_files_uses_repository_runtime_when_chat_registry_is_invali
     api_main.app.dependency_overrides[api_main.get_upload_runtime_or_503] = fake_upload_runtime
     api_main.app.dependency_overrides[api_main.get_settings] = lambda: settings
 
-    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None):
+    def fake_ingest_paths(settings_arg, stores_arg, paths, *, source_type, tenant_id, collection_id=None, **kwargs):
         del settings_arg, stores_arg, paths, source_type, tenant_id, collection_id
         return ["doc-upload-degraded"]
 
@@ -3233,6 +3306,184 @@ async def test_download_file_accepts_valid_signed_url_without_bearer_token(tmp_p
 
     assert response.status_code == 200
     assert response.text == "a,b\n1,2\n"
+
+
+@pytest.mark.asyncio
+async def test_document_source_file_serves_repository_source_with_bearer(tmp_path):
+    client, bot, settings = _make_client(tmp_path)
+    settings.gateway_shared_bearer_token = "shared-secret"
+    target = settings.uploads_dir / "source.txt"
+    target.write_text("source body\n", encoding="utf-8")
+    bot.ctx = SimpleNamespace(
+        stores=SimpleNamespace(
+            doc_store=_SourceDocStore(
+                [
+                    SimpleNamespace(
+                        doc_id="DOC-1",
+                        tenant_id="local-dev",
+                        collection_id="default",
+                        title="source.txt",
+                        source_type="upload",
+                        source_path=str(target),
+                        source_display_path="source.txt",
+                        source_metadata={"mime_type": "text/plain", "original_filename": "source.txt"},
+                    )
+                ]
+            )
+        )
+    )
+
+    try:
+        response = await client.get(
+            "/v1/documents/DOC-1/source",
+            headers={"Authorization": "Bearer shared-secret", "X-Conversation-ID": "source-conv"},
+        )
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 200
+    assert response.text == "source body\n"
+    assert response.headers["content-type"].startswith("text/plain")
+
+
+@pytest.mark.asyncio
+async def test_document_source_file_streams_remote_blob_source(tmp_path, monkeypatch):
+    client, bot, settings = _make_client(tmp_path)
+    settings.gateway_shared_bearer_token = "shared-secret"
+    bot.ctx = SimpleNamespace(
+        stores=SimpleNamespace(
+            doc_store=_SourceDocStore(
+                [
+                    SimpleNamespace(
+                        doc_id="DOC-REMOTE",
+                        tenant_id="local-dev",
+                        collection_id="default",
+                        title="remote.txt",
+                        source_type="upload",
+                        source_path="s3://agentic-uploads/uploads/remote.txt",
+                        source_display_path="remote.txt",
+                        source_metadata={
+                            "mime_type": "text/plain",
+                            "original_filename": "remote.txt",
+                            "blob_ref": {
+                                "backend": "s3",
+                                "uri": "s3://agentic-uploads/uploads/remote.txt",
+                                "bucket": "agentic-uploads",
+                                "key": "uploads/remote.txt",
+                                "content_type": "text/plain",
+                            },
+                        },
+                    )
+                ]
+            )
+        )
+    )
+
+    class _RemoteBlobStore:
+        def exists(self, ref):
+            return ref.key == "uploads/remote.txt"
+
+        def iter_bytes(self, ref):
+            del ref
+            yield b"remote source\n"
+
+    monkeypatch.setattr(api_main, "build_blob_store", lambda settings_arg: _RemoteBlobStore())
+
+    try:
+        response = await client.get(
+            "/v1/documents/DOC-REMOTE/source",
+            headers={"Authorization": "Bearer shared-secret", "X-Conversation-ID": "source-conv"},
+        )
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 200
+    assert response.text == "remote source\n"
+    assert response.headers["content-type"].startswith("text/plain")
+
+
+@pytest.mark.asyncio
+async def test_document_source_file_accepts_valid_signed_url_without_bearer(tmp_path):
+    client, bot, settings = _make_client(tmp_path)
+    settings.gateway_shared_bearer_token = "shared-secret"
+    settings.download_url_secret = "download-secret"
+    target = settings.uploads_dir / "signed-source.txt"
+    target.write_text("signed body\n", encoding="utf-8")
+    bot.ctx = SimpleNamespace(
+        stores=SimpleNamespace(
+            doc_store=_SourceDocStore(
+                [
+                    SimpleNamespace(
+                        doc_id="DOC-SIGNED",
+                        tenant_id="tenant-a",
+                        collection_id="default",
+                        title="signed-source.txt",
+                        source_type="upload",
+                        source_path=str(target),
+                        source_display_path="signed-source.txt",
+                        source_metadata={"mime_type": "text/plain"},
+                    )
+                ]
+            )
+        )
+    )
+    signed_url = api_main.build_signed_download_url(
+        download_id="DOC-SIGNED",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        conversation_id="source-conv",
+        secret=settings.download_url_secret,
+        ttl_seconds=settings.download_url_ttl_seconds,
+        path="/v1/documents/DOC-SIGNED/source",
+    )
+
+    try:
+        response = await client.get(signed_url)
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 200
+    assert response.text == "signed body\n"
+
+
+@pytest.mark.asyncio
+async def test_document_source_file_rejects_path_outside_source_roots(tmp_path):
+    client, bot, settings = _make_client(tmp_path)
+    settings.gateway_shared_bearer_token = "shared-secret"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("nope\n", encoding="utf-8")
+    bot.ctx = SimpleNamespace(
+        stores=SimpleNamespace(
+            doc_store=_SourceDocStore(
+                [
+                    SimpleNamespace(
+                        doc_id="DOC-OUTSIDE",
+                        tenant_id="local-dev",
+                        collection_id="default",
+                        title="outside.txt",
+                        source_type="upload",
+                        source_path=str(outside),
+                        source_display_path="outside.txt",
+                        source_metadata={"mime_type": "text/plain"},
+                    )
+                ]
+            )
+        )
+    )
+
+    try:
+        response = await client.get(
+            "/v1/documents/DOC-OUTSIDE/source",
+            headers={"Authorization": "Bearer shared-secret", "X-Conversation-ID": "source-conv"},
+        )
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 403
 
 
 @pytest.mark.asyncio

@@ -1003,6 +1003,138 @@ def test_pipe_prefers_backend_status_snapshots_when_available(monkeypatch) -> No
     assert emitted[-1]["data"]["agentic_status"]["timing"]["kind"] == "total"
 
 
+def test_pipe_forwards_backend_tool_call_status_cards(monkeypatch) -> None:
+    module = _load_pipe_module()
+    pipe = module.Pipe()
+    emitted: list[dict[str, object]] = []
+
+    def tool_status(status: str, *, output: dict[str, object] | None = None) -> str:
+        done = status != "running"
+        payload = {
+            "type": "tool_trace",
+            "status_id": "tool-call-1",
+            "status_key": "tool-call-1",
+            "description": f"search_indexed_docs {'completed' if done else 'running'}",
+            "status": "complete" if done else "in_progress",
+            "done": done,
+            "hidden": False,
+            "elapsed_ms": 120 if done else 0,
+            "agent": "general",
+            "selected_agent": "general",
+            "phase": "searching_knowledge_base",
+            "phase_label": "Searching Knowledge Base",
+            "phase_elapsed_ms": 120 if done else 0,
+            "status_elapsed_ms": 120 if done else 0,
+            "source_event_type": "tool_end" if done else "tool_start",
+            "label": f"search_indexed_docs {'completed' if done else 'running'}",
+            "detail": '{"hits":1}' if done else '{"query":"agent trace"}',
+            "job_id": "",
+            "task_id": "",
+            "why": "A runtime agent invoked a tool.",
+            "waiting_on": "",
+            "timestamp": 1713139200000 + (120 if done else 0),
+            "agentic_tool_call": {
+                "version": 1,
+                "tool_call_id": "call-1",
+                "tool_name": "search_indexed_docs",
+                "agent_name": "general",
+                "job_id": "",
+                "status": status,
+                "started_at": "2026-04-23T10:00:00Z",
+                "completed_at": "2026-04-23T10:00:01Z" if done else "",
+                "duration_ms": 120 if done else None,
+                "input_preview": '{"query":"agent trace"}',
+                "output_preview": '{"hits":1}' if done else "",
+                "input": {"query": "agent trace"},
+                "output": output,
+                "error": None,
+                "truncated": False,
+                "truncated_fields": [],
+                "source_event_id": "evt_end" if done else "evt_start",
+            },
+        }
+        return json.dumps(payload)
+
+    class _StreamResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            lines = [
+                "event: status",
+                f"data: {tool_status('running')}",
+                "",
+                "event: status",
+                f"data: {tool_status('completed', output={'hits': 1})}",
+                "",
+                'data: {"choices":[{"delta":{"content":"Tool-backed answer."},"finish_reason":null}]}',
+                "",
+                "event: status",
+                (
+                    'data: {"status_id":"status-ready","status_key":"answer_ready\\u241fgeneral\\u241fdone",'
+                    '"description":"Answer ready • general • Completed in 00:01","status":"complete",'
+                    '"done":true,"hidden":false,"elapsed_ms":1000,"delta_ms":null,'
+                    '"status_elapsed_ms":1000,"agent":"general","selected_agent":"general",'
+                    '"phase":"answer_ready","phase_label":"Answer Ready","phase_elapsed_ms":1000,'
+                    '"source_event_type":"turn_completed","label":"Answer ready","detail":"",'
+                    '"job_id":"","task_id":"","why":"","waiting_on":"","timestamp":1713139201000}'
+                ),
+                "",
+                "data: [DONE]",
+                "",
+            ]
+            for item in lines:
+                yield item
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+    class _AsyncClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+        def stream(self, method, url, *, headers=None, json=None, **kwargs):
+            del method, url, headers, json, kwargs
+            return _StreamContext()
+
+    async def emit(event):
+        emitted.append(event)
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _AsyncClient)
+
+    result = asyncio.run(
+        pipe.pipe(
+            {"messages": [{"role": "user", "content": "Use a tool and show the trace."}]},
+            __event_emitter__=emit,
+        )
+    )
+
+    tool_events = [item["data"] for item in emitted if item["data"].get("agentic_tool_call")]
+
+    assert result == "Tool-backed answer."
+    assert len(tool_events) == 2
+    assert {item["status_id"] for item in tool_events} == {"tool-call-1"}
+    assert tool_events[0]["agentic_tool_call"]["status"] == "running"
+    assert tool_events[0]["agentic_tool_call"]["input"] == {"query": "agent trace"}
+    assert tool_events[1]["done"] is True
+    assert tool_events[1]["agentic_tool_call"]["status"] == "completed"
+    assert tool_events[1]["agentic_tool_call"]["output"] == {"hits": 1}
+    assert emitted[-1]["data"]["done"] is True
+    assert "agentic_tool_call" not in emitted[-1]["data"]
+
+
 def test_pipe_ignores_stale_backend_status_updates(monkeypatch) -> None:
     module = _load_pipe_module()
     pipe = module.Pipe()

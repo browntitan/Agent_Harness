@@ -187,6 +187,16 @@ export interface CanonicalRoutingPath {
   edge_ids?: string[]
 }
 
+export interface LangGraphExport {
+  status?: string
+  generated_at?: string
+  agent_name?: string
+  mermaid?: string
+  nodes?: Record<string, unknown>[]
+  edges?: Record<string, unknown>[]
+  warnings?: string[]
+}
+
 export interface ArchitectureSnapshot {
   generated_at: string
   system: Record<string, unknown>
@@ -194,6 +204,7 @@ export interface ArchitectureSnapshot {
   nodes: ArchitectureNode[]
   edges: ArchitectureEdge[]
   canonical_paths: CanonicalRoutingPath[]
+  langgraph?: LangGraphExport
 }
 
 export interface ArchitectureFlow {
@@ -315,6 +326,21 @@ export interface CollectionSummary {
   status: CollectionStatusSummary
 }
 
+export interface UploadedFileSummary {
+  doc_id: string
+  title: string
+  source_type: string
+  source_path: string
+  source_display_path?: string
+  collection_id: string
+  num_chunks: number
+  ingested_at: string
+  file_type: string
+  doc_structure_type: string
+  source_metadata?: Record<string, unknown>
+  metadata_summary?: Record<string, unknown>
+}
+
 export interface CollectionOperationFile {
   display_path: string
   filename: string
@@ -351,6 +377,7 @@ export interface CollectionOperationResult {
   display_paths: string[]
   workspace_copies?: string[]
   collection_status?: CollectionStatusSummary
+  metadata_summary?: Record<string, unknown>
 }
 
 export interface GraphIndexRecord {

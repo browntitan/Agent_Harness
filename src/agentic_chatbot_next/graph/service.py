@@ -42,6 +42,8 @@ from agentic_chatbot_next.persistence.postgres.graphs import (
     GraphIndexSourceRecord,
 )
 from agentic_chatbot_next.rag.ingest import canonicalize_local_source_path
+from agentic_chatbot_next.rag.source_links import build_document_source_url
+from agentic_chatbot_next.storage import blob_ref_from_record, build_blob_store
 
 
 def _slugify(value: str) -> str:
@@ -61,9 +63,74 @@ def _dedupe(items: Iterable[str]) -> List[str]:
     return result
 
 
+_GRAPH_QUERY_METHOD_ALIASES: dict[str, tuple[str, ...]] = {
+    "graph": ("local", "global"),
+    "graphrag": ("local", "global"),
+    "knowledge_graph": ("local", "global"),
+    "knowledge-graph": ("local", "global"),
+    "relationship": ("local",),
+    "relationships": ("local",),
+    "multihop": ("local", "global"),
+    "multi-hop": ("local", "global"),
+    "multi_hop": ("local", "global"),
+}
+
+
+def _normalize_graph_query_methods(
+    requested: Sequence[str] | None,
+    *,
+    supported: Sequence[str] | None,
+    default_method: str = "local",
+) -> tuple[List[str], List[str], Dict[str, List[str]]]:
+    supported_methods = _dedupe(str(item).strip().lower() for item in (supported or []) if str(item).strip())
+    if not supported_methods:
+        supported_methods = _dedupe([str(default_method or "local").strip().lower() or "local"])
+    raw_requested = [str(item).strip().lower() for item in (requested or []) if str(item).strip()]
+    if not raw_requested:
+        return list(supported_methods), [], {}
+
+    normalized: List[str] = []
+    invalid: List[str] = []
+    aliases: Dict[str, List[str]] = {}
+    for method in raw_requested:
+        expanded = list(_GRAPH_QUERY_METHOD_ALIASES.get(method, (method,)))
+        accepted = [item for item in expanded if item in supported_methods]
+        if not accepted:
+            invalid.append(method)
+            continue
+        aliases[method] = accepted
+        normalized.extend(accepted)
+    return _dedupe(normalized), _dedupe(invalid), aliases
+
+
+def _expanded_graph_queries(query: str) -> List[str]:
+    base = str(query or "").strip()
+    if not base:
+        return []
+    return [base]
+
+
 def _source_record_id(graph_id: str, source_doc_id: str, source_path: str) -> str:
     seed = f"{graph_id}:{source_doc_id}:{canonicalize_local_source_path(source_path)}"
     return f"graphsrc_{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex[:20]}"
+
+
+def _source_lookup_keys(value: Any) -> List[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    keys = {text, text.lower()}
+    try:
+        path = Path(text)
+        if path.name:
+            keys.add(path.name)
+            keys.add(path.name.lower())
+        if path.stem:
+            keys.add(path.stem)
+            keys.add(path.stem.lower())
+    except Exception:
+        pass
+    return [key for key in keys if key]
 
 
 _WORKFLOW_STARTED_RE = re.compile(r"Workflow started: (?P<workflow>[A-Za-z0-9_]+)")
@@ -467,7 +534,12 @@ class GraphService:
                 "doc_id": str(getattr(item, "doc_id", "") or ""),
                 "title": str(getattr(item, "title", "") or ""),
                 "source_path": str(getattr(item, "source_path", "") or ""),
+                "source_display_path": str(getattr(item, "source_display_path", "") or ""),
+                "source_type": str(getattr(item, "source_type", "") or ""),
+                "collection_id": str(getattr(item, "collection_id", "") or ""),
+                "source_metadata": dict(getattr(item, "source_metadata", {}) or {}),
                 "materialized_path": paths[index] if index < len(paths) else "",
+                "materialized_filename": Path(paths[index]).name if index < len(paths) and paths[index] else "",
             }
             materialized.append(payload)
         return materialized
@@ -946,6 +1018,13 @@ class GraphService:
                 if body.strip():
                     return f"# {title}\n\n{body.strip()}\n"
         source_path = Path(str(getattr(record, "source_path", "") or "")).expanduser()
+        if not source_path.exists():
+            blob_ref = blob_ref_from_record(record)
+            if blob_ref is not None:
+                try:
+                    source_path = build_blob_store(self.settings).materialize_to_path(blob_ref)
+                except Exception:
+                    source_path = Path("__missing_remote_source__")
         if source_path.exists():
             try:
                 raw = source_path.read_text(encoding="utf-8", errors="ignore").strip()
@@ -974,7 +1053,12 @@ class GraphService:
                     "doc_id": doc_id,
                     "title": title,
                     "source_path": str(getattr(record, "source_path", "") or ""),
+                    "source_display_path": str(getattr(record, "source_display_path", "") or ""),
+                    "source_type": str(getattr(record, "source_type", "") or ""),
+                    "collection_id": str(getattr(record, "collection_id", "") or ""),
+                    "source_metadata": dict(getattr(record, "source_metadata", {}) or {}),
                     "materialized_path": str(destination),
+                    "materialized_filename": filename,
                 }
             )
         return materialized
@@ -2081,6 +2165,22 @@ class GraphService:
         source_records: Sequence[GraphIndexSourceRecord],
         materialized_sources: Sequence[Dict[str, Any]] | None = None,
     ) -> str:
+        root_path = Path(graph_record.root_path or self._graph_root(graph_record.graph_id))
+        root_path.mkdir(parents=True, exist_ok=True)
+        source_manifest_path = root_path / "source_manifest.json"
+        source_manifest_path.write_text(
+            json.dumps(
+                {
+                    "graph_id": graph_record.graph_id,
+                    "tenant_id": graph_record.tenant_id,
+                    "collection_id": graph_record.collection_id,
+                    "sources": [dict(item) for item in (materialized_sources or [])],
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         payload = {
             "graph_id": graph_record.graph_id,
             "display_name": graph_record.display_name,
@@ -2099,8 +2199,9 @@ class GraphService:
             "prompt_overrides_json": dict(graph_record.prompt_overrides_json or {}),
             "graph_skill_ids": list(graph_record.graph_skill_ids),
             "materialized_sources": [dict(item) for item in (materialized_sources or [])],
+            "source_manifest_path": str(source_manifest_path),
         }
-        return self._write_manifest(Path(graph_record.root_path or self._graph_root(graph_record.graph_id)), payload)
+        return self._write_manifest(root_path, payload)
 
     def _safe_project_probe(self, root_path: Path) -> Dict[str, Any]:
         root_path.mkdir(parents=True, exist_ok=True)
@@ -2961,13 +3062,148 @@ class GraphService:
                     title=title,
                     source_path=source_path,
                     source_type=source_type,
-                    summary=f"Catalog source match from managed graph '{graph_id}'.",
-                    metadata={"graph_id": graph_id, "fallback": "catalog"},
+                    summary=(
+                        f"Catalog source candidate from managed graph '{graph_id}'. "
+                        "Read the source text before using this as evidence."
+                    ),
+                    metadata={
+                        "graph_id": graph_id,
+                        "fallback": "catalog",
+                        "catalog_only": True,
+                        "evidence_kind": "source_candidate",
+                    },
                 )
             )
             if len(results) >= max(1, int(limit)):
                 break
         return results
+
+    def _source_catalog_lookup(self, source_records: Sequence[GraphIndexSourceRecord]) -> Dict[str, Dict[str, str]]:
+        lookup: Dict[str, Dict[str, str]] = {}
+        for source in source_records:
+            info = {
+                "doc_id": str(source.source_doc_id or ""),
+                "title": str(source.source_title or source.source_doc_id or ""),
+                "source_path": str(source.source_path or ""),
+                "source_type": str(source.source_type or ""),
+            }
+            for value in [info["doc_id"], info["title"], info["source_path"]]:
+                for key in _source_lookup_keys(value):
+                    lookup[key] = dict(info)
+        return lookup
+
+    def _resolve_graph_hit_source(
+        self,
+        hit: Dict[str, Any],
+        *,
+        source_lookup: Dict[str, Dict[str, str]],
+    ) -> Dict[str, Any]:
+        candidates = [
+            str(hit.get("doc_id") or ""),
+            str(hit.get("title") or ""),
+            str(hit.get("source_path") or ""),
+        ]
+        candidates.extend(str(item) for item in (hit.get("chunk_ids") or []) if str(item))
+        metadata = dict(hit.get("metadata") or {})
+        source_info = dict(metadata.get("source") or {})
+        candidates.extend(
+            [
+                str(source_info.get("doc_id") or ""),
+                str(source_info.get("title") or ""),
+                str(source_info.get("source_path") or ""),
+                str(source_info.get("materialized_path") or ""),
+                str(source_info.get("materialized_filename") or ""),
+            ]
+        )
+        resolved: Dict[str, Any] = dict(source_info)
+        for candidate in candidates:
+            for key in _source_lookup_keys(candidate):
+                if key in source_lookup:
+                    resolved = {**{k: v for k, v in resolved.items() if v}, **source_lookup[key]}
+                    break
+            if resolved.get("doc_id"):
+                break
+        doc_id = str(resolved.get("doc_id") or hit.get("doc_id") or "").strip()
+        record = None
+        doc_store = getattr(self.stores, "doc_store", None)
+        if doc_store is not None and doc_id:
+            try:
+                record = doc_store.get_document(doc_id, self.tenant_id)
+            except Exception:
+                record = None
+        if record is not None:
+            resolved.update(
+                {
+                    "doc_id": str(getattr(record, "doc_id", "") or doc_id),
+                    "title": str(getattr(record, "title", "") or resolved.get("title") or doc_id),
+                    "source_path": str(getattr(record, "source_path", "") or resolved.get("source_path") or ""),
+                    "source_type": str(getattr(record, "source_type", "") or resolved.get("source_type") or ""),
+                    "collection_id": str(getattr(record, "collection_id", "") or ""),
+                    "source_display_path": str(getattr(record, "source_display_path", "") or ""),
+                }
+            )
+        if doc_id:
+            resolved.setdefault("doc_id", doc_id)
+        return resolved
+
+    def _graph_citation_id(self, graph_id: str, doc_id: str, hit: Dict[str, Any]) -> str:
+        for chunk_id in hit.get("chunk_ids") or []:
+            text = str(chunk_id or "").strip()
+            if text:
+                return text
+        if doc_id:
+            return f"{doc_id}#graph"
+        return f"{graph_id}#graph"
+
+    def _attach_graph_citations(
+        self,
+        payload: Dict[str, Any],
+        *,
+        source_records: Sequence[GraphIndexSourceRecord],
+    ) -> Dict[str, Any]:
+        source_lookup = self._source_catalog_lookup(source_records)
+        citations_by_id: Dict[str, Dict[str, Any]] = {}
+        enriched_results: List[Dict[str, Any]] = []
+        graph_id = str(payload.get("graph_id") or "")
+        for raw_hit in payload.get("results") or []:
+            if not isinstance(raw_hit, dict):
+                continue
+            hit = dict(raw_hit)
+            source = self._resolve_graph_hit_source(hit, source_lookup=source_lookup)
+            doc_id = str(source.get("doc_id") or hit.get("doc_id") or "").strip()
+            if doc_id:
+                hit["doc_id"] = doc_id
+            if source.get("source_path") and not str(hit.get("source_path") or "").strip():
+                hit["source_path"] = str(source.get("source_path") or "")
+            if source.get("source_type") and not str(hit.get("source_type") or "").strip():
+                hit["source_type"] = str(source.get("source_type") or "")
+            metadata = dict(hit.get("metadata") or {})
+            metadata["source"] = {**dict(metadata.get("source") or {}), **source}
+            hit["metadata"] = metadata
+
+            if doc_id:
+                citation_id = self._graph_citation_id(graph_id, doc_id, hit)
+                hit["citation_ids"] = [citation_id]
+                citation = {
+                    "citation_id": citation_id,
+                    "doc_id": doc_id,
+                    "title": str(source.get("title") or hit.get("title") or doc_id),
+                    "source_type": str(source.get("source_type") or hit.get("source_type") or ""),
+                    "location": str(hit.get("query_method") or ""),
+                    "snippet": str(hit.get("summary") or "")[:320],
+                    "collection_id": str(source.get("collection_id") or ""),
+                    "url": build_document_source_url(self.settings, self.session or self, doc_id),
+                    "source_path": str(source.get("source_path") or hit.get("source_path") or ""),
+                    "evidence_kind": str(metadata.get("evidence_kind") or ""),
+                    "catalog_only": bool(metadata.get("catalog_only") or metadata.get("fallback") == "catalog"),
+                }
+                citations_by_id.setdefault(citation_id, citation)
+            else:
+                hit.setdefault("citation_ids", [])
+            enriched_results.append(hit)
+        payload["results"] = enriched_results
+        payload["citations"] = list(citations_by_id.values())
+        return payload
 
     def query_index(
         self,
@@ -2989,7 +3225,32 @@ class GraphService:
         scoped_doc_ids = _dedupe(
             [*(doc_ids or []), *[item.source_doc_id for item in source_records if item.source_doc_id], *record.source_doc_ids]
         )
-        requested_methods = _dedupe(methods or record.supported_query_methods or [getattr(self.settings, "graphrag_default_query_method", "local")])
+        requested_methods, invalid_methods, method_aliases = _normalize_graph_query_methods(
+            methods,
+            supported=record.supported_query_methods,
+            default_method=str(getattr(self.settings, "graphrag_default_query_method", "local") or "local"),
+        )
+        if invalid_methods:
+            supported_methods = _dedupe(record.supported_query_methods or [getattr(self.settings, "graphrag_default_query_method", "local")])
+            return {
+                "error": (
+                    "Unsupported graph query method(s): "
+                    + ", ".join(invalid_methods)
+                    + ". Supported methods for this graph are: "
+                    + ", ".join(supported_methods)
+                    + ". Use methods_csv='' for defaults, or 'local', 'global', 'drift'."
+                ),
+                "graph_id": graph_id,
+                "display_name": record.display_name or graph_id,
+                "backend": record.backend,
+                "query_ready": bool(record.query_ready),
+                "supported_query_methods": supported_methods,
+                "requested_methods": [str(item) for item in (methods or []) if str(item).strip()],
+                "method_aliases": method_aliases,
+                "results": [],
+                "citations": [],
+                "evidence_status": "method_error",
+            }
         cache_store = self._query_cache_store()
         if use_cache and cache_store is not None and len(requested_methods) == 1:
             cached = cache_store.get_cached(
@@ -3000,25 +3261,30 @@ class GraphService:
             )
             if cached is not None:
                 self._remember_active_graphs([record.graph_id])
-                return dict(cached.response_json)
+                return self._attach_graph_citations(
+                    dict(cached.response_json),
+                    source_records=source_records,
+                )
 
         backend = self._backend_for(record.backend)
         results: List[GraphQueryHit] = []
+        effective_queries = _expanded_graph_queries(query) or [query]
         if bool(record.query_ready):
             for method in requested_methods:
-                try:
-                    results.extend(
-                        backend.query_index(
-                            graph_id,
-                            Path(record.artifact_path or record.root_path or self._graph_root(graph_id)),
-                            query=query,
-                            method=method,
-                            limit=max(1, int(limit)),
-                            doc_ids=scoped_doc_ids,
+                for effective_query in effective_queries:
+                    try:
+                        results.extend(
+                            backend.query_index(
+                                graph_id,
+                                Path(record.artifact_path or record.root_path or self._graph_root(graph_id)),
+                                query=effective_query,
+                                method=method,
+                                limit=max(1, int(limit)),
+                                doc_ids=scoped_doc_ids,
+                            )
                         )
-                    )
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
         if not results and str(record.backend or "").strip().lower() == "neo4j":
             results = self._query_graph_store(
                 graph_id=graph_id,
@@ -3046,8 +3312,29 @@ class GraphService:
             "graph_context_summary": dict(record.graph_context_summary or {}),
             "query": query,
             "methods": requested_methods,
+            "method_aliases": method_aliases,
+            "expanded_queries": effective_queries if len(effective_queries) > 1 else [],
             "results": [asdict(item) for item in results[: max(1, int(limit))]],
         }
+        payload = self._attach_graph_citations(payload, source_records=source_records)
+        catalog_only = bool(payload["results"]) and all(
+            str((item.get("metadata") or {}).get("fallback") or "").strip() == "catalog"
+            or str(item.get("backend") or "").strip().lower() == "catalog"
+            for item in payload["results"]
+            if isinstance(item, dict)
+        )
+        if catalog_only:
+            payload["evidence_status"] = "source_candidates_only"
+            payload["requires_source_read"] = True
+            payload["warnings"] = [
+                "Graph search returned catalog source candidates only; read source text or run grounded RAG before answering."
+            ]
+        elif payload["results"]:
+            payload["evidence_status"] = "grounded_graph_evidence"
+            payload["requires_source_read"] = False
+        else:
+            payload["evidence_status"] = "no_results"
+            payload["requires_source_read"] = True
         if use_cache and cache_store is not None and len(requested_methods) == 1:
             cache_store.put_cached(
                 graph_id=graph_id,
@@ -3079,6 +3366,7 @@ class GraphService:
         shortlist_graph_ids = [str(item.get("graph_id") or "") for item in shortlist if str(item.get("graph_id") or "").strip()]
         self._remember_active_graphs(shortlist_graph_ids)
         aggregated: List[Dict[str, Any]] = []
+        citations_by_id: Dict[str, Dict[str, Any]] = {}
         for item in shortlist[: max(1, int(top_k_graphs))]:
             graph_id = str(item.get("graph_id") or "")
             if not graph_id:
@@ -3090,15 +3378,41 @@ class GraphService:
                 limit=limit,
                 doc_ids=doc_ids,
             )
+            for citation in response.get("citations", []) or []:
+                if isinstance(citation, dict):
+                    citation_id = str(citation.get("citation_id") or "").strip()
+                    if citation_id:
+                        citations_by_id.setdefault(citation_id, citation)
             for hit in response.get("results", []) or []:
                 if isinstance(hit, dict):
                     aggregated.append(hit)
         aggregated.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
-        return {
+        visible_results = aggregated[: max(1, int(limit))]
+        catalog_only = bool(visible_results) and all(
+            str((item.get("metadata") or {}).get("fallback") or "").strip() == "catalog"
+            or str(item.get("backend") or "").strip().lower() == "catalog"
+            for item in visible_results
+            if isinstance(item, dict)
+        )
+        payload = {
             "query": query,
             "graph_shortlist": shortlist,
-            "results": aggregated[: max(1, int(limit))],
+            "results": visible_results,
+            "citations": list(citations_by_id.values()),
         }
+        if catalog_only:
+            payload["evidence_status"] = "source_candidates_only"
+            payload["requires_source_read"] = True
+            payload["warnings"] = [
+                "Graph search returned catalog source candidates only; read source text or run grounded RAG before answering."
+            ]
+        elif visible_results:
+            payload["evidence_status"] = "grounded_graph_evidence"
+            payload["requires_source_read"] = False
+        else:
+            payload["evidence_status"] = "no_results"
+            payload["requires_source_read"] = True
+        return payload
 
     def explain_source_plan(
         self,

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from agentic_chatbot_next.capabilities import coerce_effective_capabilities
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.jobs import JobRecord
 from agentic_chatbot_next.contracts.messages import RuntimeMessage, SessionState
@@ -49,6 +50,10 @@ _HANDOFF_ALLOWED_CONSUMERS = {
     "research_coverage_ledger": {"general", "finalizer", "verifier", "coordinator"},
     "evidence_request": {"rag_worker", "general", "coordinator"},
     "evidence_response": {"finalizer", "general", "coordinator"},
+    "clause_redline_inventory": {"rag_worker", "general", "verifier", "finalizer", "coordinator"},
+    "policy_guidance_matches": {"general", "verifier", "finalizer", "coordinator"},
+    "policy_coverage_verification": {"general", "finalizer", "coordinator"},
+    "buyer_recommendation_table": {"finalizer", "general", "coordinator"},
 }
 
 _HANDOFF_SCHEMA_KEYS = {
@@ -74,6 +79,10 @@ _HANDOFF_SCHEMA_KEYS = {
     },
     "evidence_request": {"query"},
     "evidence_response": {"summary"},
+    "clause_redline_inventory": {"clauses"},
+    "policy_guidance_matches": {"matches"},
+    "policy_coverage_verification": {"verdict"},
+    "buyer_recommendation_table": {"recommendations"},
 }
 
 _META_DOCUMENT_RE = re.compile(
@@ -1225,6 +1234,64 @@ class KernelCoordinatorController:
                 "doc_scope": doc_scope,
                 "artifact_ref": result.artifact_ref,
             }
+        if artifact_type == "clause_redline_inventory":
+            payload = extract_json(output or "") or {}
+            clauses: List[Dict[str, Any]] = []
+            for index, item in enumerate(payload.get("clauses") or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                clause_text = str(item.get("clause_text") or "").strip()
+                redline_text = str(item.get("redline_text") or "").strip()
+                if not clause_text and not redline_text:
+                    continue
+                clauses.append(
+                    {
+                        "clause_id": str(item.get("clause_id") or f"clause_{index}").strip(),
+                        "clause_text": clause_text,
+                        "redline_text": redline_text,
+                        "redline_type": str(item.get("redline_type") or "unknown").strip(),
+                        "source_doc_id": str(item.get("source_doc_id") or "").strip(),
+                        "location": str(item.get("location") or "").strip(),
+                        "confidence": item.get("confidence", 0.0),
+                    }
+                )
+            return {
+                "clauses": clauses,
+                "warnings": [str(item).strip() for item in (payload.get("warnings") or []) if str(item).strip()],
+                "summary": output[:1600],
+            }
+        if artifact_type == "policy_guidance_matches":
+            payload = extract_json(output or "") or {}
+            matches = payload.get("matches") or payload.get("policy_guidance_matches") or []
+            if not isinstance(matches, list):
+                matches = []
+            return {
+                "matches": [dict(item) for item in matches if isinstance(item, dict)],
+                "summary": output[:2400],
+                "doc_scope": doc_scope,
+            }
+        if artifact_type == "policy_coverage_verification":
+            payload = extract_json(output or "") or {}
+            verdict = str(payload.get("verdict") or payload.get("status") or "").strip().upper()
+            return {
+                "verdict": verdict if verdict in {"PASS", "FAIL", "PARTIAL"} else "PARTIAL",
+                "missing_clause_ids": [
+                    str(item).strip()
+                    for item in (payload.get("missing_clause_ids") or [])
+                    if str(item).strip()
+                ],
+                "risks": [str(item).strip() for item in (payload.get("risks") or []) if str(item).strip()],
+                "summary": output[:1600],
+            }
+        if artifact_type == "buyer_recommendation_table":
+            payload = extract_json(output or "") or {}
+            recommendations = payload.get("recommendations") or payload.get("rows") or []
+            if not isinstance(recommendations, list):
+                recommendations = []
+            return {
+                "recommendations": [dict(item) for item in recommendations if isinstance(item, dict)],
+                "summary": output[:2400],
+            }
         return {"summary": output[:2000], "doc_scope": doc_scope}
 
     def _is_valid_handoff_payload(self, artifact_type: str, payload: Dict[str, Any]) -> bool:
@@ -1441,6 +1508,78 @@ class KernelCoordinatorController:
             if mode:
                 return mode
         return ""
+
+    def _validate_task_graph(
+        self,
+        *,
+        agent: AgentDefinition,
+        session_state: SessionState,
+        task_plan: List[Dict[str, Any]],
+    ) -> List[str]:
+        issues: List[str] = []
+        effective = coerce_effective_capabilities(
+            dict(session_state.metadata or {}).get("effective_capabilities")
+            or dict(dict(session_state.metadata or {}).get("route_context") or {}).get("effective_capabilities")
+        )
+        known_ids = {str(task.get("id") or "").strip() for task in task_plan if str(task.get("id") or "").strip()}
+        all_produced_artifacts = {
+            str(item).strip()
+            for task in task_plan
+            for item in (task.get("produces_artifacts") or [])
+            if str(item).strip()
+        }
+        allowed_workers = set(agent.allowed_worker_agents or [])
+        for task in task_plan:
+            task_id = str(task.get("id") or "").strip() or "<unknown>"
+            executor = str(task.get("executor") or "").strip()
+            if not executor:
+                issues.append(f"Task {task_id} has no executor.")
+                continue
+            if executor not in allowed_workers:
+                issues.append(f"Task {task_id} requests worker '{executor}', which coordinator cannot dispatch.")
+            try:
+                self.kernel._resolve_agent(executor)
+            except Exception:
+                issues.append(f"Task {task_id} requests unknown worker '{executor}'.")
+            if effective is not None and not effective.allows_agent(executor):
+                issues.append(f"Task {task_id} requests disabled worker '{executor}'.")
+            for dependency in [str(item).strip() for item in (task.get("depends_on") or []) if str(item).strip()]:
+                if dependency not in known_ids:
+                    issues.append(f"Task {task_id} depends on unknown task '{dependency}'.")
+            for artifact in [str(item).strip() for item in (task.get("consumes_artifacts") or []) if str(item).strip()]:
+                if artifact not in all_produced_artifacts:
+                    issues.append(f"Task {task_id} consumes artifact '{artifact}' that no task produces.")
+            capability_requirements = dict(task.get("capability_requirements") or {})
+            if effective is not None:
+                for required_agent in [
+                    str(item).strip()
+                    for item in (capability_requirements.get("agents") or [])
+                    if str(item).strip()
+                ]:
+                    if not effective.allows_agent(required_agent):
+                        issues.append(f"Task {task_id} requires disabled agent '{required_agent}'.")
+                for collection_id in [
+                    str(item).strip()
+                    for item in (capability_requirements.get("collections") or [])
+                    if str(item).strip()
+                ]:
+                    if not effective.allows_collection(collection_id):
+                        issues.append(f"Task {task_id} requires disabled collection '{collection_id}'.")
+                for tool_name in [
+                    str(item).strip()
+                    for item in (capability_requirements.get("tools") or [])
+                    if str(item).strip()
+                ]:
+                    definition = dict(getattr(self.kernel, "tool_definitions", {}) or {}).get(tool_name)
+                    if definition is not None and not effective.allows_tool(
+                        tool_name,
+                        group=str(getattr(definition, "group", "") or ""),
+                        read_only=bool(getattr(definition, "read_only", False)),
+                        destructive=bool(getattr(definition, "destructive", False)),
+                        metadata=dict(getattr(definition, "metadata", {}) or {}),
+                    ):
+                        issues.append(f"Task {task_id} requires disabled tool '{tool_name}'.")
+        return issues
 
     @staticmethod
     def _safe_task_slug(value: str) -> str:
@@ -2129,6 +2268,62 @@ class KernelCoordinatorController:
             planner_summary=str(planner_payload.get("summary") or ""),
             task_plan=list(planner_payload.get("tasks") or []),
         )
+        validation_issues = self._validate_task_graph(
+            agent=agent,
+            session_state=session_state,
+            task_plan=execution_state.task_plan,
+        )
+        if validation_issues:
+            from agentic_chatbot_next.runtime.kernel import AgentRunResult
+
+            text = (
+                "I could not execute the coordinator plan because the active capability profile blocks part of it:\n"
+                + "\n".join(f"- {issue}" for issue in validation_issues)
+            )
+            assistant_message = RuntimeMessage(
+                role="assistant",
+                content=text,
+                metadata={
+                    "agent_name": agent.name,
+                    "turn_outcome": "capability_plan_validation_failed",
+                    "plan_validation_issues": validation_issues,
+                },
+            )
+            return AgentRunResult(
+                text=text,
+                messages=list(session_state.messages) + [assistant_message],
+                metadata=dict(assistant_message.metadata or {}),
+            )
+        effective_capabilities = coerce_effective_capabilities(
+            dict(session_state.metadata or {}).get("effective_capabilities")
+            or dict(dict(session_state.metadata or {}).get("route_context") or {}).get("effective_capabilities")
+        )
+        if effective_capabilities is not None and effective_capabilities.permission_mode == "plan":
+            from agentic_chatbot_next.runtime.kernel import AgentRunResult
+
+            task_lines = [
+                f"- {task.get('id')}: {task.get('title')} [{task.get('executor')}]"
+                for task in execution_state.task_plan
+            ]
+            text = (
+                "Plan mode is enabled, so I prepared the coordinator task graph and stopped before execution.\n\n"
+                + "\n".join(task_lines)
+                + "\n\nApprove execution by switching permission mode back to `default` or `bypass` for this turn."
+            )
+            assistant_message = RuntimeMessage(
+                role="assistant",
+                content=text,
+                metadata={
+                    "agent_name": agent.name,
+                    "turn_outcome": "plan_mode_preview",
+                    "task_graph": execution_state.task_plan,
+                },
+            )
+            return AgentRunResult(
+                text=text,
+                messages=list(session_state.messages) + [assistant_message],
+                metadata=dict(assistant_message.metadata or {}),
+            )
 
         task_results: List[Dict[str, Any]] = []
 
@@ -2438,6 +2633,7 @@ class KernelCoordinatorController:
                     "conversation_id": session_state.conversation_id,
                     "verifier_agent": verifier.name,
                     "status": verification.status,
+                    "verdict": verification.verdict,
                     "issues": verification.issues,
                     "revision_round": revision_round,
                     "max_revision_rounds": max_revision_rounds,
@@ -2719,6 +2915,9 @@ class KernelCoordinatorController:
         result_mode = str(task.get("result_mode") or "").strip()
         answer_mode = str(task.get("answer_mode") or "answer").strip().lower() or "answer"
         controller_hints = dict(task.get("controller_hints") or {})
+        capability_requirements = dict(task.get("capability_requirements") or {})
+        evidence_scope = dict(task.get("evidence_scope") or {})
+        acceptance_criteria = [str(item) for item in (task.get("acceptance_criteria") or []) if str(item)]
         produces_artifacts = [str(item) for item in (task.get("produces_artifacts") or []) if str(item)]
         consumes_artifacts = [str(item) for item in (task.get("consumes_artifacts") or []) if str(item)]
         handoff_schema = str(task.get("handoff_schema") or "")
@@ -2747,6 +2946,14 @@ class KernelCoordinatorController:
             parts.append(f"ANSWER_MODE:\n{answer_mode}")
         if controller_hints:
             parts.append("CONTROLLER_HINTS:\n" + json.dumps(controller_hints, ensure_ascii=False, indent=2))
+        if capability_requirements:
+            parts.append("CAPABILITY_REQUIREMENTS:\n" + json.dumps(capability_requirements, ensure_ascii=False, indent=2))
+        if evidence_scope:
+            parts.append("EVIDENCE_SCOPE:\n" + json.dumps(evidence_scope, ensure_ascii=False, indent=2))
+        if str(task.get("loop_over_artifact") or "").strip():
+            parts.append(f"LOOP_OVER_ARTIFACT:\n{str(task.get('loop_over_artifact') or '').strip()}")
+        if acceptance_criteria:
+            parts.append("ACCEPTANCE_CRITERIA:\n- " + "\n- ".join(acceptance_criteria))
         if bool(controller_hints.get("strict_doc_focus")):
             parts.append(
                 "STRICT_SCOPE_RULE:\n"
@@ -3077,14 +3284,22 @@ class KernelCoordinatorController:
         if not payload:
             payload = extract_json(result.text or "") or {}
             parse_failed = not bool(payload) and bool(str(getattr(result, "text", "") or "").strip())
-        status = str(payload.get("status") or "pass").strip().lower()
-        if status not in {"pass", "revise"}:
-            status = "pass"
+        raw_status = str(payload.get("verdict") or payload.get("status") or "pass").strip()
+        normalized_status = raw_status.lower()
+        verdict = raw_status.upper()
+        if verdict in {"PASS", "FAIL", "PARTIAL"}:
+            status = "pass" if verdict == "PASS" else "revise"
+        else:
+            if normalized_status not in {"pass", "revise"}:
+                normalized_status = "pass"
+            status = normalized_status
+            verdict = "PASS" if status == "pass" else "PARTIAL"
         summary = str(payload.get("summary") or result.text or "").strip()
         issues = [str(item) for item in (payload.get("issues") or []) if str(item)]
         feedback = str(payload.get("feedback") or "\n".join(issues) or summary).strip()
         return VerificationResult(
             status=status,
+            verdict=verdict,
             summary=summary,
             issues=issues,
             feedback=feedback,

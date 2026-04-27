@@ -119,6 +119,52 @@ def test_ingest_paths_replaces_prior_active_doc_for_same_kb_source(tmp_path: Pat
     assert records[0].doc_id != first_doc_ids[0]
 
 
+def test_ingest_paths_persists_remote_blob_reference(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.object_store_backend = "s3"
+    stores = _stores()
+    path = tmp_path / "staged-upload.txt"
+    path.write_text("Remote-backed upload content.", encoding="utf-8")
+    blob_ref = {
+        "backend": "s3",
+        "uri": "s3://agentic-uploads/uploads/staged-upload.txt",
+        "bucket": "agentic-uploads",
+        "key": "uploads/staged-upload.txt",
+        "etag": "etag-1",
+        "size": path.stat().st_size,
+        "content_type": "text/plain",
+        "sha1": "sha1",
+    }
+
+    doc_ids = ingest_paths(
+        settings,
+        stores,
+        [path],
+        source_type="upload",
+        tenant_id="tenant",
+        collection_id="uploads",
+        source_display_paths={str(path.resolve()): "staged-upload.txt"},
+        source_identities={str(path.resolve()): "upload:staged-upload.txt"},
+        source_metadata_by_path={
+            str(path.resolve()): {
+                "blob_ref": blob_ref,
+                "source_uri": blob_ref["uri"],
+                "original_filename": "staged-upload.txt",
+                "mime_type": "text/plain",
+            }
+        },
+    )
+
+    assert len(doc_ids) == 1
+    record = stores.doc_store.get_document(doc_ids[0], tenant_id="tenant")
+    assert record is not None
+    assert record.source_path == blob_ref["uri"]
+    assert record.source_uri == blob_ref["uri"]
+    assert record.source_storage_backend == "s3"
+    assert record.source_object_bucket == "agentic-uploads"
+    assert record.source_object_key == "uploads/staged-upload.txt"
+
+
 def test_build_kb_health_report_and_repair_handle_same_source_duplicates(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     stores = _stores()

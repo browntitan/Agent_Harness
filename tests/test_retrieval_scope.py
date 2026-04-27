@@ -77,6 +77,39 @@ def test_decide_retrieval_scope_detects_explicit_kb_only() -> None:
     assert decision.mode == "kb_only"
 
 
+def test_decide_retrieval_scope_keeps_kb_policy_question_in_kb_scope_with_upload_terms() -> None:
+    decision = decide_retrieval_scope(
+        _settings(),
+        _session(
+            metadata={
+                "upload_collection_id": "capability-benchmark-uploads",
+                "kb_collection_id": "default",
+                "requested_kb_collection_id": "default",
+                "kb_collection_confirmed": True,
+                "search_collection_ids": ["default"],
+            }
+        ),
+        query="Search the default knowledge base for this upload lifecycle policy: What happens when an uploaded document is deleted?",
+        has_uploads=False,
+        kb_available=True,
+    )
+
+    assert decision.mode == "kb_only"
+    assert decision.search_collection_ids == ("default",)
+
+
+def test_decide_retrieval_scope_current_uploaded_document_still_uses_upload_scope() -> None:
+    decision = decide_retrieval_scope(
+        _settings(),
+        _session(metadata={"upload_collection_id": "owui-chat-1"}, uploaded_doc_ids=["doc-upload-1"]),
+        query="Summarize the attached document.",
+        has_uploads=True,
+        kb_available=True,
+    )
+
+    assert decision.mode == "uploads_only"
+
+
 def test_decide_retrieval_scope_treats_kb_inventory_queries_as_kb_only_even_with_uploads() -> None:
     decision = decide_retrieval_scope(
         _settings(),
@@ -240,6 +273,10 @@ def test_resolve_collection_ids_for_source_filters_session_upload_when_authz_is_
         }
     )
 
+    assert resolve_available_kb_collection_ids(_settings(), session) == (
+        "default",
+        "rfp-corpus",
+    )
     assert resolve_collection_ids_for_source(_settings(), session, source_type="kb") == (
         "default",
         "rfp-corpus",
@@ -249,6 +286,26 @@ def test_resolve_collection_ids_for_source_filters_session_upload_when_authz_is_
         "rfp-corpus",
         "owui-chat-1",
     )
+
+
+def test_merge_scope_metadata_keeps_authz_available_kb_ids_kb_only() -> None:
+    merged = merge_scope_metadata(
+        _settings(),
+        {
+            "collection_id": "owui-chat-1",
+            "upload_collection_id": "owui-chat-1",
+            "kb_collection_id": "default",
+            "access_summary": {
+                "authz_enabled": True,
+                "session_upload_collection_id": "owui-chat-1",
+                "resources": {"collection": {"use": ["default"]}},
+            },
+        },
+    )
+
+    assert merged["upload_collection_id"] == "owui-chat-1"
+    assert merged["kb_collection_id"] == "default"
+    assert merged["available_kb_collection_ids"] == ["default"]
 
 
 def test_resolve_available_kb_collection_ids_and_confirmation_from_session_metadata() -> None:

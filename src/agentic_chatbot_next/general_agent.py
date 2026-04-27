@@ -35,6 +35,71 @@ _GRAPH_EVIDENCE_RE = re.compile(
     r"|\b(?:vendors?|suppliers?|risks?|approvals?|dependencies|program\s+outcomes?)\b.*\b(?:relationships?|connected|graph)\b",
     re.IGNORECASE,
 )
+_CAUSAL_SENTENCE_RE = re.compile(
+    r"\b("
+    r"because(?:\s+of)?|caused\s+by|due\s+to|driven\s+by|drove|drives|"
+    r"resulted\s+from|attributed\s+to|root\s+cause|main\s+issue|reason\s+(?:was|is)"
+    r")\b",
+    re.IGNORECASE,
+)
+_CLAIM_TERM_STOPWORDS = {
+    "about",
+    "answer",
+    "based",
+    "because",
+    "better",
+    "caused",
+    "causal",
+    "cited",
+    "claim",
+    "claims",
+    "could",
+    "demonstrated",
+    "detail",
+    "details",
+    "does",
+    "driven",
+    "drove",
+    "evidence",
+    "from",
+    "have",
+    "issue",
+    "main",
+    "more",
+    "most",
+    "only",
+    "question",
+    "reason",
+    "resulted",
+    "says",
+    "should",
+    "source",
+    "support",
+    "supported",
+    "supporting",
+    "that",
+    "these",
+    "this",
+    "those",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "would",
+}
+_EVIDENCE_TEXT_KEYS = {
+    "chunk_text",
+    "content",
+    "evidence",
+    "excerpt",
+    "page_content",
+    "quote",
+    "relationship_path",
+    "snippet",
+    "summary",
+    "text",
+}
 
 
 @dataclass
@@ -420,6 +485,10 @@ def _has_graph_search_attempt(tool_results: List[Dict[str, Any]]) -> bool:
     return any(_tool_result_name(result) == "search_graph_index" for result in tool_results)
 
 
+def _has_rag_agent_tool_attempt(tool_results: List[Dict[str, Any]]) -> bool:
+    return any(_tool_result_name(result) == "rag_agent_tool" for result in tool_results)
+
+
 def _graph_search_has_error(tool_results: List[Dict[str, Any]]) -> bool:
     for result in tool_results:
         if _tool_result_name(result) != "search_graph_index":
@@ -428,6 +497,158 @@ def _graph_search_has_error(tool_results: List[Dict[str, Any]]) -> bool:
         if payload.get("error"):
             return True
     return False
+
+
+def _graph_hit_is_catalog_only(hit: Dict[str, Any]) -> bool:
+    metadata = dict(hit.get("metadata") or {})
+    evidence_kind = str(hit.get("evidence_kind") or metadata.get("evidence_kind") or "").strip().lower()
+    return bool(
+        str(hit.get("backend") or "").strip().lower() == "catalog"
+        or str(metadata.get("fallback") or "").strip().lower() == "catalog"
+        or bool(metadata.get("catalog_only"))
+        or evidence_kind == "source_candidate"
+    )
+
+
+def _graph_search_has_grounded_evidence(tool_results: List[Dict[str, Any]]) -> bool:
+    for result in tool_results:
+        if _tool_result_name(result) != "search_graph_index":
+            continue
+        payload = _payload_from_tool_result(result)
+        if str(payload.get("evidence_status") or "").strip() == "grounded_graph_evidence":
+            return True
+        for hit in payload.get("results") or []:
+            if not isinstance(hit, dict) or _graph_hit_is_catalog_only(hit):
+                continue
+            if hit.get("chunk_ids") or hit.get("relationship_path") or str(hit.get("summary") or "").strip():
+                return True
+    return False
+
+
+def _graph_source_candidate_doc_ids(tool_results: List[Dict[str, Any]], *, limit: int = 8) -> List[str]:
+    doc_ids: List[str] = []
+    for result in tool_results:
+        if _tool_result_name(result) != "search_graph_index":
+            continue
+        payload = _payload_from_tool_result(result)
+        for hit in payload.get("results") or []:
+            if not isinstance(hit, dict):
+                continue
+            doc_id = str(hit.get("doc_id") or "").strip()
+            if doc_id:
+                doc_ids.append(doc_id)
+        for citation in payload.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            doc_id = str(citation.get("doc_id") or "").strip()
+            if doc_id:
+                doc_ids.append(doc_id)
+    return list(dict.fromkeys(doc_ids))[:limit]
+
+
+def _graph_source_candidate_summaries(tool_results: List[Dict[str, Any]], *, limit: int = 8) -> List[str]:
+    summaries: List[str] = []
+    for result in tool_results:
+        if _tool_result_name(result) != "search_graph_index":
+            continue
+        payload = _payload_from_tool_result(result)
+        for hit in payload.get("results") or []:
+            if not isinstance(hit, dict):
+                continue
+            doc_id = str(hit.get("doc_id") or "").strip()
+            title = str(hit.get("title") or "").strip()
+            source_path = str(hit.get("source_path") or "").strip()
+            label = title or Path(source_path).name or doc_id
+            if not label and not doc_id:
+                continue
+            if doc_id and label and doc_id not in label:
+                summaries.append(f"{label} (doc_id: {doc_id})")
+            else:
+                summaries.append(label or f"doc_id: {doc_id}")
+    return list(dict.fromkeys(summaries))[:limit]
+
+
+def _render_rag_payload(payload: Dict[str, Any]) -> str:
+    if not payload or payload.get("error"):
+        return ""
+    if "answer" not in payload or "citations" not in payload:
+        return ""
+    try:
+        from agentic_chatbot_next.rag.engine import coerce_rag_contract, render_rag_contract
+
+        rendered = render_rag_contract(coerce_rag_contract(payload))
+    except Exception:
+        rendered = str(payload.get("answer") or "").strip()
+    return rendered.strip()
+
+
+def _render_latest_rag_tool_result(tool_results: List[Dict[str, Any]]) -> str:
+    for result in reversed(tool_results):
+        if _tool_result_name(result) != "rag_agent_tool":
+            continue
+        rendered = _render_rag_payload(_payload_from_tool_result(result))
+        if rendered:
+            return rendered
+    return ""
+
+
+def _graph_rag_recovery_context(tool_results: List[Dict[str, Any]]) -> str:
+    doc_ids = _graph_source_candidate_doc_ids(tool_results, limit=8)
+    if not doc_ids:
+        return ""
+    candidate_summaries = _graph_source_candidate_summaries(tool_results, limit=8)
+    candidate_text = "; ".join(candidate_summaries) if candidate_summaries else ", ".join(doc_ids)
+    return (
+        "Graph search returned source candidates only, not answerable evidence. "
+        "Use grounded retrieval over these candidate doc ids before answering: "
+        + ", ".join(doc_ids)
+        + ". Start with the original user question. If the initial retrieval is weak, reason about query rewrites "
+        "using only visible information from the user question, source titles, candidate metadata, and retrieved snippets. "
+        "Try claim-focused, entity-focused, refutation-focused, causal-factor-focused, and date/status/outcome-focused "
+        "rewrites only when those concepts are present in the visible information. Evaluate whether snippets explicitly "
+        "support, refute, or fail to address the needed answer claims. Candidate sources: "
+        + candidate_text
+        + "."
+    )
+
+
+def _run_graph_catalog_rag_recovery(
+    tool_map: Dict[str, Any],
+    messages: List[Any],
+    tool_results: List[Dict[str, Any]],
+    *,
+    user_text: str,
+    callbacks: List[Any],
+    tool_calls: int,
+    max_tool_calls: int,
+) -> tuple[str, int, List[str]]:
+    if "rag_agent_tool" not in tool_map or _has_rag_agent_tool_attempt(tool_results) or tool_calls >= max_tool_calls:
+        return "", tool_calls, []
+    preferred_doc_ids = _graph_source_candidate_doc_ids(tool_results, limit=8)
+    args: Dict[str, Any] = {
+        "query": user_text,
+        "conversation_context": _graph_rag_recovery_context(tool_results),
+        "preferred_doc_ids_csv": ",".join(preferred_doc_ids),
+        "must_include_uploads": False,
+        "top_k_vector": 16,
+        "top_k_keyword": 16,
+        "max_retries": 2,
+        "search_mode": "deep",
+        "max_search_rounds": 2,
+    }
+    try:
+        output = tool_map["rag_agent_tool"].invoke(args, config={"callbacks": callbacks})
+    except TypeError:
+        output = tool_map["rag_agent_tool"].invoke(args)
+    except Exception as exc:
+        output = {"error": str(exc)}
+    tool_calls += 1
+    out_text = json.dumps(output, ensure_ascii=False) if isinstance(output, (dict, list)) else str(output)
+    tool_results.append({"tool": "rag_agent_tool", "args": args, "output": out_text})
+    messages.append(ToolMessage(content=out_text, tool_call_id=f"fallback_rag_agent_tool_{tool_calls}", name="rag_agent_tool"))
+    payload = output if isinstance(output, dict) else extract_json(out_text)
+    rendered = _render_rag_payload(payload if isinstance(payload, dict) else {})
+    return rendered, tool_calls, ["graph_catalog_to_rag_recovery"] if rendered else ["graph_catalog_rag_recovery_failed"]
 
 
 def _normalize_planned_graph_tool_args(
@@ -458,10 +679,208 @@ def _graph_evidence_missing_text(user_text: str, tool_results: List[Dict[str, An
             f"I found {target}, but the graph search tool failed before returning relationship evidence. "
             "I do not have enough GraphRAG evidence to answer the relationship question without guessing."
         )
+    if _graph_source_candidate_doc_ids(tool_results):
+        return (
+            f"I found source candidates in {target}, but the graph search did not return chunks, excerpts, or relationship paths. "
+            "Those catalog matches are not enough evidence for a causal answer, so I should not infer the answer from metadata alone."
+        )
     return (
         f"I do not have GraphRAG search evidence from {target} for this relationship request. "
         "I can confirm catalog/readiness information only, so I should not infer vendors, risks, approvals, dependencies, or outcomes from metadata alone."
     )
+
+
+def _markdown_link(label: str, url: str) -> str:
+    clean_label = str(label or url or "source").replace("\n", " ").strip()
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        return clean_label
+    escaped_label = clean_label.replace("[", "\\[").replace("]", "\\]")
+    escaped_url = clean_url.replace(" ", "%20").replace(")", "%29")
+    return f"[{escaped_label}]({escaped_url})"
+
+
+def _graph_citations_from_tool_results(tool_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    citations_by_id: Dict[str, Dict[str, Any]] = {}
+    for result in tool_results:
+        if _tool_result_name(result) != "search_graph_index":
+            continue
+        payload = _payload_from_tool_result(result)
+        for citation in payload.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            citation_id = str(citation.get("citation_id") or "").strip()
+            if citation_id:
+                citations_by_id.setdefault(citation_id, dict(citation))
+        if citations_by_id:
+            continue
+        for hit in payload.get("results") or []:
+            if not isinstance(hit, dict):
+                continue
+            for citation_id in [str(item) for item in (hit.get("citation_ids") or []) if str(item)]:
+                citations_by_id.setdefault(
+                    citation_id,
+                    {
+                        "citation_id": citation_id,
+                        "doc_id": str(hit.get("doc_id") or ""),
+                        "title": str(hit.get("title") or hit.get("doc_id") or citation_id),
+                        "source_path": str(hit.get("source_path") or ""),
+                        "url": "",
+                    },
+                )
+    return list(citations_by_id.values())
+
+
+def _append_missing_graph_citations(final_text: str, tool_results: List[Dict[str, Any]]) -> str:
+    if not _has_graph_search_attempt(tool_results):
+        return str(final_text or "")
+    citations = _graph_citations_from_tool_results(tool_results)
+    if not citations:
+        return str(final_text or "")
+    text = str(final_text or "").strip()
+    if re.search(r"(?im)^#{0,6}\s*citations\s*:", text) or re.search(r"(?im)^citations\s*$", text):
+        return text
+    used_ids = [
+        str(citation.get("citation_id") or "").strip()
+        for citation in citations
+        if str(citation.get("citation_id") or "").strip()
+        and str(citation.get("citation_id") or "").strip() in text
+    ]
+    if not used_ids:
+        used_ids = [str(citation.get("citation_id") or "").strip() for citation in citations[:8]]
+    used = set(used_ids)
+    lines = ["Citations:"]
+    for citation in citations:
+        citation_id = str(citation.get("citation_id") or "").strip()
+        if not citation_id or citation_id not in used:
+            continue
+        title = str(citation.get("title") or citation.get("doc_id") or citation_id)
+        rendered_title = _markdown_link(title, str(citation.get("url") or ""))
+        details = []
+        doc_id = str(citation.get("doc_id") or "").strip()
+        source_path = str(citation.get("source_path") or "").strip()
+        if doc_id:
+            details.append(f"doc_id: {doc_id}")
+        if source_path:
+            details.append(f"source: {Path(source_path).name or source_path}")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        lines.append(f"- [{citation_id}] {rendered_title}{suffix}")
+    if len(lines) == 1:
+        return text
+    return f"{text}\n\n" + "\n".join(lines)
+
+
+def _append_evidence_text_parts(value: Any, parts: List[str]) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            parts.append(text)
+        return
+    if isinstance(value, (int, float, bool)):
+        return
+    if isinstance(value, list):
+        for item in value:
+            _append_evidence_text_parts(item, parts)
+        return
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if str(key) in _EVIDENCE_TEXT_KEYS:
+                _append_evidence_text_parts(nested, parts)
+
+
+def _evidence_text_from_tool_results(tool_results: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for result in tool_results:
+        tool_name = _tool_result_name(result)
+        payload = _payload_from_tool_result(result)
+        if not payload:
+            continue
+        if tool_name == "rag_agent_tool":
+            for citation in payload.get("citations") or []:
+                if isinstance(citation, dict):
+                    _append_evidence_text_parts(citation, parts)
+            for key in ("supporting_evidence", "evidence", "chunks", "retrieved_chunks", "source_chunks"):
+                _append_evidence_text_parts(payload.get(key), parts)
+        elif tool_name == "search_graph_index":
+            for citation in payload.get("citations") or []:
+                if isinstance(citation, dict) and not citation.get("catalog_only"):
+                    _append_evidence_text_parts(citation, parts)
+            for hit in payload.get("results") or []:
+                if isinstance(hit, dict) and not _graph_hit_is_catalog_only(hit):
+                    _append_evidence_text_parts(hit, parts)
+    return "\n".join(parts)
+
+
+def _answer_body_without_citations(final_text: str) -> str:
+    return re.split(r"(?im)^\s*#{0,6}\s*citations\s*:?\s*$", str(final_text or ""), maxsplit=1)[0]
+
+
+def _claim_terms(value: str) -> List[str]:
+    terms: List[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", str(value or "").casefold()):
+        normalized = token.replace("_", "-").strip("-")
+        for part in normalized.split("-"):
+            clean = part.strip()
+            if len(clean) < 4 or clean in _CLAIM_TERM_STOPWORDS or clean in seen:
+                continue
+            seen.add(clean)
+            terms.append(clean)
+    return terms
+
+
+def _causal_claim_sentences(final_text: str) -> List[str]:
+    body = _answer_body_without_citations(final_text)
+    sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+|\n+", body) if item.strip()]
+    return [sentence for sentence in sentences if _CAUSAL_SENTENCE_RE.search(sentence)]
+
+
+def _unsupported_causal_claim_terms(
+    final_text: str,
+    tool_results: List[Dict[str, Any]],
+    *,
+    user_text: str,
+) -> List[str]:
+    sentences = _causal_claim_sentences(final_text)
+    if not sentences:
+        return []
+    evidence_terms = set(_claim_terms(_evidence_text_from_tool_results(tool_results)))
+    user_terms = set(_claim_terms(user_text))
+    unsupported: List[str] = []
+    for sentence in sentences:
+        for term in _claim_terms(sentence):
+            if term in user_terms or term in evidence_terms:
+                continue
+            unsupported.append(term)
+    unique = list(dict.fromkeys(unsupported))
+    return unique if len(unique) >= 2 else []
+
+
+def _unsupported_claims_rejection_text(unsupported_terms: List[str]) -> str:
+    terms = ", ".join(dict.fromkeys(term for term in unsupported_terms if term))
+    return (
+        "I do not have cited evidence supporting these causal claim terms: "
+        f"{terms}. The cited snippets do not support those details, so I should not present them as the answer."
+    )
+
+
+def _apply_final_evidence_verifier(
+    final_text: str,
+    tool_results: List[Dict[str, Any]],
+    *,
+    user_text: str,
+) -> tuple[str, List[str]]:
+    if not any(_tool_result_name(result) in {"rag_agent_tool", "search_graph_index"} for result in tool_results):
+        return str(final_text or ""), []
+    unsupported = _unsupported_causal_claim_terms(final_text, tool_results, user_text=user_text)
+    if not unsupported:
+        return str(final_text or ""), []
+    rag_rendered = _render_latest_rag_tool_result(tool_results)
+    if rag_rendered and not _unsupported_causal_claim_terms(rag_rendered, tool_results, user_text=user_text):
+        return rag_rendered, ["unsupported_causal_claims_replaced_with_rag_answer"]
+    return _unsupported_claims_rejection_text(unsupported), ["unsupported_causal_claims_rejected"]
 
 
 def _synthesize_tool_results(
@@ -477,7 +896,7 @@ def _synthesize_tool_results(
         "You are recovering a final answer after a tool-using agent run.\n"
         "Use the tool results to answer the user's request clearly and concisely.\n"
         "Preserve citations and uncertainty, and do not dump raw JSON.\n"
-        "When tool results include search_graph_index JSON, treat its results as graph evidence; cite result titles, doc ids, source paths, or chunk ids when available.\n"
+        "When tool results include search_graph_index JSON, only treat results as graph evidence when they include non-catalog chunks, relationships, or excerpts. If evidence_status is source_candidates_only, those are source candidates only; do not synthesize causal claims from them.\n"
         "Do not invent Cypher queries, schema labels, relationship names, or how-to steps unless the user explicitly asks for query syntax.\n"
         f"Recovery reason: {recovery_reason}."
     )
@@ -1290,6 +1709,34 @@ def _has_latest_user_message(messages: List[Any], user_text: str) -> bool:
     return str(getattr(last, "content", "") or "").strip() == user_text.strip()
 
 
+def build_react_agent_graph(
+    chat_llm: Any,
+    *,
+    tools: List[Any],
+    max_tool_calls: int = 12,
+    max_parallel_tool_calls: int = 4,
+    context_budget_manager: Any | None = None,
+    tool_context: Any | None = None,
+    providers: Any | None = None,
+) -> Any:
+    from langgraph.prebuilt import create_react_agent
+
+    tool_node = PolicyAwareToolNode(
+        tools,
+        max_tool_calls=max_tool_calls,
+        max_parallel_tool_calls=max_parallel_tool_calls,
+        context_budget_manager=context_budget_manager,
+        tool_context=tool_context,
+    )
+    pre_model_hook = build_microcompact_hook(
+        context_budget_manager,
+        providers=providers,
+        tool_context=tool_context,
+    )
+    graph_kwargs = {"pre_model_hook": pre_model_hook} if pre_model_hook is not None else {}
+    return create_react_agent(chat_llm, tools=tool_node, **graph_kwargs)
+
+
 def run_general_agent(
     chat_llm: Any,
     *,
@@ -1335,22 +1782,15 @@ def run_general_agent(
             tool_context=tool_context,
         )
 
-    from langgraph.prebuilt import create_react_agent
-
-    tool_node = PolicyAwareToolNode(
-        tools,
+    graph = build_react_agent_graph(
+        chat_llm,
+        tools=tools,
         max_tool_calls=max_tool_calls,
         max_parallel_tool_calls=max_parallel_tool_calls,
         context_budget_manager=context_budget_manager,
         tool_context=tool_context,
-    )
-    pre_model_hook = build_microcompact_hook(
-        context_budget_manager,
         providers=providers,
-        tool_context=tool_context,
     )
-    graph_kwargs = {"pre_model_hook": pre_model_hook} if pre_model_hook is not None else {}
-    graph = create_react_agent(chat_llm, tools=tool_node, **graph_kwargs)
     recursion_limit = (max(max_steps, max_tool_calls) + 1) * 2 + 1
     try:
         result = graph.invoke(
@@ -1405,6 +1845,55 @@ def run_general_agent(
             *list(metadata.get("recovery") or []),
         ]
         return final_text, updated_messages, metadata
+    collected_tool_results = _collect_tool_results(updated_messages)
+    if graph_grounded_request and _has_graph_search_attempt(collected_tool_results) and not _graph_search_has_grounded_evidence(collected_tool_results):
+        rag_rendered = _render_latest_rag_tool_result(collected_tool_results)
+        if rag_rendered:
+            rag_rendered, verifier_recovery = _apply_final_evidence_verifier(
+                rag_rendered,
+                collected_tool_results,
+                user_text=user_text,
+            )
+            return rag_rendered, updated_messages + [AIMessage(content=rag_rendered)], {
+                "steps": steps,
+                "tool_calls": tool_calls_used,
+                "recovery": ["graph_catalog_used_rag_tool", *verifier_recovery, *recovery],
+            }
+        recovered, recovered_tool_calls, recovered_recovery = _run_graph_catalog_rag_recovery(
+            tool_map,
+            updated_messages,
+            collected_tool_results,
+            user_text=user_text,
+            callbacks=callbacks,
+            tool_calls=tool_calls_used,
+            max_tool_calls=max_tool_calls,
+        )
+        if recovered:
+            recovered, verifier_recovery = _apply_final_evidence_verifier(
+                recovered,
+                collected_tool_results,
+                user_text=user_text,
+            )
+            return recovered, updated_messages + [AIMessage(content=recovered)], {
+                "steps": steps,
+                "tool_calls": recovered_tool_calls,
+                "recovery": [*recovered_recovery, *verifier_recovery, *recovery],
+            }
+        final_text = _graph_evidence_missing_text(user_text, collected_tool_results)
+        return final_text, updated_messages + [AIMessage(content=final_text)], {
+            "steps": steps,
+            "tool_calls": recovered_tool_calls,
+            "recovery": ["graph_catalog_only", *recovered_recovery, *recovery],
+        }
+    final_text = _append_missing_graph_citations(final_text, collected_tool_results)
+    verified_text, verifier_recovery = _apply_final_evidence_verifier(
+        final_text,
+        collected_tool_results,
+        user_text=user_text,
+    )
+    if verifier_recovery:
+        final_text = verified_text
+        recovery = [*verifier_recovery, *recovery]
     if recovery:
         updated_messages = list(updated_messages) + [AIMessage(content=final_text)]
     return str(final_text), updated_messages, {"steps": steps, "tool_calls": tool_calls_used, "recovery": recovery}
@@ -1589,6 +2078,49 @@ def _run_plan_execute_fallback(
             "recovery": ["graph_search_missing"],
         }
 
+    if graph_grounded_request and _has_graph_search_attempt(tool_results) and not _graph_search_has_grounded_evidence(tool_results):
+        rag_rendered = _render_latest_rag_tool_result(tool_results)
+        if rag_rendered:
+            rag_rendered, verifier_recovery = _apply_final_evidence_verifier(
+                rag_rendered,
+                tool_results,
+                user_text=user_text,
+            )
+            messages.append(AIMessage(content=rag_rendered))
+            return str(rag_rendered), messages, {
+                "fallback": "plan_execute",
+                "tool_calls": tool_calls,
+                "recovery": ["graph_catalog_used_rag_tool", *verifier_recovery],
+            }
+        recovered, tool_calls, recovered_recovery = _run_graph_catalog_rag_recovery(
+            tool_map,
+            messages,
+            tool_results,
+            user_text=user_text,
+            callbacks=callbacks,
+            tool_calls=tool_calls,
+            max_tool_calls=max_tool_calls,
+        )
+        if recovered:
+            recovered, verifier_recovery = _apply_final_evidence_verifier(
+                recovered,
+                tool_results,
+                user_text=user_text,
+            )
+            messages.append(AIMessage(content=recovered))
+            return str(recovered), messages, {
+                "fallback": "plan_execute",
+                "tool_calls": tool_calls,
+                "recovery": [*recovered_recovery, *verifier_recovery],
+            }
+        final_text = _graph_evidence_missing_text(user_text, tool_results)
+        messages.append(AIMessage(content=final_text))
+        return str(final_text), messages, {
+            "fallback": "plan_execute",
+            "tool_calls": tool_calls,
+            "recovery": ["graph_catalog_only", *recovered_recovery],
+        }
+
     if analyst_intent is not None:
         latest_nlp_payload = None
         has_return_file = False
@@ -1656,8 +2188,8 @@ def _run_plan_execute_fallback(
     synth_system = (
         "You are a helpful assistant. Use the TOOL_RESULTS to answer the USER_REQUEST.\n"
         "If TOOL_RESULTS include a rag_agent_tool JSON output, use its 'answer' and include citations.\n"
-        "If TOOL_RESULTS include search_graph_index JSON output, use its `results` as graph evidence and cite result titles, doc ids, source paths, or chunk ids when available.\n"
-        "If graph search results are empty or errored, say the graph evidence was insufficient instead of inventing relationships.\n"
+        "If TOOL_RESULTS include search_graph_index JSON output, use its `results` as graph evidence only when they include non-catalog chunks, relationship paths, or excerpts. Catalog-only results are source candidates, not evidence.\n"
+        "If graph search results are empty, errored, or source_candidates_only without a rag_agent_tool answer, say the graph evidence was insufficient instead of inventing relationships or causes.\n"
         "Do not invent Cypher queries, schema labels, relationship names, or how-to query syntax unless the user explicitly requested query syntax.\n"
         "Do not dump raw JSON; write a user-facing response."
     )
@@ -1692,5 +2224,12 @@ def _run_plan_execute_fallback(
         )
         final_text = fallback_text
         recovery.extend(fallback_recovery)
+    final_text = _append_missing_graph_citations(str(final_text), tool_results)
+    final_text, verifier_recovery = _apply_final_evidence_verifier(
+        final_text,
+        tool_results,
+        user_text=user_text,
+    )
+    recovery.extend(verifier_recovery)
     messages.append(AIMessage(content=str(final_text)))
     return str(final_text), messages, {"fallback": "plan_execute", "tool_calls": tool_calls, "recovery": recovery}

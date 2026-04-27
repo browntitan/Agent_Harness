@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from agentic_chatbot_next.rag.hints import normalize_structured_query
 from agentic_chatbot_next.rag.doc_targets import extract_named_document_targets
@@ -49,6 +49,22 @@ _BROAD_OR_STAGED_RE = re.compile(
     r"\b(across|whole|entire|every|all\s+(?:documents|docs|files|kb|knowledge\s*base|corpus)|"
     r"deep|detailed|thorough|comprehensive|verify|validate|cross[-\s]?check|multi[-\s]?stage|"
     r"plan|planner|background|worker|workers|orchestrate|coordinate)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_REVIEW_RE = re.compile(
+    r"\b(clause|clauses|redline|redlines|marked\s+changes?|tracked\s+changes?|supplier\s+position)\b",
+    re.IGNORECASE,
+)
+_POLICY_EVIDENCE_RE = re.compile(
+    r"\b(policy|policies|guidance|knowledge\s+base|kb|collection|internal\s+policy)\b",
+    re.IGNORECASE,
+)
+_PER_ITEM_LOOP_RE = re.compile(
+    r"\b(each|every|all|per[-\s]?item|loop|fan\s*out|for\s+each)\b",
+    re.IGNORECASE,
+)
+_BUYER_RESPONSE_RE = re.compile(
+    r"\b(buyer|supplier|write\s+back|recommended\s+action|recommendation|risk\s+level)\b",
     re.IGNORECASE,
 )
 
@@ -107,7 +123,10 @@ def _is_preserved_fast_path(query: str, session_metadata: Mapping[str, Any] | No
     normalized = _normalized_query(query)
     if not normalized:
         return True
-    if _REQUIREMENTS_RE.search(normalized):
+    if _REQUIREMENTS_RE.search(normalized) and not is_clause_policy_workflow(
+        normalized,
+        session_metadata=session_metadata,
+    ):
         return True
     inventory_type = classify_inventory_query(normalized)
     if inventory_type == INVENTORY_QUERY_GRAPH_INDEXES:
@@ -121,6 +140,61 @@ def _is_preserved_fast_path(query: str, session_metadata: Mapping[str, Any] | No
     return is_active_doc_focus_followup(normalized, session_metadata)
 
 
+def is_clause_policy_workflow(
+    query: str,
+    *,
+    session_metadata: Mapping[str, Any] | None = None,
+) -> bool:
+    normalized = _normalized_query(query)
+    if not normalized:
+        return False
+    metadata = dict(session_metadata or {})
+    has_upload_context = bool(metadata.get("uploaded_doc_ids") or metadata.get("has_uploads"))
+    mixed_sources = bool(_CLAUSE_REVIEW_RE.search(normalized)) and bool(_POLICY_EVIDENCE_RE.search(normalized))
+    needs_loop_or_response = bool(_PER_ITEM_LOOP_RE.search(normalized)) or bool(_BUYER_RESPONSE_RE.search(normalized))
+    return bool(mixed_sources and needs_loop_or_response and (has_upload_context or "uploaded" in normalized.casefold()))
+
+
+def build_planner_input_packet(
+    query: str,
+    *,
+    session_metadata: Mapping[str, Any] | None = None,
+    available_agents: Sequence[str] | None = None,
+    available_tools: Sequence[str] | None = None,
+    available_skill_packs: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    metadata = dict(session_metadata or {})
+    effective = dict(metadata.get("effective_capabilities") or {})
+    risk_flags: list[str] = []
+    if is_clause_policy_workflow(query, session_metadata=metadata):
+        risk_flags.extend(["mixed_evidence_scopes", "requires_per_item_loop", "buyer_response_policy_review"])
+    if metadata.get("uploaded_doc_ids"):
+        risk_flags.append("has_upload_artifacts")
+    if metadata.get("requested_kb_collection_id") or metadata.get("kb_collection_id"):
+        risk_flags.append("selected_kb_collection")
+    return {
+        "user_request": _normalized_query(query),
+        "attachments": list(metadata.get("uploaded_doc_ids") or []),
+        "selected_kb_collections": [
+            str(item)
+            for item in (
+                metadata.get("search_collection_ids")
+                or [metadata.get("requested_kb_collection_id") or metadata.get("kb_collection_id")]
+            )
+            if str(item or "").strip()
+        ],
+        "effective_capability_profile": effective,
+        "available_agents": list(available_agents or effective.get("enabled_agents") or []),
+        "available_tools": list(available_tools or effective.get("enabled_tools") or []),
+        "available_skill_packs": list(available_skill_packs or effective.get("enabled_skill_pack_ids") or []),
+        "permission_mode": str(effective.get("permission_mode") or metadata.get("permission_mode") or "default"),
+        "preserved_fast_path_policy": str(
+            effective.get("fast_path_policy") or metadata.get("fast_path_policy") or "inventory_plus_simple"
+        ),
+        "risk_flags": sorted(set(risk_flags)),
+    }
+
+
 def detect_task_slices(
     query: str,
     *,
@@ -131,6 +205,27 @@ def detect_task_slices(
         return ()
 
     slices: list[TaskDecompositionSlice] = []
+    if is_clause_policy_workflow(normalized, session_metadata=session_metadata):
+        return (
+            TaskDecompositionSlice(
+                kind="document_clause_redline_extraction",
+                executor="general",
+                description="Extract structured clauses and redlines from uploaded document artifacts.",
+                independent=False,
+            ),
+            TaskDecompositionSlice(
+                kind="policy_guidance_fanout",
+                executor="rag_worker",
+                description="Search the selected policy collection for each extracted clause or redline.",
+                independent=False,
+            ),
+            TaskDecompositionSlice(
+                kind="buyer_response_synthesis",
+                executor="general",
+                description="Synthesize buyer-facing actions, risk levels, and unresolved questions with evidence.",
+                independent=False,
+            ),
+        )
     if _ARITHMETIC_RE.search(normalized):
         slices.append(
             TaskDecompositionSlice(
@@ -203,6 +298,15 @@ def decide_task_decomposition(
         )
 
     normalized = _normalized_query(query)
+    if is_clause_policy_workflow(normalized, session_metadata=session_metadata):
+        return TaskDecompositionDecision(
+            is_mixed_intent=True,
+            selected_agent="coordinator",
+            route_kind="coordinator",
+            reason="clause_redline_policy_workflow_requires_task_graph",
+            slices=slices,
+            original_agent=original_agent,
+        )
     if _BROAD_OR_STAGED_RE.search(normalized) or len(slices) > 3:
         return TaskDecompositionDecision(
             is_mixed_intent=True,
@@ -228,7 +332,9 @@ def decide_task_decomposition(
 __all__ = [
     "TaskDecompositionDecision",
     "TaskDecompositionSlice",
+    "build_planner_input_packet",
     "decide_task_decomposition",
     "detect_task_slices",
     "is_mixed_utility_retrieval_request",
+    "is_clause_policy_workflow",
 ]

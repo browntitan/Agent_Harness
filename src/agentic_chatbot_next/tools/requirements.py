@@ -11,7 +11,7 @@ from langchain.tools import tool
 from agentic_chatbot_next.rag.doc_targets import resolve_indexed_docs as resolve_named_indexed_docs
 from agentic_chatbot_next.rag.ingest import resolve_record_source_identity, select_active_kb_record
 from agentic_chatbot_next.rag.requirements import (
-    MANDATORY_MODE,
+    BROAD_REQUIREMENT_MODE,
     STRICT_SHALL_MODE,
     build_requirement_statement_records,
     format_requirement_location,
@@ -372,7 +372,7 @@ def make_requirement_tools(settings: object, stores: object, session: object) ->
         collection_id: str = "",
         document_names: Sequence[str] | None = None,
         all_documents: bool = False,
-        mode: str = MANDATORY_MODE,
+        mode: str = BROAD_REQUIREMENT_MODE,
         max_preview_rows: int = 8,
         export: bool = False,
         filename: str = "",
@@ -394,7 +394,7 @@ def make_requirement_tools(settings: object, stores: object, session: object) ->
         collection_id: str = "",
         document_names: List[str] | None = None,
         all_documents: bool = False,
-        mode: str = MANDATORY_MODE,
+        mode: str = BROAD_REQUIREMENT_MODE,
         max_preview_rows: int = 8,
     ) -> Dict[str, Any]:
         """Extract persisted requirement statements from uploads or one KB collection."""
@@ -414,7 +414,7 @@ def make_requirement_tools(settings: object, stores: object, session: object) ->
         collection_id: str = "",
         document_names: List[str] | None = None,
         all_documents: bool = False,
-        mode: str = MANDATORY_MODE,
+        mode: str = BROAD_REQUIREMENT_MODE,
         filename: str = "",
         max_preview_rows: int = 8,
     ) -> Dict[str, Any]:

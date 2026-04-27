@@ -137,6 +137,8 @@ def test_contract_round_trips_preserve_fields() -> None:
                 location="p.1",
                 snippet="snippet",
                 collection_id="default",
+                url="/v1/documents/doc-1/source?conversation_id=conversation",
+                source_path="/kb/Doc.pdf",
             )
         ],
         used_citation_ids=["c1"],
@@ -172,6 +174,8 @@ def test_rag_citations_preserve_and_render_collection_id() -> None:
             "title": "api_rate_limits.md",
             "source_type": "kb",
             "collection_id": "default",
+            "source_url": "/v1/documents/doc-rate/source?conversation_id=conv",
+            "source_path": "/kb/api_rate_limits.md",
             "chunk_index": 1,
         },
     )
@@ -188,6 +192,7 @@ def test_rag_citations_preserve_and_render_collection_id() -> None:
     )
 
     assert "KB Collection: default" in rendered
+    assert "[api_rate_limits.md](/v1/documents/doc-rate/source?conversation_id=conv)" in rendered
 
 
 def test_runtime_message_langchain_conversion_preserves_identity_fields() -> None:
@@ -231,9 +236,15 @@ def test_requirements_document_selection_clarification_resumes_original_request(
             },
             "uploaded_doc_ids": ["doc-a", "doc-b"],
             "upload_collection_id": "uploads",
+            "requirements_candidate_documents": [
+                {"doc_id": "doc-a", "title": "SPEC_A.docx"},
+                {"doc_id": "doc-b", "title": "SPEC_B.docx"},
+            ],
         },
     )
 
     assert resumed.answer_contract.kind == "requirements_extraction"
     assert resumed.requested_scope["document_names"] == ["SPEC_A.docx"]
+    assert resumed.requested_scope["document_ids"] == ["doc-a"]
+    assert resumed.requested_scope["selected_doc_ids"] == ["doc-a"]
     assert "SPEC_A.docx" in resumed.effective_user_text

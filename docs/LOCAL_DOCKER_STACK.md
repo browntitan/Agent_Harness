@@ -46,6 +46,57 @@ Start Langfuse only when you need observability:
 docker compose --profile observability up -d --no-build
 ```
 
+## Dev Overlay
+
+Use the dev overlay when you want Python hot reload and do not want to rebuild
+the app image for every `src/` edit.
+
+Start or switch into dev mode:
+
+```bash
+cd /Users/shivbalodi/Desktop/Rag_Research/agentic_chatbot_v3
+docker compose down --remove-orphans
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build app app-bootstrap openwebui openwebui-bootstrap control-panel-dev
+```
+
+After that first build, you can bring the dev stack back without rebuilding:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build app openwebui control-panel-dev
+```
+
+In this mode:
+
+- `./src` is mounted into `/app/src`
+- `./run.py` is mounted into `/app/run.py`
+- the API runs through uvicorn with `--reload`
+- the control panel is served by Vite on `http://127.0.0.1:4174`
+
+Use this workflow:
+
+- `src/` changes: save and let uvicorn reload automatically
+- `data/agents`, `data/prompts`, or `data/router` changes: restart `app`
+- schema/bootstrap changes: rerun `app-bootstrap`
+- dependency or image changes such as `requirements.txt` or `Dockerfile`: rebuild
+
+Helpful commands:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart app
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate --no-deps app-bootstrap
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build app app-bootstrap
+```
+
+Confirm that dev mode is active:
+
+```bash
+docker inspect agentic-chatbot-v3-app-1 --format '{{json .Config.Cmd}}'
+docker inspect agentic-chatbot-v3-app-1 --format '{{range .Mounts}}{{println .Destination " <- " .Source}}{{end}}'
+```
+
+The running `app` container should show a uvicorn `--reload` command and a bind
+mount for `/app/src`.
+
 ## Services
 
 - `rag-postgres`: PostgreSQL with pgvector

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Dict, List
 
 from agentic_chatbot_next.contracts.rag import Citation, RagContract, RetrievalSummary
 from agentic_chatbot_next.rag.hints import (
+    answer_contract_allows_inventory,
+    answer_contract_kind,
     coerce_controller_hints,
     normalize_coverage_goal,
     normalize_research_profile,
@@ -14,6 +17,7 @@ from agentic_chatbot_next.rag.hints import (
 )
 from agentic_chatbot_next.rag.adaptive import CorpusRetrievalAdapter, run_retrieval_controller
 from agentic_chatbot_next.rag.citations import build_citations
+from agentic_chatbot_next.rag.source_links import make_document_source_url_resolver
 from agentic_chatbot_next.rag.collection_selection import (
     apply_selection_to_session,
     select_collection_for_query,
@@ -36,12 +40,14 @@ from agentic_chatbot_next.rag.inventory import (
     INVENTORY_QUERY_GRAPH_FILE,
     INVENTORY_QUERY_KB_FILE,
     INVENTORY_QUERY_KB_COLLECTIONS,
+    INVENTORY_QUERY_NONE,
     INVENTORY_QUERY_SESSION_ACCESS,
     classify_inventory_query,
     dispatch_authoritative_inventory,
     inventory_query_requests_grounded_analysis,
     sync_session_kb_collection_state,
 )
+from agentic_chatbot_next.rag.query_normalization import normalize_retrieval_question
 from agentic_chatbot_next.rag.retrieval import GradedChunk
 from agentic_chatbot_next.rag.retrieval_scope import (
     RetrievalScopeDecision,
@@ -49,7 +55,7 @@ from agentic_chatbot_next.rag.retrieval_scope import (
     has_upload_evidence,
     resolve_kb_collection_id,
 )
-from agentic_chatbot_next.rag.synthesis import generate_grounded_answer
+from agentic_chatbot_next.rag.synthesis import build_extractive_grounded_answer, generate_grounded_answer
 from agentic_chatbot_next.runtime.deep_rag import (
     deep_rag_controller_hints,
     deep_rag_search_mode,
@@ -330,10 +336,163 @@ def _build_negative_evidence_answer(query: str, retrieval_run: Any) -> Dict[str,
     }
 
 
+def _build_cited_evidence_fallback_answer(query: str, docs: list[Any]) -> Dict[str, Any]:
+    lines = [
+        "I found relevant evidence, but could not produce a fully cited synthesis. "
+        "Here is the grounded evidence I can cite directly:"
+    ]
+    used_citation_ids: List[str] = []
+    seen: set[str] = set()
+    for doc in docs:
+        metadata = dict(getattr(doc, "metadata", {}) or {})
+        citation_id = str(metadata.get("chunk_id") or "").strip()
+        if not citation_id or citation_id in seen:
+            continue
+        seen.add(citation_id)
+        title = str(metadata.get("title") or metadata.get("doc_id") or "Retrieved evidence").strip()
+        snippet = _summary_snippet(getattr(doc, "page_content", ""), limit=220)
+        if not snippet:
+            continue
+        lines.append(f"- {title}: {snippet} ({citation_id})")
+        used_citation_ids.append(citation_id)
+        if len(used_citation_ids) >= 4:
+            break
+    if not used_citation_ids:
+        return {
+            "answer": (
+                "I could not produce a safely cited answer from the retrieved evidence. "
+                "Please narrow the request or provide more source material."
+            ),
+            "used_citation_ids": [],
+            "followups": [],
+            "warnings": ["MISSING_VALID_CITATIONS", "NO_CITABLE_EVIDENCE"],
+            "confidence_hint": 0.15,
+        }
+    return {
+        "answer": "\n".join(lines),
+        "used_citation_ids": used_citation_ids,
+        "followups": [],
+        "warnings": ["MISSING_VALID_CITATIONS_FALLBACK"],
+        "confidence_hint": 0.35,
+    }
+
+
+_CITATION_AUGMENT_STOPWORDS = {
+    "about",
+    "after",
+    "answer",
+    "briefly",
+    "citation",
+    "citations",
+    "does",
+    "from",
+    "knowledge",
+    "search",
+    "source",
+    "sources",
+    "that",
+    "this",
+    "what",
+    "when",
+    "which",
+    "with",
+}
+
+
+def _content_terms(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[A-Za-z0-9_]{2,}", str(value or "").casefold())
+        if token not in _CITATION_AUGMENT_STOPWORDS
+    }
+
+
+def _augment_used_citation_ids(
+    *,
+    query: str,
+    answer: str,
+    docs: list[Any],
+    used_citation_ids: list[str],
+    max_extra: int = 2,
+) -> list[str]:
+    if not used_citation_ids:
+        return used_citation_ids
+    query_terms = _content_terms(query)
+    answer_terms = _content_terms(answer)
+    if not query_terms or not answer_terms:
+        return used_citation_ids
+    used = list(dict.fromkeys(str(item) for item in used_citation_ids if str(item)))
+    used_set = set(used)
+    candidates: list[tuple[float, str]] = []
+    for doc in docs:
+        metadata = dict(getattr(doc, "metadata", {}) or {})
+        citation_id = str(metadata.get("chunk_id") or "").strip()
+        if not citation_id or citation_id in used_set:
+            continue
+        title_source = " ".join(
+            [
+                str(metadata.get("title") or ""),
+                str(metadata.get("source_path") or ""),
+                str(metadata.get("section_title") or ""),
+                str(metadata.get("sheet_name") or ""),
+                str(metadata.get("cell_range") or ""),
+            ]
+        )
+        content = str(getattr(doc, "page_content", "") or "")
+        evidence_terms = _content_terms(title_source + " " + content[:1200])
+        title_terms = _content_terms(title_source)
+        query_overlap = len(query_terms & evidence_terms)
+        answer_overlap = len(answer_terms & evidence_terms)
+        title_overlap = len(query_terms & title_terms)
+        if query_overlap < 2 or answer_overlap < 1:
+            continue
+        score = (query_overlap * 2.0) + answer_overlap + (title_overlap * 1.5)
+        score += float(metadata.get("_adaptive_score") or 0.0) * 0.05
+        candidates.append((score, citation_id))
+    for _score, citation_id in sorted(candidates, reverse=True)[: max(0, int(max_extra))]:
+        used.append(citation_id)
+    return used
+
+
 def _emit_progress(progress_emitter: Any | None, event_type: str, **payload: Any) -> None:
     if progress_emitter is None or not hasattr(progress_emitter, "emit_progress"):
         return
     progress_emitter.emit_progress(event_type, **payload)
+
+
+def _record_stage_timing(retrieval_run: Any, stage: str, elapsed_ms: float) -> None:
+    timings = dict(getattr(retrieval_run, "stage_timings_ms", {}) or {})
+    name = str(stage or "unknown").strip() or "unknown"
+    timings[name] = round(float(timings.get(name, 0.0) or 0.0) + float(elapsed_ms or 0.0), 3)
+    try:
+        retrieval_run.stage_timings_ms = timings
+        threshold = 5_000.0
+        retrieval_run.slow_stages = [
+            item
+            for item, value in sorted(timings.items(), key=lambda entry: entry[1], reverse=True)
+            if value >= threshold
+        ][:5]
+    except Exception:
+        pass
+
+
+def _budget_requires_extractive_fallback(retrieval_run: Any, settings: Any) -> bool:
+    if not bool(getattr(settings, "rag_extractive_fallback_enabled", True)):
+        return False
+    if bool(getattr(retrieval_run, "budget_exhausted", False)):
+        return True
+    budget_ms = int(getattr(retrieval_run, "budget_ms", 0) or 0)
+    if budget_ms <= 0:
+        return False
+    reserve_ms = int(getattr(settings, "rag_budget_synthesis_reserve_ms", 30_000) or 30_000)
+    elapsed_ms = sum(float(value or 0.0) for value in dict(getattr(retrieval_run, "stage_timings_ms", {}) or {}).values())
+    if elapsed_ms + reserve_ms >= budget_ms:
+        try:
+            retrieval_run.budget_exhausted = True
+        except Exception:
+            pass
+        return True
+    return False
 
 
 def _format_ambiguous_doc_candidate(candidate: Any) -> str:
@@ -503,12 +662,25 @@ def run_rag_contract(
     progress_emitter: Any | None = None,
     event_sink: Any | None = None,
     allow_internal_fanout: bool = True,
+    answer_contract: Any | None = None,
 ) -> RagContract:
-    kb_scope = sync_session_kb_collection_state(settings, stores, session, query=query)
+    original_query = str(query or "")
+    retrieval_query = normalize_retrieval_question(original_query)
+    kb_scope = sync_session_kb_collection_state(settings, stores, session, query=retrieval_query)
     resolved_research_profile = normalize_research_profile(research_profile)
     resolved_coverage_goal = normalize_coverage_goal(coverage_goal)
     resolved_result_mode = normalize_result_mode(result_mode)
     resolved_controller_hints = coerce_controller_hints(controller_hints)
+    if answer_contract is not None and not answer_contract_allows_inventory(answer_contract):
+        if resolved_result_mode == "inventory" or bool(resolved_controller_hints.get("prefer_inventory_output")):
+            resolved_result_mode = "comparison" if answer_contract_kind(answer_contract) == "comparison" else "answer"
+            for key in (
+                "prefer_inventory_output",
+                "prefer_session_access_inventory",
+                "inventory_query_type",
+                "graph_inventory_only",
+            ):
+                resolved_controller_hints.pop(key, None)
     tenant_id = _tenant_id(settings, session)
     session_metadata = dict(getattr(session, "metadata", {}) or {})
     route_context = dict(session_metadata.get("route_context") or {})
@@ -518,24 +690,26 @@ def run_rag_contract(
     }
     effective_search_mode = deep_rag_search_mode(route_context, default=search_mode or "auto")
     has_uploads = has_upload_evidence(session)
-    inventory_query_type = classify_inventory_query(query)
+    inventory_query_type = classify_inventory_query(original_query)
+    if not inventory_query_type or inventory_query_type == INVENTORY_QUERY_NONE:
+        inventory_query_type = classify_inventory_query(retrieval_query)
     if inventory_query_type in {
         INVENTORY_QUERY_SESSION_ACCESS,
         INVENTORY_QUERY_KB_COLLECTIONS,
         INVENTORY_QUERY_KB_FILE,
         INVENTORY_QUERY_GRAPH_FILE,
         INVENTORY_QUERY_GRAPH_INDEXES,
-    } and not inventory_query_requests_grounded_analysis(query, query_type=inventory_query_type):
+    } and not inventory_query_requests_grounded_analysis(original_query, query_type=inventory_query_type):
         dispatched = dispatch_authoritative_inventory(
             settings,
             stores,
             session,
-            query=query,
+            query=original_query,
             query_type=inventory_query_type,
         )
         if bool(dispatched.get("handled")):
             return _early_contract(
-                query,
+                original_query,
                 dict(dispatched.get("answer") or {}),
                 search_mode="metadata_inventory",
             )
@@ -550,7 +724,7 @@ def run_rag_contract(
     preliminary_scope = decide_retrieval_scope(
         settings,
         session,
-        query=query,
+        query=retrieval_query,
         kb_available=False,
         has_uploads=has_uploads,
     )
@@ -574,7 +748,7 @@ def run_rag_contract(
     scope_decision = decide_retrieval_scope(
         settings,
         session,
-        query=query,
+        query=retrieval_query,
         kb_available=bool(kb_status.ready) if kb_status is not None else False,
         has_uploads=has_uploads,
     )
@@ -621,7 +795,7 @@ def run_rag_contract(
             settings,
             stores,
             session,
-            query=query,
+            query=retrieval_query,
         )
         if requested_doc_resolution.requested_names:
             _emit_progress(
@@ -664,7 +838,7 @@ def run_rag_contract(
             stores,
             settings,
             session,
-            query,
+            retrieval_query,
             source_type="all" if scope_decision.mode == "both" else "kb",
             explicit_collection_id=requested_collection_id,
             event_sink=event_sink,
@@ -694,7 +868,7 @@ def run_rag_contract(
         stores,
         providers=providers,
         session=session,
-        query=query,
+        query=retrieval_query,
         conversation_context=conversation_context,
         preferred_doc_ids=effective_preferred_doc_ids,
         must_include_uploads=must_include_uploads,
@@ -744,7 +918,7 @@ def run_rag_contract(
         settings=settings,
         stores=stores,
         session=session,
-        question=query,
+        question=retrieval_query,
         selected_docs=selected_docs,
         graded=list(retrieval_run.graded),
         resolution=requested_doc_resolution,
@@ -768,6 +942,7 @@ def run_rag_contract(
                         detail="Grounding final response",
                         agent="rag_worker",
                     )
+                synthesis_started = time.perf_counter()
                 answer_payload = generate_grounded_answer(
                     providers.chat,
                     settings=settings,
@@ -786,6 +961,7 @@ def run_rag_contract(
                     evidence_docs=selected_docs,
                     callbacks=callbacks or [],
                 )
+                _record_stage_timing(retrieval_run, "synthesis", (time.perf_counter() - synthesis_started) * 1000.0)
     else:
         inventory_mode = resolved_result_mode == "inventory" or bool(resolved_controller_hints.get("prefer_inventory_output"))
         discovery_inventory_mode = _is_corpus_discovery_inventory(
@@ -839,9 +1015,17 @@ def run_rag_contract(
                     detail="Grounding final response",
                     agent="rag_worker",
                 )
-            answer_payload = generate_grounded_answer(
-                providers.chat,
-                settings=settings,
+            if _budget_requires_extractive_fallback(retrieval_run, settings):
+                answer_payload = build_extractive_grounded_answer(
+                    query,
+                    selected_docs,
+                    warning="BUDGET_EXTRACTIVE_FALLBACK",
+                )
+            else:
+                synthesis_started = time.perf_counter()
+                answer_payload = generate_grounded_answer(
+                    providers.chat,
+                    settings=settings,
                     question=query,
                     conversation_context=_answer_context(
                         query,
@@ -851,12 +1035,13 @@ def run_rag_contract(
                         skill_context=skill_context,
                         task_context=task_context,
                         coverage_goal=resolved_coverage_goal,
-                    result_mode=resolved_result_mode,
-                    controller_hints=resolved_controller_hints,
-                ),
-                evidence_docs=selected_docs,
-                callbacks=callbacks or [],
-            )
+                        result_mode=resolved_result_mode,
+                        controller_hints=resolved_controller_hints,
+                    ),
+                    evidence_docs=selected_docs,
+                    callbacks=callbacks or [],
+                )
+                _record_stage_timing(retrieval_run, "synthesis", (time.perf_counter() - synthesis_started) * 1000.0)
         if inventory_mode and discovery_inventory_mode:
             retrieval_verification = dict(getattr(retrieval_run, "retrieval_verification", {}) or {})
             if str(retrieval_verification.get("status") or "").lower() == "revise":
@@ -876,14 +1061,35 @@ def run_rag_contract(
         answer_payload,
         resolution=requested_doc_resolution,
     )
-    citations = build_citations(selected_docs)
+    citation_started = time.perf_counter()
+    citations = build_citations(
+        selected_docs,
+        url_resolver=make_document_source_url_resolver(settings, session),
+    )
+    _record_stage_timing(retrieval_run, "citation_building", (time.perf_counter() - citation_started) * 1000.0)
+    inventory_mode = resolved_result_mode == "inventory" or bool(resolved_controller_hints.get("prefer_inventory_output"))
     used_citation_ids = [
         citation_id
         for citation_id in answer_payload.get("used_citation_ids", [])
         if citation_id in {citation.citation_id for citation in citations}
         ]
     if not used_citation_ids:
-        used_citation_ids = [citation.citation_id for citation in citations[: min(4, len(citations))]]
+        if inventory_mode:
+            used_citation_ids = [citation.citation_id for citation in citations[: min(4, len(citations))]]
+        elif citations:
+            answer_payload = _build_cited_evidence_fallback_answer(query, selected_docs)
+            used_citation_ids = [
+                citation_id
+                for citation_id in answer_payload.get("used_citation_ids", [])
+                if citation_id in {citation.citation_id for citation in citations}
+            ]
+    elif not inventory_mode:
+        used_citation_ids = _augment_used_citation_ids(
+            query=query,
+            answer=str(answer_payload.get("answer") or ""),
+            docs=selected_docs,
+            used_citation_ids=used_citation_ids,
+        )
 
     if progress_emitter is not None and hasattr(progress_emitter, "emit_progress"):
         progress_emitter.emit_progress(
@@ -992,6 +1198,16 @@ def _answer_context(
         context = f"{context}\n\nSupported claims: {', '.join(supported_claim_ids[:6])}".strip()
     if unverified_hops:
         context = f"{context}\n\nUnverified hops: {', '.join(unverified_hops[:4])}".strip()
+    facet_coverage = dict(claim_ledger.get("facet_coverage") or {})
+    if facet_coverage:
+        coverage_items = []
+        for value in list(facet_coverage.values())[:6]:
+            label = str(value.get("label") or "").strip()
+            state = str(value.get("state") or "").strip()
+            if label and state:
+                coverage_items.append(f"{label}: {state}")
+        if coverage_items:
+            context = f"{context}\n\nFacet coverage: {'; '.join(coverage_items)}".strip()
     return context
 
 
@@ -1009,6 +1225,16 @@ def coerce_rag_contract(contract: Dict[str, Any]) -> RagContract:
         followups=[str(item) for item in (contract.get("followups") or []) if str(item)],
         warnings=[str(item) for item in (contract.get("warnings") or []) if str(item)],
     )
+
+
+def _markdown_link(label: str, url: str) -> str:
+    clean_url = str(url or "").strip()
+    clean_label = str(label or clean_url or "source").replace("\n", " ").strip()
+    if not clean_url:
+        return clean_label
+    escaped_label = clean_label.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    escaped_url = clean_url.replace(" ", "%20").replace(")", "%29")
+    return f"[{escaped_label}]({escaped_url})"
 
 
 def render_rag_contract(contract: RagContract | Dict[str, Any]) -> str:
@@ -1038,7 +1264,8 @@ def render_rag_contract(contract: RagContract | Dict[str, Any]) -> str:
                 collection_label = "KB Collection" if source_type == "kb" else "Collection"
                 details.append(f"{collection_label}: {collection_id}")
             suffix = f" ({'; '.join(details)})" if details else ""
-            lines.append(f"- [{citation_id}] {title}{suffix}")
+            rendered_title = _markdown_link(title, str(item.get("url") or ""))
+            lines.append(f"- [{citation_id}] {rendered_title}{suffix}")
     if warnings:
         lines.append("\nWarnings: " + ", ".join(str(item) for item in warnings))
     if followups:

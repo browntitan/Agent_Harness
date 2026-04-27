@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import psycopg2.extras
@@ -24,6 +25,14 @@ class DocumentRecord:
     doc_structure_type: str = "general"
     source_display_path: str = ""
     source_identity: str = ""
+    source_metadata: Dict[str, Any] = field(default_factory=dict)
+    source_uri: str = ""
+    source_storage_backend: str = "local"
+    source_object_bucket: str = ""
+    source_object_key: str = ""
+    source_etag: str = ""
+    source_size_bytes: int = 0
+    source_content_type: str = ""
 
 
 class DocumentStore:
@@ -38,8 +47,10 @@ class DocumentStore:
                     """
                     INSERT INTO documents
                         (doc_id, tenant_id, collection_id, title, source_type, source_path, content_hash,
-                         num_chunks, ingested_at, file_type, doc_structure_type, source_display_path, source_identity)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         num_chunks, ingested_at, file_type, doc_structure_type, source_display_path, source_identity,
+                         source_metadata, source_uri, source_storage_backend, source_object_bucket,
+                         source_object_key, source_etag, source_size_bytes, source_content_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (doc_id) DO UPDATE SET
                         tenant_id          = EXCLUDED.tenant_id,
                         collection_id      = EXCLUDED.collection_id,
@@ -52,7 +63,15 @@ class DocumentStore:
                         file_type          = EXCLUDED.file_type,
                         doc_structure_type = EXCLUDED.doc_structure_type,
                         source_display_path = EXCLUDED.source_display_path,
-                        source_identity    = EXCLUDED.source_identity
+                        source_identity    = EXCLUDED.source_identity,
+                        source_metadata    = EXCLUDED.source_metadata,
+                        source_uri         = EXCLUDED.source_uri,
+                        source_storage_backend = EXCLUDED.source_storage_backend,
+                        source_object_bucket = EXCLUDED.source_object_bucket,
+                        source_object_key  = EXCLUDED.source_object_key,
+                        source_etag        = EXCLUDED.source_etag,
+                        source_size_bytes  = EXCLUDED.source_size_bytes,
+                        source_content_type = EXCLUDED.source_content_type
                     """,
                     (
                         doc.doc_id,
@@ -68,6 +87,14 @@ class DocumentStore:
                         doc.doc_structure_type,
                         doc.source_display_path,
                         doc.source_identity,
+                        psycopg2.extras.Json(dict(doc.source_metadata or {})),
+                        doc.source_uri,
+                        doc.source_storage_backend,
+                        doc.source_object_bucket,
+                        doc.source_object_key,
+                        doc.source_etag,
+                        doc.source_size_bytes,
+                        doc.source_content_type,
                     ),
                 )
             conn.commit()
@@ -313,6 +340,20 @@ class DocumentStore:
 
 
 def _row_to_record(row: Dict[str, Any]) -> DocumentRecord:
+    raw_source_metadata = row.get("source_metadata") or {}
+    if isinstance(raw_source_metadata, str):
+        try:
+            parsed_source_metadata = json.loads(raw_source_metadata)
+        except Exception:
+            parsed_source_metadata = {}
+    else:
+        parsed_source_metadata = raw_source_metadata
+    source_metadata = dict(parsed_source_metadata or {})
+    source_path = row.get("source_path") or ""
+    source_uri = row.get("source_uri") or source_metadata.get("source_uri") or ""
+    if not source_uri and source_path:
+        source_uri = source_path if "://" in str(source_path) else f"file://{source_path}"
+    blob_ref = source_metadata.get("blob_ref") if isinstance(source_metadata.get("blob_ref"), dict) else {}
     return DocumentRecord(
         doc_id=row.get("doc_id", ""),
         tenant_id=row.get("tenant_id") or "local-dev",
@@ -320,11 +361,28 @@ def _row_to_record(row: Dict[str, Any]) -> DocumentRecord:
         title=row.get("title", ""),
         source_type=row.get("source_type", ""),
         content_hash=row.get("content_hash", ""),
-        source_path=row.get("source_path") or "",
+        source_path=source_path,
         num_chunks=row.get("num_chunks") or 0,
         ingested_at=str(row.get("ingested_at") or ""),
         file_type=row.get("file_type") or "",
         doc_structure_type=row.get("doc_structure_type") or "general",
         source_display_path=row.get("source_display_path") or "",
         source_identity=row.get("source_identity") or "",
+        source_metadata=source_metadata,
+        source_uri=str(source_uri or ""),
+        source_storage_backend=str(
+            row.get("source_storage_backend")
+            or blob_ref.get("backend")
+            or ("local" if source_path else "")
+        ),
+        source_object_bucket=str(row.get("source_object_bucket") or blob_ref.get("bucket") or ""),
+        source_object_key=str(row.get("source_object_key") or blob_ref.get("key") or ""),
+        source_etag=str(row.get("source_etag") or blob_ref.get("etag") or ""),
+        source_size_bytes=int(row.get("source_size_bytes") or blob_ref.get("size") or 0),
+        source_content_type=str(
+            row.get("source_content_type")
+            or blob_ref.get("content_type")
+            or source_metadata.get("mime_type")
+            or ""
+        ),
     )

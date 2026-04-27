@@ -215,6 +215,58 @@ def test_runtime_trace_callback_records_model_and_tool_events_for_general_agent(
     assert "tool_end" in event_types
     tool_event = next(row for row in events if row["event_type"] == "tool_start")
     assert tool_event["tool_name"] == "echo_tool"
+    assert tool_event["payload"]["tool_call_id"]
+    assert tool_event["payload"]["status"] == "running"
+    assert tool_event["payload"]["input_preview"]
+    assert tool_event["payload"]["input"]
+    completed_event = next(row for row in events if row["event_type"] == "tool_end")
+    assert completed_event["payload"]["tool_call_id"] == tool_event["payload"]["tool_call_id"]
+    assert completed_event["payload"]["status"] == "completed"
+    assert completed_event["payload"]["output_preview"]
+    assert completed_event["payload"]["output"]
+    assert completed_event["payload"]["duration_ms"] is not None
+
+
+def test_runtime_trace_callback_redacts_and_truncates_tool_payloads(tmp_path: Path) -> None:
+    paths = RuntimePaths(runtime_root=tmp_path / "runtime", workspace_root=tmp_path / "workspaces", memory_root=tmp_path / "memory")
+    store = RuntimeTranscriptStore(paths)
+
+    class _Sink:
+        def emit(self, event):
+            store.append_session_event(event)
+
+    callback = RuntimeTraceCallbackHandler(
+        event_sink=_Sink(),
+        session_id="tenant:user:redacted",
+        conversation_id="redacted",
+        trace_name="tool_payload_contract",
+        agent_name="general",
+    )
+    run_id = uuid4()
+    callback.on_tool_start(
+        {"name": "secret_tool"},
+        "",
+        run_id=run_id,
+        inputs={"query": "hello", "api_key": "sk-live-secret", "nested": {"token": "tok-secret"}},
+    )
+    callback.on_tool_end(
+        {"ok": True, "text": "x" * 13_000, "authorization": "Bearer abc"},
+        run_id=run_id,
+    )
+
+    events = store.load_session_events("tenant:user:redacted")
+    start = next(row for row in events if row["event_type"] == "tool_start")
+    end = next(row for row in events if row["event_type"] == "tool_end")
+
+    assert start["payload"]["tool_call_id"] == str(run_id)
+    assert start["payload"]["input"]["api_key"] == "[redacted]"
+    assert start["payload"]["input"]["nested"]["token"] == "[redacted]"
+    assert "sk-live-secret" not in json.dumps(start["payload"])
+    assert end["payload"]["tool_call_id"] == str(run_id)
+    assert end["payload"]["output"].startswith("{")
+    assert end["payload"]["truncated"] is True
+    assert "output" in end["payload"]["truncated_fields"]
+    assert "Bearer abc" not in json.dumps(end["payload"])
 
 
 def test_general_agent_renders_rag_tool_output_when_final_ai_message_is_empty(monkeypatch):
@@ -581,6 +633,186 @@ def test_general_agent_plan_execute_does_not_finalize_graph_relationships_from_c
     assert "should not infer" in final_text
     assert metadata["recovery"] == ["graph_search_missing"]
     assert [message.name for message in messages if isinstance(message, ToolMessage)] == ["list_graph_indexes"]
+
+
+def test_graph_h06_catalog_candidates_recover_to_grounded_rag_answer() -> None:
+    from agentic_chatbot_next.general_agent import run_general_agent
+
+    @tool("search_graph_index")
+    def search_graph_index(query: str, graph_id: str = "", methods_csv: str = "", limit: int = 8) -> str:
+        """Search graph evidence."""
+        del query, methods_csv, limit
+        return json.dumps(
+            {
+                "graph_id": graph_id,
+                "evidence_status": "source_candidates_only",
+                "requires_source_read": True,
+                "results": [
+                    {
+                        "backend": "catalog",
+                        "doc_id": "HOST_PATH_7f8a93a2d7",
+                        "title": "blue_mica_crypto_compliance_summary_final.pdf",
+                        "summary": "Catalog source candidate from managed graph.",
+                        "chunk_ids": [],
+                        "relationship_path": [],
+                        "metadata": {"fallback": "catalog", "catalog_only": True, "evidence_kind": "source_candidate"},
+                        "citation_ids": ["HOST_PATH_7f8a93a2d7#graph"],
+                    },
+                    {
+                        "backend": "catalog",
+                        "doc_id": "HOST_PATH_8889337d84",
+                        "title": "blue_mica_after_action_notes.txt",
+                        "summary": "Catalog source candidate from managed graph.",
+                        "chunk_ids": [],
+                        "relationship_path": [],
+                        "metadata": {"fallback": "catalog", "catalog_only": True, "evidence_kind": "source_candidate"},
+                        "citation_ids": ["HOST_PATH_8889337d84#graph"],
+                    },
+                ],
+            }
+        )
+
+    @tool("rag_agent_tool")
+    def rag_agent_tool(
+        query: str,
+        conversation_context: str = "",
+        preferred_doc_ids_csv: str = "",
+        must_include_uploads: bool = False,
+        top_k_vector: int = 16,
+        top_k_keyword: int = 16,
+        max_retries: int = 2,
+        search_mode: str = "deep",
+        max_search_rounds: int = 2,
+    ) -> dict:
+        """Run grounded staged retrieval."""
+        del must_include_uploads, top_k_vector, top_k_keyword, max_retries, search_mode, max_search_rounds
+        assert "HOST_PATH_7f8a93a2d7" in preferred_doc_ids_csv
+        assert "certificate/binder" not in conversation_context
+        assert "serialized-assignment" not in conversation_context
+        assert "training/readiness" not in conversation_context
+        assert "06 Feb 2029" not in conversation_context
+        assert "claim-focused" in conversation_context
+        return {
+            "answer": (
+                "The better answer is that the main issue was not a demonstrated hardware failure. "
+                "ENC-21M hardware was technically acceptable, but certificate/binder timing, "
+                "serialized-assignment accuracy, and training/readiness problems drove the move to 06 Feb 2029."
+            ),
+            "citations": [
+                {
+                    "citation_id": "bm-compliance",
+                    "doc_id": "HOST_PATH_7f8a93a2d7",
+                    "title": "blue_mica_crypto_compliance_summary_final.pdf",
+                    "source_type": "kb",
+                    "location": "Compliance Sections 1-3",
+                    "snippet": (
+                        "The issue was not a demonstrated hardware failure. ENC-21M hardware was technically acceptable; "
+                        "certificate/binder timing, serialized-assignment accuracy, and training/readiness drove the move to 06 Feb 2029."
+                    ),
+                }
+            ],
+            "used_citation_ids": ["bm-compliance"],
+            "confidence": 0.86,
+            "retrieval_summary": {"query_used": query, "search_mode": "deep"},
+            "warnings": [],
+            "followups": [],
+        }
+
+    llm = FakeListChatModel(
+        responses=[
+            (
+                '{"plan":[{"tool":"search_graph_index","args":{"graph_id":"defense_rag_v2_graph",'
+                '"query":"Blue Mica Wave 2 slipped hardware bad","methods_csv":"graph"},'
+                '"purpose":"find graph source candidates"}],"notes":"graph first"}'
+            ),
+            "This response should not be used.",
+        ]
+    )
+
+    final_text, messages, metadata = run_general_agent(
+        llm,
+        tools=[search_graph_index, rag_agent_tool],
+        messages=[],
+        user_text=(
+            "Use the knowledge graph defense_rag_v2_graph answer the following question: "
+            "If someone says Blue Mica Wave 2 slipped because the hardware was bad, "
+            "what is the better evidence-based answer?"
+        ),
+        system_prompt="Use graph tools, but do not answer from catalog-only graph matches.",
+        force_plan_execute=True,
+    )
+
+    assert "not a demonstrated hardware failure" in final_text
+    assert "ENC-21M hardware was technically acceptable" in final_text
+    assert "certificate/binder timing" in final_text
+    assert "serialized-assignment accuracy" in final_text
+    assert "training/readiness" in final_text
+    assert "06 Feb 2029" in final_text
+    assert metadata["recovery"] == ["graph_catalog_to_rag_recovery"]
+    assert [message.name for message in messages if isinstance(message, ToolMessage)] == [
+        "search_graph_index",
+        "rag_agent_tool",
+    ]
+
+
+def test_graph_final_verifier_rejects_generic_unsupported_causal_claims() -> None:
+    from agentic_chatbot_next.general_agent import run_general_agent
+
+    @tool("search_graph_index")
+    def search_graph_index(query: str, graph_id: str = "", methods_csv: str = "", limit: int = 8) -> str:
+        """Search graph evidence."""
+        del query, methods_csv, limit
+        return json.dumps(
+            {
+                "graph_id": graph_id,
+                "evidence_status": "grounded_graph_evidence",
+                "requires_source_read": False,
+                "results": [
+                    {
+                        "backend": "graphrag",
+                        "doc_id": "DOC-portal-readiness",
+                        "title": "portal_release_readiness.md",
+                        "summary": (
+                            "Aurora Portal moved because vendor approval queue timing and load-test readiness "
+                            "work were not complete by the earlier date."
+                        ),
+                        "chunk_ids": ["chunk-1"],
+                        "relationship_path": ["Aurora Portal", "release movement", "readiness"],
+                        "metadata": {"evidence_kind": "graph_chunk"},
+                    }
+                ],
+            }
+        )
+
+    llm = FakeListChatModel(
+        responses=[
+            (
+                '{"plan":[{"tool":"search_graph_index","args":{"graph_id":"operations_graph",'
+                '"query":"Aurora Portal slipped because payment API was faulty","methods_csv":"local,global"},'
+                '"purpose":"find graph evidence"}],"notes":"graph first"}'
+            ),
+            "Aurora Portal slipped because of thermal actuator resonance in orbital firmware.",
+        ]
+    )
+
+    final_text, _messages, metadata = run_general_agent(
+        llm,
+        tools=[search_graph_index],
+        messages=[],
+        user_text=(
+            "Use the knowledge graph operations_graph answer the following question: "
+            "If someone says Aurora Portal slipped because the payment API was faulty, "
+            "what is the better evidence-based answer?"
+        ),
+        system_prompt="Use graph tools and cited evidence only.",
+        force_plan_execute=True,
+    )
+
+    assert "do not have cited evidence" in final_text
+    assert "thermal" in final_text
+    assert "orbital" in final_text
+    assert "should not present them as the answer" in final_text
+    assert metadata["recovery"] == ["unsupported_causal_claims_rejected"]
 
 
 def test_general_agent_react_missing_graph_search_retries_with_search() -> None:
@@ -1944,6 +2176,62 @@ def test_live_progress_sink_translates_peer_dispatch_events() -> None:
     assert event["label"] == "Queued data_analyst"
     assert event["detail"] == "analyze the evidence"
     assert event["job_id"] == "job_peer_123"
+
+
+def test_live_progress_sink_translates_tool_lifecycle_to_status_cards() -> None:
+    sink = LiveProgressSink()
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_start",
+            event_type="tool_start",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            tool_name="search_indexed_docs",
+            payload={
+                "tool_call_id": "call-1",
+                "tool_name": "search_indexed_docs",
+                "status": "running",
+                "input_preview": '{"query":"trace"}',
+                "input": {"query": "trace"},
+                "started_at": "2026-04-23T10:00:00Z",
+            },
+        )
+    )
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_end",
+            event_type="tool_end",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            tool_name="search_indexed_docs",
+            payload={
+                "tool_call_id": "call-1",
+                "tool_name": "search_indexed_docs",
+                "status": "completed",
+                "input_preview": '{"query":"trace"}',
+                "input": {"query": "trace"},
+                "output_preview": '{"hits":1}',
+                "output": {"hits": 1},
+                "started_at": "2026-04-23T10:00:00Z",
+                "completed_at": "2026-04-23T10:00:01Z",
+                "duration_ms": 1000,
+            },
+        )
+    )
+
+    started = sink.events.get_nowait()
+    completed = sink.events.get_nowait()
+
+    assert started["type"] == "tool_trace"
+    assert started["status_id"] == "tool-call-1"
+    assert started["done"] is False
+    assert started["agentic_tool_call"]["tool_call_id"] == "call-1"
+    assert started["agentic_tool_call"]["input"] == {"query": "trace"}
+    assert completed["status_id"] == "tool-call-1"
+    assert completed["done"] is True
+    assert completed["agentic_tool_call"]["status"] == "completed"
+    assert completed["agentic_tool_call"]["output"] == {"hits": 1}
+    assert completed["agentic_tool_call"]["source_event_id"] == "evt_end"
 
 
 def test_live_progress_sink_uses_planner_agent_for_coordinator_planning_events() -> None:

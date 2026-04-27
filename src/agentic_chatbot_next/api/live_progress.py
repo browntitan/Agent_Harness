@@ -20,6 +20,7 @@ _PHASE_LABELS = {
     "coordinator_verifier_started": "Running verifier",
     "coordinator_verifier_completed": "Verification complete",
 }
+_TOOL_STATUS_PHASE = "searching_knowledge_base"
 
 
 def _now_ms() -> int:
@@ -45,6 +46,9 @@ class LiveProgressSink(RuntimeEventSink):
     def _translate_runtime_event(self, event: RuntimeEvent) -> Dict[str, Any] | None:
         payload = dict(event.payload or {})
         timestamp = _now_ms()
+
+        if event.event_type in {"tool_start", "tool_end", "tool_error"}:
+            return _tool_status_from_runtime_event(event, payload, timestamp=timestamp)
 
         if event.event_type == "router_decision":
             reasons = [str(item) for item in (payload.get("reasons") or []) if str(item)]
@@ -276,6 +280,93 @@ class LiveProgressSink(RuntimeEventSink):
             }
 
         return None
+
+
+def _tool_status_from_runtime_event(
+    event: RuntimeEvent,
+    payload: Dict[str, Any],
+    *,
+    timestamp: int,
+) -> Dict[str, Any]:
+    tool_call_id = str(payload.get("tool_call_id") or payload.get("run_id") or event.event_id or "").strip()
+    tool_name = str(payload.get("tool_name") or event.tool_name or "tool").strip() or "tool"
+    status = str(payload.get("status") or "").strip().lower()
+    if event.event_type == "tool_start":
+        status = "running"
+    elif event.event_type == "tool_error":
+        status = "error"
+    elif not status:
+        status = "completed"
+    done = status in {"completed", "error"}
+    state = "error" if status == "error" else ("complete" if done else "active")
+    title = f"{tool_name} {'failed' if status == 'error' else ('completed' if done else 'running')}"
+    duration_ms = payload.get("duration_ms")
+    if not isinstance(duration_ms, (int, float)):
+        duration_ms = None
+    elapsed_ms = int(duration_ms or 0)
+    tool_payload = {
+        "version": 1,
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "agent_name": str(event.agent_name or payload.get("agent_name") or ""),
+        "job_id": str(event.job_id or payload.get("job_id") or ""),
+        "status": status,
+        "started_at": str(payload.get("started_at") or ""),
+        "completed_at": str(payload.get("completed_at") or ""),
+        "duration_ms": elapsed_ms if duration_ms is not None else None,
+        "input_preview": str(payload.get("input_preview") or ""),
+        "output_preview": str(payload.get("output_preview") or ""),
+        "input": payload.get("input"),
+        "output": payload.get("output"),
+        "error": payload.get("error"),
+        "truncated": bool(payload.get("truncated")),
+        "truncated_fields": [str(item) for item in list(payload.get("truncated_fields") or []) if str(item)],
+        "source_event_id": event.event_id,
+    }
+    status_id = f"tool-{tool_call_id or event.event_id}"
+    subtitle = tool_payload["output_preview"] or tool_payload["input_preview"]
+    return {
+        "type": "tool_trace",
+        "status_id": status_id,
+        "status_key": status_id,
+        "description": title,
+        "status": "error" if status == "error" else ("complete" if done else "in_progress"),
+        "done": done,
+        "hidden": False,
+        "elapsed_ms": elapsed_ms,
+        "agent": tool_payload["agent_name"],
+        "selected_agent": tool_payload["agent_name"],
+        "phase": _TOOL_STATUS_PHASE,
+        "phase_label": "Searching knowledge base",
+        "phase_elapsed_ms": elapsed_ms,
+        "status_elapsed_ms": elapsed_ms,
+        "source_event_type": event.event_type,
+        "label": title,
+        "detail": subtitle,
+        "job_id": tool_payload["job_id"],
+        "task_id": "",
+        "why": "A runtime agent invoked a tool.",
+        "waiting_on": "",
+        "timestamp": timestamp,
+        "agentic_tool_call": tool_payload,
+        "agentic_status": {
+            "version": 1,
+            "state": state,
+            "kind": "tool",
+            "title": title,
+            "subtitle": subtitle,
+            "chips": [chip for chip in (tool_payload["agent_name"], tool_name, status.title()) if chip],
+            "timing": {
+                "kind": "total" if done else "stage",
+                "live": not done,
+                "elapsed_ms": elapsed_ms,
+                "status_elapsed_ms": elapsed_ms,
+                "phase_elapsed_ms": elapsed_ms,
+                "total_elapsed_ms": elapsed_ms,
+                "snapshot_timestamp_ms": timestamp,
+            },
+        },
+    }
 
 
 def _runtime_event_detail(event_type: str, payload: Dict[str, Any]) -> str:

@@ -8,6 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Sequence
 
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
+
 from agentic_chatbot_next.rag.doc_targets import (
     extract_named_document_targets,
     resolve_indexed_docs as resolve_named_indexed_docs,
@@ -15,10 +18,14 @@ from agentic_chatbot_next.rag.doc_targets import (
 from agentic_chatbot_next.rag.hints import normalize_structured_query
 from agentic_chatbot_next.rag.ingest import resolve_record_source_identity, select_active_kb_record
 from agentic_chatbot_next.rag.requirements import (
+    BROAD_REQUIREMENT_MODE,
     LEGAL_CLAUSE_MODE,
     MANDATORY_MODE,
+    REQUIREMENT_EXTRACTOR_VERSION,
     STRICT_SHALL_MODE,
-    build_requirement_statement_records,
+    RequirementAssessment,
+    RequirementCandidate,
+    build_requirement_inventory,
     format_requirement_location,
     normalize_requirement_mode,
     normalize_requirement_text,
@@ -34,6 +41,7 @@ from agentic_chatbot_next.rag.retrieval_scope import (
     resolve_upload_collection_id,
 )
 from agentic_chatbot_next.runtime.artifacts import register_workspace_artifact
+from agentic_chatbot_next.utils.json_utils import extract_json
 
 
 REQUIREMENTS_WORKFLOW_KIND = "requirements_extraction"
@@ -46,7 +54,15 @@ _REQUIREMENTS_EXTRACTION_RE = re.compile(
     r"|\b(?:far|dfars)\b.*\b(?:clause|clauses|requirement|requirements|obligation|obligations)\b",
     re.IGNORECASE | re.DOTALL,
 )
-_STRICT_SHALL_REQUEST_RE = re.compile(r"\bshall\s+statements?\b|\bstrict\s+shall\b", re.IGNORECASE)
+_EXPLICIT_STRICT_SHALL_RE = re.compile(
+    r"\bstrict\s+shall\b"
+    r"|\bonly\s+(?:the\s+)?shall(?:\s+statements?)?\b"
+    r"|\bshall(?:\s+statements?)?\s+only\b"
+    r"|\bjust\s+(?:the\s+)?shall\s+statements?\b",
+    re.IGNORECASE,
+)
+_SHALL_STATEMENTS_RE = re.compile(r"\bshall\s+statements?\b", re.IGNORECASE)
+_REQUIREMENTS_TERM_RE = re.compile(r"\brequirements?\b", re.IGNORECASE)
 _LEGAL_REQUEST_RE = re.compile(
     r"\b(?:far|dfars|cfr|clause|clauses|legal|regulatory|obligation|obligations|"
     r"flow[-\s]?down|contractor\s+shall|offeror\s+shall)\b",
@@ -62,9 +78,20 @@ _ACTOR_RE = re.compile(
     r"\b(?:the\s+)?(?P<actor>"
     r"contractor|subcontractor|offeror|supplier|vendor|provider|government|agency|"
     r"system|subsystem|platform|service|operator|administrator|user"
-    r")\b\s+(?:shall|must|will|is\s+required|are\s+required|is\s+responsible|are\s+responsible|agrees?)\b",
+    r")\b\s+(?:shall|must|will|may|can|is\s+required|are\s+required|is\s+responsible|are\s+responsible|agrees?)\b",
     re.IGNORECASE,
 )
+
+
+class _RequirementClassifierOutput(BaseModel):
+    keep: bool = Field(default=False)
+    modality: str = Field(default="")
+    binding_strength: str = Field(default="")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    risk_label: str = Field(default="")
+    risk_rationale: str = Field(default="")
+    source_structure: str = Field(default="")
+    requirement_text: str = Field(default="")
 
 
 def is_requirements_extraction_request(user_text: str) -> bool:
@@ -73,12 +100,14 @@ def is_requirements_extraction_request(user_text: str) -> bool:
 
 
 def infer_requirement_mode(user_text: str) -> str:
-    text = str(user_text or "")
+    text = normalize_structured_query(str(user_text or "")) or str(user_text or "")
     if _LEGAL_REQUEST_RE.search(text):
         return LEGAL_CLAUSE_MODE
-    if _STRICT_SHALL_REQUEST_RE.search(text):
+    if _EXPLICIT_STRICT_SHALL_RE.search(text):
         return STRICT_SHALL_MODE
-    return MANDATORY_MODE
+    if _SHALL_STATEMENTS_RE.search(text) and not _REQUIREMENTS_TERM_RE.search(text):
+        return STRICT_SHALL_MODE
+    return BROAD_REQUIREMENT_MODE
 
 
 def infer_all_documents(user_text: str) -> bool:
@@ -169,8 +198,7 @@ def _collapse_active_kb_records(settings: object, records: Sequence[Any]) -> Lis
     return [record for record in collapsed if record is not None]
 
 
-def _upload_filter_doc_ids(session: object, records: Sequence[Any]) -> set[str]:
-    del records
+def _upload_filter_doc_ids(session: object) -> set[str]:
     direct_ids = set(repository_upload_doc_ids(session))
     if direct_ids:
         return direct_ids
@@ -200,7 +228,7 @@ def _scoped_records(
                 collection_id=effective_collection,
             )
         )
-        filter_doc_ids = _upload_filter_doc_ids(session, records)
+        filter_doc_ids = _upload_filter_doc_ids(session)
         if filter_doc_ids:
             records = [
                 record
@@ -237,6 +265,7 @@ def _select_target_records(
     source_scope: str,
     collection_id: str,
     document_names: Sequence[str],
+    document_ids: Sequence[str],
     all_documents: bool,
 ) -> Dict[str, Any]:
     effective_collection, records = _scoped_records(
@@ -251,6 +280,25 @@ def _select_target_records(
             "collection_id": effective_collection,
             "records": [],
             "error": "No indexed documents are available in the requested scope.",
+        }
+
+    requested_doc_ids = {str(item) for item in document_ids if str(item)}
+    if requested_doc_ids:
+        selected = [
+            record
+            for record in records
+            if str(getattr(record, "doc_id", "") or "") in requested_doc_ids
+        ]
+        if not selected:
+            return {
+                "collection_id": effective_collection,
+                "records": [],
+                "error": "The selected document is no longer available in the requested scope.",
+            }
+        return {
+            "collection_id": effective_collection,
+            "records": selected,
+            "selected_doc_ids": sorted(requested_doc_ids),
         }
 
     if document_names:
@@ -285,14 +333,27 @@ def _select_target_records(
         return {
             "collection_id": effective_collection,
             "records": selected,
+            "selected_doc_ids": sorted(resolved_ids),
             "resolved_documents": [item.to_dict() for item in resolution.resolved],
         }
 
     if all_documents:
-        return {"collection_id": effective_collection, "records": list(records)}
+        return {
+            "collection_id": effective_collection,
+            "records": list(records),
+            "selected_doc_ids": [
+                str(getattr(record, "doc_id", "") or "")
+                for record in records
+                if str(getattr(record, "doc_id", "") or "")
+            ],
+        }
 
     if len(records) == 1:
-        return {"collection_id": effective_collection, "records": list(records)}
+        return {
+            "collection_id": effective_collection,
+            "records": list(records),
+            "selected_doc_ids": [str(getattr(records[0], "doc_id", "") or "")],
+        }
 
     supported_records = [
         record
@@ -300,7 +361,11 @@ def _select_target_records(
         if supports_requirements_extraction(str(getattr(record, "file_type", "") or ""))
     ]
     if len(supported_records) == 1:
-        return {"collection_id": effective_collection, "records": supported_records}
+        return {
+            "collection_id": effective_collection,
+            "records": supported_records,
+            "selected_doc_ids": [str(getattr(supported_records[0], "doc_id", "") or "")],
+        }
 
     return {
         "collection_id": effective_collection,
@@ -308,46 +373,6 @@ def _select_target_records(
         "error": "Multiple documents are available in this scope. Specify one document or ask for all documents.",
         "candidate_documents": [_record_to_dict(record) for record in records[:10]],
     }
-
-
-def _ensure_requirement_inventory(stores: object, record: Any, *, tenant_id: str) -> None:
-    requirement_store = getattr(stores, "requirement_store", None)
-    if requirement_store is None:
-        return
-    doc_id = str(getattr(record, "doc_id", "") or "")
-    if not doc_id or requirement_store.has_doc_statements(doc_id, tenant_id):
-        return
-    chunk_records = list(stores.chunk_store.list_document_chunks(doc_id, tenant_id))
-    statements = build_requirement_statement_records(
-        SimpleNamespace(
-            doc_id=doc_id,
-            tenant_id=str(getattr(record, "tenant_id", "") or tenant_id),
-            collection_id=str(getattr(record, "collection_id", "") or "default"),
-            title=str(getattr(record, "title", "") or ""),
-            source_type=str(getattr(record, "source_type", "") or ""),
-            file_type=str(getattr(record, "file_type", "") or ""),
-        ),
-        chunk_records,
-        mode=MANDATORY_MODE,
-    )
-    requirement_store.replace_doc_statements(doc_id, tenant_id, statements=statements)
-
-
-def _build_ad_hoc_records(stores: object, record: Any, *, tenant_id: str, mode: str) -> List[Any]:
-    doc_id = str(getattr(record, "doc_id", "") or "")
-    chunks = list(stores.chunk_store.list_document_chunks(doc_id, tenant_id)) if doc_id else []
-    return build_requirement_statement_records(
-        SimpleNamespace(
-            doc_id=doc_id,
-            tenant_id=str(getattr(record, "tenant_id", "") or tenant_id),
-            collection_id=str(getattr(record, "collection_id", "") or "default"),
-            title=str(getattr(record, "title", "") or ""),
-            source_type=str(getattr(record, "source_type", "") or ""),
-            file_type=str(getattr(record, "file_type", "") or ""),
-        ),
-        chunks,
-        mode=mode,
-    )
 
 
 def _infer_actor(text: str) -> str:
@@ -363,46 +388,47 @@ def _infer_paragraph_path(text: str) -> str:
     return str(match.group(1) or "").strip() if match else ""
 
 
-def _confidence_for_row(row: Any, *, mode: str, source_span_valid: bool) -> float:
-    if not source_span_valid:
-        return 0.35
-    modality = str(getattr(row, "modality", "") or "")
-    if mode == LEGAL_CLAUSE_MODE and modality in {"will", "agrees_to", "responsible_for", "required"}:
-        return 0.78
-    if modality in {"shall", "shall_not", "must", "must_not", "required_to", "prohibited"}:
-        return 0.92
-    return 0.70
-
-
-def _row_to_output(row: Any, *, mode: str, chunk_text_by_id: Mapping[str, str]) -> Dict[str, Any]:
-    statement_text = normalize_requirement_text(str(getattr(row, "statement_text", "") or ""))
+def _row_to_output(row: Any, *, chunk_text_by_id: Mapping[str, str]) -> Dict[str, Any]:
+    requirement_text = normalize_requirement_text(str(getattr(row, "statement_text", "") or ""))
+    source_excerpt = normalize_requirement_text(
+        str(getattr(row, "source_excerpt", "") or getattr(row, "statement_text", "") or "")
+    )
     chunk_id = str(getattr(row, "chunk_id", "") or "")
-    source_text = str(chunk_text_by_id.get(chunk_id) or "")
-    source_span_valid = bool(statement_text and (not source_text or statement_text in normalize_requirement_text(source_text)))
+    source_text = normalize_requirement_text(str(chunk_text_by_id.get(chunk_id) or ""))
+    source_span_valid = bool(source_excerpt and (not source_text or source_excerpt in source_text))
     warnings: list[str] = []
     if bool(getattr(row, "multi_requirement", False)):
         warnings.append("sentence_contains_multiple_mandatory_operators")
+    if int(getattr(row, "duplicate_count", 1) or 1) > 1:
+        warnings.append("merged_overlap_duplicates")
     if not source_span_valid:
         warnings.append("source_span_not_verified")
     return {
         "document_title": str(getattr(row, "document_title", "") or ""),
         "modality": str(getattr(row, "modality", "") or ""),
         "location": format_requirement_location(row),
-        "statement_text": statement_text,
+        "statement_text": requirement_text,
         "requirement_id": str(getattr(row, "requirement_id", "") or ""),
         "doc_id": str(getattr(row, "doc_id", "") or ""),
         "collection_id": str(getattr(row, "collection_id", "") or ""),
         "source_type": str(getattr(row, "source_type", "") or ""),
         "section": str(getattr(row, "section_title", "") or ""),
         "clause_number": str(getattr(row, "clause_number", "") or ""),
-        "paragraph_path": _infer_paragraph_path(statement_text),
-        "actor": _infer_actor(statement_text),
-        "requirement_text": statement_text,
-        "source_excerpt": statement_text,
+        "paragraph_path": _infer_paragraph_path(requirement_text),
+        "actor": _infer_actor(requirement_text),
+        "requirement_text": requirement_text,
+        "source_excerpt": source_excerpt,
         "source_location": format_requirement_location(row),
-        "extraction_method": str(getattr(row, "extractor_version", "") or "requirements_v1"),
-        "extractor_mode": str(getattr(row, "extractor_mode", "") or mode),
-        "confidence": _confidence_for_row(row, mode=mode, source_span_valid=source_span_valid),
+        "source_structure": str(getattr(row, "source_structure", "") or ""),
+        "binding_strength": str(getattr(row, "binding_strength", "") or ""),
+        "risk_label": str(getattr(row, "risk_label", "") or ""),
+        "risk_rationale": str(getattr(row, "risk_rationale", "") or ""),
+        "merged_chunk_ids": str(getattr(row, "merged_chunk_ids", "") or ""),
+        "merged_source_locations": str(getattr(row, "merged_source_locations", "") or ""),
+        "duplicate_count": max(1, int(getattr(row, "duplicate_count", 1) or 1)),
+        "extraction_method": str(getattr(row, "extractor_version", "") or REQUIREMENT_EXTRACTOR_VERSION),
+        "extractor_mode": str(getattr(row, "extractor_mode", "") or BROAD_REQUIREMENT_MODE),
+        "confidence": float(getattr(row, "confidence", 0.0) or 0.0),
         "source_span_valid": source_span_valid,
         "chunk_id": chunk_id,
         "chunk_index": int(getattr(row, "chunk_index", 0) or 0),
@@ -413,22 +439,26 @@ def _row_to_output(row: Any, *, mode: str, chunk_text_by_id: Mapping[str, str]) 
     }
 
 
-def _profile_document(record: Any, chunks: Sequence[Any], *, requested_mode: str) -> Dict[str, Any]:
+def _profile_document(record: Any, chunks: Sequence[Any], *, requested_mode: str, build_stats: Mapping[str, Any]) -> Dict[str, Any]:
     sample = "\n".join(str(getattr(chunk, "content", "") or "") for chunk in list(chunks)[:8])
     title = str(getattr(record, "title", "") or "")
     haystack = f"{title}\n{sample}"
     legal_like = bool(_FAR_DFARS_CLAUSE_RE.search(haystack)) or bool(
         re.search(r"\bcontractor\s+shall\b|\bofferor\s+shall\b|\bas\s+prescribed\s+in\b", haystack, re.IGNORECASE)
     )
-    parser_strategy = "legal_clause" if requested_mode == LEGAL_CLAUSE_MODE or legal_like else "cached_statement_inventory"
     return {
         "doc_id": str(getattr(record, "doc_id", "") or ""),
         "title": title,
         "file_type": str(getattr(record, "file_type", "") or ""),
         "doc_structure_type": str(getattr(record, "doc_structure_type", "") or ""),
         "legal_clause_like": legal_like,
-        "parser_strategy": parser_strategy,
+        "parser_strategy": "requirements_v2_hybrid" if requested_mode == BROAD_REQUIREMENT_MODE else "requirements_v2_filtered",
         "chunk_count": len(chunks),
+        "candidate_count": int(build_stats.get("candidate_count") or 0),
+        "kept_count": int(build_stats.get("kept_count") or 0),
+        "dropped_count": int(build_stats.get("dropped_count") or 0),
+        "dedupe_count": int(build_stats.get("dedupe_count") or 0),
+        "inventory_rebuilt": bool(build_stats.get("inventory_rebuilt")),
     }
 
 
@@ -462,6 +492,13 @@ _EXPORT_COLUMNS = [
     "requirement_text",
     "source_excerpt",
     "source_location",
+    "source_structure",
+    "binding_strength",
+    "risk_label",
+    "risk_rationale",
+    "merged_chunk_ids",
+    "merged_source_locations",
+    "duplicate_count",
     "extraction_method",
     "extractor_mode",
     "confidence",
@@ -520,11 +557,134 @@ def _write_jsonl(session: object, *, filename: str, rows: Sequence[Mapping[str, 
 
 
 class RequirementExtractionService:
-    def __init__(self, settings: object, stores: object, session: object) -> None:
+    def __init__(self, settings: object, stores: object, session: object, providers: object | None = None) -> None:
         self.settings = settings
         self.stores = stores
         self.session = session
+        self.providers = providers
         self.tenant_id = _tenant_id(settings, session)
+
+    def _build_classifier(self):
+        model = getattr(self.providers, "judge", None) or getattr(self.providers, "chat", None)
+        if model is None:
+            return None
+
+        def _classify(candidate: RequirementCandidate, deterministic: RequirementAssessment) -> RequirementAssessment | None:
+            messages = [
+                SystemMessage(
+                    content=(
+                        "You classify requirement candidates extracted from defense and contract-style documents.\n"
+                        "Favor recall over precision: keep ambiguous candidates if they could reasonably be requirements.\n"
+                        "Drop only obvious scaffolding, wrapper noise, or narrative prose about extraction.\n"
+                        "Return JSON only."
+                    )
+                ),
+                HumanMessage(
+                    content=(
+                        "Return JSON with keys keep, modality, binding_strength, confidence, risk_label, "
+                        "risk_rationale, source_structure, requirement_text.\n\n"
+                        f"CANDIDATE_TEXT: {candidate.text}\n"
+                        f"SOURCE_STRUCTURE: {candidate.source_structure}\n"
+                        f"SECTION_TITLE: {candidate.section_title}\n"
+                        f"CLAUSE_NUMBER: {candidate.clause_number}\n"
+                        f"CHUNK_TYPE: {candidate.chunk_type}\n"
+                        f"DETERMINISTIC_KEEP: {deterministic.keep}\n"
+                        f"DETERMINISTIC_MODALITY: {deterministic.modality}\n"
+                        f"DETERMINISTIC_BINDING: {deterministic.binding_strength}\n"
+                        f"DETERMINISTIC_RISK_LABEL: {deterministic.risk_label}\n"
+                        f"DETERMINISTIC_RISK_RATIONALE: {deterministic.risk_rationale}"
+                    )
+                ),
+            ]
+            parsed: _RequirementClassifierOutput | None = None
+            try:
+                structured = model.with_structured_output(_RequirementClassifierOutput)
+                result = structured.invoke(
+                    messages,
+                    config={"metadata": {"session_id": str(getattr(self.session, "session_id", "") or "")}},
+                )
+                if isinstance(result, _RequirementClassifierOutput):
+                    parsed = result
+            except Exception:
+                parsed = None
+            if parsed is None:
+                try:
+                    response = model.invoke(
+                        messages,
+                        config={"metadata": {"session_id": str(getattr(self.session, "session_id", "") or "")}},
+                    )
+                    payload = extract_json(getattr(response, "content", None) or str(response)) or {}
+                    if isinstance(payload, dict):
+                        parsed = _RequirementClassifierOutput.model_validate(payload)
+                except Exception:
+                    parsed = None
+            if parsed is None:
+                return None
+            return RequirementAssessment(
+                keep=bool(parsed.keep),
+                modality=str(parsed.modality or deterministic.modality or "").strip(),
+                binding_strength=str(parsed.binding_strength or deterministic.binding_strength or "").strip(),
+                confidence=float(parsed.confidence or 0.0),
+                risk_label=str(parsed.risk_label or deterministic.risk_label or "").strip(),
+                risk_rationale=str(parsed.risk_rationale or deterministic.risk_rationale or "").strip(),
+                requirement_text=normalize_requirement_text(
+                    str(parsed.requirement_text or deterministic.requirement_text or candidate.text)
+                ),
+                source_structure=str(parsed.source_structure or deterministic.source_structure or candidate.source_structure or "").strip(),
+            )
+
+        return _classify
+
+    def _ensure_requirement_inventory(self, record: Any, *, classifier: Any | None = None) -> Dict[str, Any]:
+        requirement_store = getattr(self.stores, "requirement_store", None)
+        if requirement_store is None:
+            return {
+                "candidate_count": 0,
+                "kept_count": 0,
+                "dropped_count": 0,
+                "dedupe_count": 0,
+                "inventory_rebuilt": False,
+            }
+        doc_id = str(getattr(record, "doc_id", "") or "")
+        if not doc_id:
+            return {
+                "candidate_count": 0,
+                "kept_count": 0,
+                "dropped_count": 0,
+                "dedupe_count": 0,
+                "inventory_rebuilt": False,
+            }
+        status = requirement_store.document_inventory_status(doc_id, self.tenant_id)
+        if int(status.get("row_count") or 0) > 0 and str(status.get("extractor_version") or "") == REQUIREMENT_EXTRACTOR_VERSION:
+            return {
+                "candidate_count": 0,
+                "kept_count": int(status.get("row_count") or 0),
+                "dropped_count": 0,
+                "dedupe_count": 0,
+                "inventory_rebuilt": False,
+            }
+        chunk_records = list(self.stores.chunk_store.list_document_chunks(doc_id, self.tenant_id))
+        build = build_requirement_inventory(
+            SimpleNamespace(
+                doc_id=doc_id,
+                tenant_id=str(getattr(record, "tenant_id", "") or self.tenant_id),
+                collection_id=str(getattr(record, "collection_id", "") or "default"),
+                title=str(getattr(record, "title", "") or ""),
+                source_type=str(getattr(record, "source_type", "") or ""),
+                file_type=str(getattr(record, "file_type", "") or ""),
+            ),
+            chunk_records,
+            mode=BROAD_REQUIREMENT_MODE,
+            classifier=classifier,
+        )
+        requirement_store.replace_doc_statements(doc_id, self.tenant_id, statements=build.records)
+        return {
+            "candidate_count": build.candidate_count,
+            "kept_count": build.kept_count,
+            "dropped_count": build.dropped_count,
+            "dedupe_count": build.dedupe_count,
+            "inventory_rebuilt": True,
+        }
 
     def extract(
         self,
@@ -532,8 +692,9 @@ class RequirementExtractionService:
         source_scope: str = "auto",
         collection_id: str = "",
         document_names: Sequence[str] | None = None,
+        document_ids: Sequence[str] | None = None,
         all_documents: bool = False,
-        mode: str = MANDATORY_MODE,
+        mode: str = BROAD_REQUIREMENT_MODE,
         max_preview_rows: int = 12,
         export: bool = False,
         filename: str = "",
@@ -550,6 +711,7 @@ class RequirementExtractionService:
             effective_scope = normalized_scope
 
         requested_document_names = [str(item) for item in (document_names or []) if str(item)]
+        requested_document_ids = [str(item) for item in (document_ids or []) if str(item)]
         selection = _select_target_records(
             self.settings,
             self.stores,
@@ -557,6 +719,7 @@ class RequirementExtractionService:
             source_scope=effective_scope,
             collection_id=collection_id,
             document_names=requested_document_names,
+            document_ids=requested_document_ids,
             all_documents=bool(all_documents),
         )
         ignored_document_targets: list[str] = []
@@ -568,6 +731,7 @@ class RequirementExtractionService:
                 source_scope=effective_scope,
                 collection_id=collection_id,
                 document_names=[],
+                document_ids=requested_document_ids,
                 all_documents=bool(all_documents),
             )
             if not retry_selection.get("error"):
@@ -586,6 +750,7 @@ class RequirementExtractionService:
                 "candidate_documents": list(selection.get("candidate_documents") or []),
                 "ignored_document_targets": ignored_document_targets,
                 "active_uploaded_doc_ids": repository_upload_doc_ids(self.session),
+                "selected_doc_ids": list(selection.get("selected_doc_ids") or []),
             }
 
         target_records = list(selection.get("records") or [])
@@ -604,7 +769,7 @@ class RequirementExtractionService:
                 return {
                     "object": "requirements.extraction_result",
                     "handled": False,
-                    "error": "Spreadsheet-style requirement sources are not supported for exact requirement extraction in v1.",
+                    "error": "Spreadsheet-style requirement sources are not supported for exact requirement extraction in v2.",
                     "source_scope": effective_scope,
                     "collection_id": str(selection.get("collection_id") or ""),
                     "unsupported_documents": unsupported,
@@ -619,33 +784,49 @@ class RequirementExtractionService:
 
         normalized_mode = normalize_requirement_mode(mode)
         requirement_store = getattr(self.stores, "requirement_store", None)
-        if requirement_store is None and normalized_mode != LEGAL_CLAUSE_MODE:
+        if requirement_store is None:
             return {"object": "requirements.extraction_result", "handled": False, "error": "Requirement statement storage is unavailable."}
 
+        classifier = self._build_classifier()
         rows: List[Any] = []
         chunk_text_by_id: dict[str, str] = {}
         document_profiles: list[dict[str, Any]] = []
+        aggregated_counts = {
+            "candidate_count": 0,
+            "kept_count": 0,
+            "dropped_count": 0,
+            "dedupe_count": 0,
+        }
+
         for record in target_records:
             doc_id = str(getattr(record, "doc_id", "") or "")
             chunks = list(self.stores.chunk_store.list_document_chunks(doc_id, self.tenant_id)) if doc_id else []
-            chunk_text_by_id.update({str(getattr(chunk, "chunk_id", "") or ""): str(getattr(chunk, "content", "") or "") for chunk in chunks})
-            document_profiles.append(_profile_document(record, chunks, requested_mode=normalized_mode))
-            if normalized_mode == LEGAL_CLAUSE_MODE:
-                rows.extend(_build_ad_hoc_records(self.stores, record, tenant_id=self.tenant_id, mode=LEGAL_CLAUSE_MODE))
-            else:
-                _ensure_requirement_inventory(self.stores, record, tenant_id=self.tenant_id)
-
-        if normalized_mode != LEGAL_CLAUSE_MODE:
-            rows = list(
-                requirement_store.list_statements(
-                    tenant_id=self.tenant_id,
-                    doc_ids=[str(getattr(record, "doc_id", "") or "") for record in target_records],
-                    modalities=requirement_modalities_for_mode(normalized_mode),
-                )
+            chunk_text_by_id.update(
+                {str(getattr(chunk, "chunk_id", "") or ""): str(getattr(chunk, "content", "") or "") for chunk in chunks}
             )
+            build_stats = self._ensure_requirement_inventory(record, classifier=classifier)
+            for key in aggregated_counts:
+                aggregated_counts[key] += int(build_stats.get(key) or 0)
+            document_profiles.append(_profile_document(record, chunks, requested_mode=normalized_mode, build_stats=build_stats))
 
-        output_rows = [_row_to_output(row, mode=normalized_mode, chunk_text_by_id=chunk_text_by_id) for row in rows]
-        output_rows.sort(key=lambda item: (item.get("document_title", "").casefold(), int(item.get("chunk_index") or 0), int(item.get("char_start") or 0)))
+        modalities = None if normalized_mode == BROAD_REQUIREMENT_MODE else requirement_modalities_for_mode(normalized_mode)
+        rows = list(
+            requirement_store.list_statements(
+                tenant_id=self.tenant_id,
+                doc_ids=[str(getattr(record, "doc_id", "") or "") for record in target_records],
+                modalities=modalities,
+            )
+        )
+
+        output_rows = [_row_to_output(row, chunk_text_by_id=chunk_text_by_id) for row in rows]
+        output_rows.sort(
+            key=lambda item: (
+                item.get("document_title", "").casefold(),
+                int(item.get("chunk_index") or 0),
+                int(item.get("char_start") or 0),
+            )
+        )
+
         artifacts: list[dict[str, Any]] = []
         if export:
             requested_filename = str(filename or "").strip()
@@ -671,6 +852,15 @@ class RequirementExtractionService:
             jsonl_artifact = _write_jsonl(self.session, filename=jsonl_filename, rows=output_rows)
             artifacts.extend([csv_artifact, jsonl_artifact])
 
+        preview_columns = [
+            "document_title",
+            "source_location",
+            "source_structure",
+            "requirement_text",
+            "source_excerpt",
+            "risk_rationale",
+            "confidence",
+        ]
         return {
             "object": "requirements.extraction_result",
             "handled": True,
@@ -679,14 +869,21 @@ class RequirementExtractionService:
             "collection_id": str(selection.get("collection_id") or ""),
             "sanitized_user_query": str(source_query or "").strip(),
             "mode": normalized_mode,
+            "extractor_version": REQUIREMENT_EXTRACTOR_VERSION,
             "document_count": len(target_records),
             "statement_count": len(output_rows),
+            "candidate_count": aggregated_counts["candidate_count"],
+            "kept_count": len(output_rows),
+            "dropped_count": aggregated_counts["dropped_count"],
+            "dedupe_count": aggregated_counts["dedupe_count"],
+            "selected_doc_ids": list(selection.get("selected_doc_ids") or []),
             "documents": [_record_to_dict(record) for record in target_records],
             "document_profiles": document_profiles,
             "preview_rows": output_rows[: max(1, int(max_preview_rows or 12))],
-            "preview_columns": ["document_title", "modality", "location", "statement_text", "actor", "confidence"],
+            "preview_columns": preview_columns,
             "artifacts": artifacts,
             "artifact": artifacts[0] if artifacts else {},
+            "artifact_names": [str(item.get("filename") or "") for item in artifacts if str(item.get("filename") or "")],
             "unsupported_documents": unsupported,
             "summary_text": self.summary_text(
                 statement_count=len(output_rows),
@@ -709,8 +906,10 @@ class RequirementExtractionService:
             label = "shall statements"
         elif mode == LEGAL_CLAUSE_MODE:
             label = "legal or clause obligations"
-        else:
+        elif mode == MANDATORY_MODE:
             label = "requirement statements"
+        else:
+            label = "requirement candidates"
         if document_count == 1:
             return f"Extracted {statement_count} {label} from 1 document."
         if source_scope == "kb":
@@ -735,21 +934,67 @@ class RequirementExtractionService:
         invalid_spans = sum(1 for row in rows if not bool(row.get("source_span_valid", True)))
         if invalid_spans:
             warnings.append(f"{invalid_spans} extracted row(s) could not be source-span verified.")
+        merged_rows = sum(1 for row in rows if int(row.get("duplicate_count") or 1) > 1)
+        if merged_rows:
+            warnings.append(f"Merged {merged_rows} overlap-duplicate row(s) across chunk boundaries.")
+        low_confidence = sum(1 for row in rows if float(row.get("confidence") or 0.0) < 0.6)
+        if low_confidence:
+            warnings.append(f"{low_confidence} row(s) were kept with low confidence to preserve recall.")
         return warnings
 
-    def extract_for_user_request(self, user_text: str, *, max_preview_rows: int = 12) -> Dict[str, Any]:
-        effective_user_text = normalize_structured_query(user_text) or str(user_text or "").strip()
-        mode = infer_requirement_mode(effective_user_text)
-        document_names = extract_named_document_targets(effective_user_text)
+    def extract_for_user_request(
+        self,
+        user_text: str,
+        *,
+        requested_scope: Mapping[str, Any] | None = None,
+        max_preview_rows: int = 12,
+    ) -> Dict[str, Any]:
+        sanitized_user_query = normalize_structured_query(user_text) or str(user_text or "").strip()
+        requested = dict(requested_scope or {})
+        scope_kind = str(requested.get("scope_kind") or "").strip().lower()
+        source_scope = "auto"
+        if scope_kind == "uploads":
+            source_scope = "uploads"
+        elif scope_kind == "knowledge_base":
+            source_scope = "kb"
+        collection_id = str(requested.get("collection_id") or "").strip()
+        document_names = [
+            str(item)
+            for item in (requested.get("document_names") or extract_named_document_targets(sanitized_user_query) or [])
+            if str(item)
+        ]
+        document_ids = [
+            str(item)
+            for item in (
+                requested.get("document_ids")
+                or requested.get("selected_doc_ids")
+                or getattr(self.session, "metadata", {}).get("selected_requirement_doc_ids")
+                or []
+            )
+            if str(item)
+        ]
+        all_documents = bool(requested.get("requirements_all_documents")) or infer_all_documents(sanitized_user_query)
+        active_uploaded_doc_ids = repository_upload_doc_ids(self.session)
+        if (
+            not document_ids
+            and source_scope in {"auto", "uploads"}
+            and len(active_uploaded_doc_ids) == 1
+            and not document_names
+            and not all_documents
+        ):
+            document_ids = list(active_uploaded_doc_ids)
+            source_scope = "uploads"
         export = True
         return self.extract(
-            source_scope="auto",
+            source_scope=source_scope,
+            collection_id=collection_id,
             document_names=document_names,
-            all_documents=infer_all_documents(effective_user_text),
-            mode=mode,
+            document_ids=document_ids,
+            all_documents=all_documents,
+            mode=infer_requirement_mode(sanitized_user_query),
             max_preview_rows=max_preview_rows,
             export=export,
-            source_query=effective_user_text,
+            source_query=sanitized_user_query,
         )
 
 

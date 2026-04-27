@@ -591,6 +591,105 @@ def test_graph_service_catalog_fallback_returns_doc_candidates_without_live_grap
     assert payload["results"]
     assert payload["results"][0]["backend"] == "catalog"
     assert payload["results"][0]["doc_id"] == "DOC-1"
+    assert payload["results"][0]["metadata"]["evidence_kind"] == "source_candidate"
+    assert payload["evidence_status"] == "source_candidates_only"
+    assert payload["requires_source_read"] is True
+    assert "source candidates only" in payload["warnings"][0]
+    assert payload["results"][0]["citation_ids"] == ["DOC-1#graph"]
+    assert payload["citations"][0]["title"] == "Release Readiness"
+    assert payload["citations"][0]["catalog_only"] is True
+    assert payload["citations"][0]["url"].startswith("/v1/documents/DOC-1/source?")
+
+
+def test_graph_service_normalizes_graph_method_alias_and_rejects_non_graph_methods(tmp_path: Path):
+    service = _make_service(tmp_path)
+    service.stores.graph_store = None
+    service.index_corpus(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+    record = service.stores.graph_index_store.records["release_graph"]
+    service.stores.graph_index_store.records["release_graph"] = replace(
+        record,
+        query_ready=True,
+        supported_query_methods=["local", "global", "drift"],
+    )
+
+    class _RecordingBackend(_FakeBackend):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def query_index(self, graph_id: str, root_path: Path, *, query: str, method: str, limit: int, doc_ids=None):
+            del graph_id, root_path, limit, doc_ids
+            self.calls.append((method, query))
+            return []
+
+    backend = _RecordingBackend()
+    service._backend_for = lambda backend_name: backend
+
+    payload = service.query_index(
+        "release_graph",
+        query="release readiness",
+        methods=["graph"],
+        limit=3,
+    )
+
+    assert payload["methods"] == ["local", "global"]
+    assert payload["method_aliases"] == {"graph": ["local", "global"]}
+    assert [method for method, _query in backend.calls] == ["local", "global"]
+    assert payload["evidence_status"] == "source_candidates_only"
+
+    invalid = service.query_index(
+        "release_graph",
+        query="release readiness",
+        methods=["vector"],
+        limit=3,
+    )
+
+    assert invalid["results"] == []
+    assert invalid["evidence_status"] == "method_error"
+    assert "Unsupported graph query method(s): vector" in invalid["error"]
+    assert invalid["supported_query_methods"] == ["local", "global", "drift"]
+
+
+def test_graph_service_does_not_inject_hidden_corpus_specific_query_variants(tmp_path: Path):
+    service = _make_service(tmp_path)
+    service.stores.graph_store = None
+    service.index_corpus(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+    record = service.stores.graph_index_store.records["release_graph"]
+    service.stores.graph_index_store.records["release_graph"] = replace(
+        record,
+        query_ready=True,
+        supported_query_methods=["local"],
+    )
+
+    class _ExpansionBackend(_FakeBackend):
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def query_index(self, graph_id: str, root_path: Path, *, query: str, method: str, limit: int, doc_ids=None):
+            del graph_id, root_path, method, limit, doc_ids
+            self.queries.append(query)
+            return []
+
+    backend = _ExpansionBackend()
+    service._backend_for = lambda backend_name: backend
+    question = (
+        "If someone says Blue Mica Wave 2 slipped because the hardware was bad, "
+        "what is the better evidence-based answer?"
+    )
+
+    payload = service.query_index("release_graph", query=question, methods=["local"], limit=3)
+
+    assert payload["expanded_queries"] == []
+    assert backend.queries == [question]
 
 
 def test_graph_service_enforces_private_visibility_across_list_inspect_and_query(tmp_path: Path):
@@ -1498,6 +1597,57 @@ def test_microsoft_graphrag_backend_queries_local_artifacts_without_live_api(tmp
     assert hits[0].backend in {"graphrag_api", "graphrag_artifacts"}
     assert hits[0].doc_id == "DOC-1"
     assert "doc-1#chunk-1" in hits[0].chunk_ids
+
+
+def test_microsoft_graphrag_backend_resolves_manifest_sources_when_doc_id_is_internal(tmp_path: Path):
+    root = tmp_path / "graph_project"
+    output_dir = root / "output"
+    output_dir.mkdir(parents=True)
+    (root / "graph_manifest.json").write_text(
+        json.dumps(
+            {
+                "materialized_sources": [
+                    {
+                        "doc_id": "DOC-1",
+                        "title": "Asterion Planning Draft",
+                        "source_path": "/kb/asterion.md",
+                        "source_type": "kb",
+                        "collection_id": "default",
+                        "materialized_path": str(root / "input" / "001_asterion.txt"),
+                        "materialized_filename": "001_asterion.txt",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    pq.write_table(pa.table({"id": ["ent-1"], "title": ["Asterion"], "description": ["Program"], "text_unit_ids": [["tu-1"]]}), output_dir / "entities.parquet")
+    pq.write_table(pa.table({"id": ["community-1"], "level": [1]}), output_dir / "communities.parquet")
+    pq.write_table(pa.table({"id": ["report-1"], "title": ["Asterion Risk"], "summary": ["Asterion schedule risk"], "doc_ids": [["001_asterion.txt"]]}), output_dir / "community_reports.parquet")
+    pq.write_table(pa.table({"id": ["rel-1"], "source": ["Asterion"], "target": ["North Coast"], "doc_ids": [["001_asterion.txt"]], "chunk_ids": [["tu-1"]]}), output_dir / "relationships.parquet")
+    pq.write_table(pa.table({"id": ["tu-1"], "doc_id": ["001_asterion.txt"], "chunk_id": ["tu-1"], "text": ["Asterion depends on North Coast delivery."]}), output_dir / "text_units.parquet")
+
+    backend = MicrosoftGraphRagBackend(
+        SimpleNamespace(
+            graphrag_use_container=False,
+            graphrag_cli_command="graphrag",
+            graphrag_artifact_cache_ttl_seconds=300,
+        )
+    )
+
+    hits = backend.query_index(
+        "defense_graph",
+        root,
+        query="Asterion North Coast schedule risk",
+        method="local",
+        limit=4,
+        doc_ids=["DOC-1"],
+    )
+
+    assert hits
+    assert hits[0].doc_id == "DOC-1"
+    assert hits[0].source_path == "/kb/asterion.md"
+    assert hits[0].metadata["source"]["title"] == "Asterion Planning Draft"
 
 
 def test_microsoft_graphrag_backend_reports_cli_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

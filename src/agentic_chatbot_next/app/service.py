@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException
 from langchain_core.messages import AIMessage
 
+from agentic_chatbot_next.capabilities import resolve_effective_capabilities
 from agentic_chatbot_next.authz import (
     access_summary_allows,
     access_summary_authz_enabled,
@@ -83,6 +84,25 @@ _BROAD_ANALYSIS_HINTS = re.compile(
     r"control\s+flow|cross-cutting|synthes(?:is|ize)|thorough|comprehensive|detailed|"
     r"deep\s+dive|major\s+subsystems"
     r")\b",
+    re.IGNORECASE,
+)
+_CLAUSE_POLICY_WORKFLOW_HINTS = re.compile(
+    r"\b(clause|clauses|redline|redlines|marked\s+changes?|tracked\s+changes?)\b",
+    re.IGNORECASE,
+)
+_DIRECT_RAG_REQUEST_HINTS = re.compile(
+    r"\b("
+    r"search|cite|cites?|citation|citations|source|sources|grounded|knowledge\s+base|"
+    r"default\s+kb|indexed\s+(?:documents|knowledge\s+base)|check\s+(?:indexed|uploaded)\s+sources"
+    r")\b",
+    re.IGNORECASE,
+)
+_POLICY_LOOKUP_WORKFLOW_HINTS = re.compile(
+    r"\b(policy|policies|guidance|knowledge\s+base|kb|collection|internal\s+policy)\b",
+    re.IGNORECASE,
+)
+_PER_ITEM_WORKFLOW_HINTS = re.compile(
+    r"\b(each|every|all|per[-\s]?item|loop|fan\s*out|for\s+each)\b",
     re.IGNORECASE,
 )
 
@@ -189,6 +209,38 @@ def _coerce_router_decision(
     return RouterDecision(**kwargs)
 
 
+def _should_shortcut_to_rag_worker(
+    *,
+    user_text: str,
+    request_metadata: Dict[str, Any],
+    scope_mode: str,
+    requested_agent_override: str,
+    force_agent: bool,
+    helper_task_type: str,
+) -> bool:
+    if force_agent or requested_agent_override or helper_task_type:
+        return False
+    if str(scope_mode or "").strip().lower() in {"none", "ambiguous"}:
+        return False
+    lowered = str(user_text or "").casefold()
+    if re.search(r"\b(calculator|compute|remember|memory|save\s+this|recall)\b", lowered):
+        return False
+    has_index_scope = any(
+        str(request_metadata.get(key) or "").strip()
+        for key in (
+            "kb_collection_id",
+            "requested_kb_collection_id",
+            "selected_kb_collection_id",
+            "upload_collection_id",
+            "collection_id",
+        )
+    )
+    text_names_index = bool(
+        re.search(r"\b(knowledge\s+base|default\s+kb|indexed|uploaded\s+(?:document|file|source))\b", lowered)
+    )
+    return bool(_DIRECT_RAG_REQUEST_HINTS.search(user_text) and (has_index_scope or text_names_index))
+
+
 def _should_default_to_coordinator_for_broad_grounded_analysis(
     user_text: str,
     *,
@@ -214,6 +266,22 @@ def _should_default_to_coordinator_for_broad_grounded_analysis(
     if str(resolved_intent.answer_contract.depth or "").strip() == "deep":
         return True
     return bool(_BROAD_ANALYSIS_HINTS.search(str(user_text or "")))
+
+
+def _should_default_to_coordinator_for_capability_workflow(
+    user_text: str,
+    *,
+    session_metadata: Dict[str, Any] | None = None,
+) -> bool:
+    text = str(user_text or "")
+    metadata = dict(session_metadata or {})
+    has_upload_context = bool(metadata.get("uploaded_doc_ids") or metadata.get("has_uploads"))
+    mixed_clause_policy = bool(_CLAUSE_POLICY_WORKFLOW_HINTS.search(text)) and bool(
+        _POLICY_LOOKUP_WORKFLOW_HINTS.search(text)
+    )
+    per_item_policy = bool(_PER_ITEM_WORKFLOW_HINTS.search(text)) and bool(_POLICY_LOOKUP_WORKFLOW_HINTS.search(text))
+    buyer_response = bool(re.search(r"\b(buyer|supplier|write\s+back|recommended\s+action|recommendation)\b", text, re.I))
+    return bool((has_upload_context or "uploaded" in text.lower()) and mixed_clause_policy and (per_item_policy or buyer_response))
 
 
 @dataclass
@@ -835,6 +903,30 @@ class RuntimeService:
             **kb_scope_patch,
             "access_summary": dict(access_summary or {}),
         }
+        effective_capabilities = resolve_effective_capabilities(
+            settings=self.ctx.settings,
+            stores=self.ctx.stores,
+            session=SimpleNamespace(
+                tenant_id=session.tenant_id,
+                user_id=session.user_id,
+                access_summary=dict(access_summary or {}),
+                metadata=preflight_metadata,
+            ),
+            registry=self.kernel.registry,
+            access_summary=dict(access_summary or {}),
+        )
+        preflight_metadata = {
+            **preflight_metadata,
+            "effective_capabilities": effective_capabilities.to_dict(),
+            "permission_mode": effective_capabilities.permission_mode,
+            "fast_path_policy": effective_capabilities.fast_path_policy,
+        }
+        session.metadata = {
+            **dict(getattr(session, "metadata", {}) or {}),
+            "effective_capabilities": effective_capabilities.to_dict(),
+            "permission_mode": effective_capabilities.permission_mode,
+            "fast_path_policy": effective_capabilities.fast_path_policy,
+        }
         pending_worker_question = dict(preflight_metadata.get("pending_worker_question") or {})
         if pending_worker_question and str(pending_worker_question.get("message_type") or "") == "question_request":
             routed_response = self._answer_pending_worker_question(
@@ -892,6 +984,39 @@ class RuntimeService:
             self._ensure_kb_ready(
                 session.tenant_id,
                 attempt_sync=bool(getattr(self.ctx.settings, "seed_demo_kb_on_startup", True)),
+            )
+        if _should_shortcut_to_rag_worker(
+            user_text=routing_user_text,
+            request_metadata=request_metadata,
+            scope_mode=preflight_scope.mode,
+            requested_agent_override=requested_agent_override,
+            force_agent=force_agent,
+            helper_task_type=helper_task_type,
+        ):
+            route_metadata = {
+                "route": "AGENT",
+                "router_confidence": 1.0,
+                "router_reasons": ["direct_grounded_rag_request"],
+                "router_method": "metadata_direct_rag",
+                "suggested_agent": "rag_worker",
+                "requested_agent_override": "",
+                "requested_agent_override_applied": False,
+                "has_attachments": bool(upload_paths),
+                "uploaded_doc_ids": list(getattr(session, "uploaded_doc_ids", []) or []),
+                "tenant_id": session.tenant_id,
+                "user_id": session.user_id,
+                "conversation_id": session.conversation_id,
+                "request_id": session.request_id,
+                "effective_user_text": routing_user_text[:500],
+                "runtime_diagnostics": runtime_settings_diagnostics(self.ctx.settings),
+            }
+            return self.kernel.process_agent_turn(
+                session,
+                user_text=routing_user_text,
+                callbacks=extra_callbacks,
+                agent_name="rag_worker",
+                route_metadata=route_metadata,
+                chat_max_output_tokens=request_chat_max_output_tokens,
             )
         registered_live_sink = False
         if progress_sink is not None and getattr(session, "session_id", ""):
@@ -1141,6 +1266,17 @@ class RuntimeService:
                     if selected_agent != "coordinator":
                         selected_agent = "coordinator"
                         coordinator_default_applied = True
+                elif _should_default_to_coordinator_for_capability_workflow(
+                    routing_user_text,
+                    session_metadata={
+                        **preflight_metadata,
+                        **dict(getattr(session, "metadata", {}) or {}),
+                        "has_uploads": bool(getattr(session, "uploaded_doc_ids", []) or upload_paths),
+                    },
+                ) and effective_capabilities.allows_agent("coordinator"):
+                    if selected_agent != "coordinator":
+                        selected_agent = "coordinator"
+                        coordinator_default_applied = True
                 elif (
                     not str(getattr(decision, "suggested_agent", "") or "").strip()
                     and str(deep_rag_policy.preferred_agent or "").strip()
@@ -1172,10 +1308,30 @@ class RuntimeService:
                             **payload,
                         },
                     )
+            if not effective_capabilities.allows_agent(selected_agent):
+                if selected_agent != "coordinator" and effective_capabilities.allows_agent("coordinator"):
+                    selected_agent = "coordinator"
+                    coordinator_default_applied = True
+                else:
+                    return self.kernel.persist_manual_assistant_response(
+                        session,
+                        text=(
+                            f"The selected agent `{selected_agent}` is disabled by your current capability profile. "
+                            "Turn it back on or enable the coordinator to run this request."
+                        ),
+                        agent_name="router",
+                        route_metadata={
+                            **meta,
+                            "capability_blocked_agent": selected_agent,
+                            "effective_capabilities": effective_capabilities.to_dict(),
+                        },
+                        message_metadata={"turn_outcome": "capability_blocked_agent"},
+                    )
             if decision.route == "BASIC" and not requested_agent_override:
                 selected_agent = "basic"
             meta["requested_agent_override_applied"] = bool(requested_agent_override)
             meta["coordinator_default_applied"] = coordinator_default_applied
+            meta["effective_capabilities"] = effective_capabilities.to_dict()
 
             if long_output_options.enabled:
                 try:

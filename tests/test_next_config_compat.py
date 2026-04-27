@@ -21,6 +21,26 @@ def test_deprecated_runtime_compat_env_vars_no_longer_block_settings_load(monkey
     assert settings.agent_definitions_json == "{\"general\": {\"name\": \"ignored\"}}"
 
 
+def test_ocr_enabled_prefers_new_env_over_legacy_alias(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("OCR_ENABLED", "true")
+    monkeypatch.setenv("USE_PADDLE_OCR", "false")
+
+    settings = load_settings()
+
+    assert settings.ocr_enabled is True
+
+
+def test_deprecated_use_paddle_ocr_still_controls_ocr(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("OCR_ENABLED", raising=False)
+    monkeypatch.setenv("USE_PADDLE_OCR", "false")
+
+    settings = load_settings()
+
+    assert settings.ocr_enabled is False
+
+
 def test_agent_model_override_envs_are_parsed_and_normalized(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("AGENT_GENERAL_CHAT_MODEL", "gpt-oss:20b")
@@ -118,6 +138,24 @@ def test_runtime_limit_defaults_restore_interactive_baseline(monkeypatch, tmp_pa
     assert settings.max_revision_rounds == 8
     assert settings.skill_context_max_chars == 4000
     assert settings.retrieval_decomposition_enabled is False
+
+
+def test_rag_top_k_defaults_are_15_each(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("RAG_TOPK_VECTOR", raising=False)
+    monkeypatch.delenv("RAG_TOPK_BM25", raising=False)
+    monkeypatch.delenv("RAG_BUDGET_MS", raising=False)
+    monkeypatch.delenv("RAG_JUDGE_GRADE_MAX_CHUNKS", raising=False)
+
+    settings = load_settings()
+
+    assert settings.rag_top_k_vector == 15
+    assert settings.rag_top_k_keyword == 15
+    assert settings.rag_budget_ms == 210000
+    assert settings.rag_budget_synthesis_reserve_ms == 30000
+    assert settings.rag_heuristic_grading_enabled is True
+    assert settings.rag_judge_grade_max_chunks == 12
+    assert settings.rag_extractive_fallback_enabled is True
     assert settings.entity_linking_enabled is False
     assert settings.section_first_retrieval_enabled is False
     assert settings.retrieval_quality_verifier_enabled is False

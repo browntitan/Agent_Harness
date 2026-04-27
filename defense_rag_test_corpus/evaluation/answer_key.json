@@ -8,7 +8,7 @@
       "asterion_subtier_sow_rev_b.docx"
     ],
     "supporting_references": [
-      "Section 1 Purpose and Scope; Section 4 Deliverables and Acceptance"
+      "Section 1 P003-P004; Section 4 P013-P014"
     ],
     "rationale": "The SOW is the formal supplier-facing document and names the subtier supplier directly."
   },
@@ -22,8 +22,8 @@
       "asterion_monthly_status_review_final.pdf"
     ],
     "supporting_references": [
-      "IMS!C3; Summary!B8",
-      "Section 1 Executive Summary; Section 2 Technical Status table"
+      "Summary!B8; IMS!A6:D6",
+      "Section 1 P1L010-P1L012; Technical Status table P1L022-P1L025"
     ],
     "rationale": "Both the workbook and final status review carry the current approved CDR date."
   },
@@ -36,7 +36,7 @@
       "iron_vale_ground_test_plan_final.pdf"
     ],
     "supporting_references": [
-      "Section 1 Test Purpose; Section 2 table"
+      "Section 1 P1L010-P1L012; table P1L020-P1L022"
     ],
     "rationale": "The requirement is stated directly in the formal ground test plan."
   },
@@ -50,8 +50,8 @@
       "iron_vale_schedule_risk_workbook.xlsx"
     ],
     "supporting_references": [
-      "Section 1 Summary Result; Section 2 table",
-      "TestMatrix!C3"
+      "Section 1 P1L006-P1L008; table P1L021-P1L023",
+      "TestMatrix!A6:D6"
     ],
     "rationale": "The test summary and workbook both record the observed endurance result."
   },
@@ -64,7 +64,7 @@
       "trident_echo_shock_qualification_brief_final.pdf"
     ],
     "supporting_references": [
-      "Section 1 Executive Summary; Section 2 Test Conditions and Results"
+      "Section 1 P1L010-P1L012; Section 2 P1L016-P1L024"
     ],
     "rationale": "The shock briefing identifies BR-6 as the bracket concern driving the conditional pass."
   },
@@ -93,8 +93,8 @@
       "blue_mica_crypto_compliance_summary_final.pdf"
     ],
     "supporting_references": [
-      "Section 3 Veridian Crypto Modules",
-      "Section 2 Compliance Status"
+      "Section 3 P007-P009; table T1R3",
+      "Section 2 P1L012-P1L023"
     ],
     "rationale": "The vendor review and compliance summary identify Veridian as the critical-path execution problem."
   },
@@ -108,8 +108,8 @@
       "blue_mica_crypto_compliance_summary_final.pdf"
     ],
     "supporting_references": [
-      "DeployPlan!D4",
-      "Section 3 Program Implications"
+      "DeployPlan!A7:D7",
+      "Section 3 P1L024-P1L029"
     ],
     "rationale": "The workbook gives the current date directly, and the compliance summary explains the move."
   },
@@ -123,8 +123,8 @@
       "harbor_scribe_quality_audit_summary_final.pdf"
     ],
     "supporting_references": [
-      "Section 1 Current State; Issue H-07",
-      "Section 2 Findings"
+      "Section 1 Current State; Issue H-07 in Section 2",
+      "Section 2 P1L012-P1L020"
     ],
     "rationale": "Both files identify Paint Barn 2 / paint areas as the problematic environment."
   },
@@ -138,8 +138,8 @@
       "harbor_scribe_quality_audit_summary_final.pdf"
     ],
     "supporting_references": [
-      "KPI!C3",
-      "Section 2 Findings"
+      "KPI!A6:C6",
+      "Section 2 P1L017-P1L018"
     ],
     "rationale": "The KPI workbook states the current backlog age, and the audit references the same trend."
   },
@@ -153,8 +153,8 @@
       "ember_reach_procurement_scoring_workbook.xlsx"
     ],
     "supporting_references": [
-      "Section 1 Procurement Purpose; Section 2 table",
-      "Requirements!B3"
+      "Section 1 P1L010-P1L012; table P1L021-P1L024",
+      "Requirements!A6:D6"
     ],
     "rationale": "The RFP overview and workbook requirements tab both state the threshold."
   },
@@ -167,7 +167,7 @@
       "ember_reach_procurement_scoring_workbook.xlsx"
     ],
     "supporting_references": [
-      "Scorecard!A3:E5; Scorecard!E3"
+      "Scorecard!A6:E8; highest overall at E6=86.2"
     ],
     "rationale": "The scorecard tab shows Summit Circuits with the highest overall score."
   },
@@ -180,7 +180,7 @@
       "asterion_ecp_04_rev_c.docx"
     ],
     "supporting_references": [
-      "Section 1 Change Identification and Summary; Section 3 table"
+      "Section 1 P004; Section 3 P010; table T1R2"
     ],
     "rationale": "The ECP names TI-88 as the new thermal isolator."
   },
@@ -194,8 +194,8 @@
       "blue_mica_crypto_compliance_summary_final.pdf"
     ],
     "supporting_references": [
-      "Section 1 Program Objective",
-      "Section 1 Purpose"
+      "Section 1 P005",
+      "Section 1 P1L005-P1L010"
     ],
     "rationale": "Both the refresh plan and compliance summary identify ENC-21M."
   },
@@ -209,8 +209,8 @@
       "trident_echo_cost_bom_workbook.xlsx"
     ],
     "supporting_references": [
-      "Section 1 Executive Summary; Section 2 table",
-      "Milestones!C4"
+      "Section 1 P1L005-P1L009; table P1L020-P1L023",
+      "Milestones!A7:C7"
     ],
     "rationale": "The physical test execution date appears in both the briefing and the milestones tab."
   },
@@ -226,10 +226,10 @@
       "asterion_budget_schedule_tracker.xlsx"
     ],
     "supporting_references": [
-      "Issue Digest opening note and Section 4 Cost Commentary",
-      "ECP Section 5 Schedule Impact",
-      "Status Review Section 1 Executive Summary",
-      "IMS!C3/C4"
+      "Opening note before Section 1; Section 4 Cost Commentary",
+      "Section 5 P016-P018; Section 6 P020-P021",
+      "Section 1 P1L010-P1L013; Section 4 P1L040-P1L042",
+      "Summary!B8:B9; IMS!A6:D7"
     ],
     "rationale": "The draft note explicitly says later controlled artifacts supersede it, while the ECP/status/workbook carry the approved values."
   },
@@ -243,8 +243,8 @@
       "asterion_budget_schedule_tracker.xlsx"
     ],
     "supporting_references": [
-      "ECP Section 5 Schedule Impact",
-      "IMS!B3:D3"
+      "Section 1 P004-P005; Section 5 P016-P018",
+      "IMS!A6:D6"
     ],
     "rationale": "The ECP explains the cause, and the workbook records the approved date delta."
   },
@@ -258,8 +258,8 @@
       "iron_vale_schedule_risk_workbook.xlsx"
     ],
     "supporting_references": [
-      "Integration Notes Sections 3-5",
-      "IMS!C4; Risks!A3:F5"
+      "Sections 3-5",
+      "IMS!A8:E8; Risks!A6:B7"
     ],
     "rationale": "The draft notes discuss both issues, and the workbook formalizes them in schedule/risk form."
   },
@@ -272,7 +272,7 @@
       "iron_vale_supplier_proposal_aegis.docx"
     ],
     "supporting_references": [
-      "Section 3 Schedule table; Section 5 Exceptions and Assumptions"
+      "Section 2 P006-P008; Section 5 P016-P018; table T1R5"
     ],
     "rationale": "The proposal includes an explicit limitation on snow/mud validation."
   },
@@ -286,8 +286,8 @@
       "trident_echo_shock_qualification_brief_final.pdf"
     ],
     "supporting_references": [
-      "Constraint Report Sections 1 and 4",
-      "Shock Brief Sections 1-3"
+      "Sections 1, 3, and 4",
+      "Sections 1-3"
     ],
     "rationale": "One document explains the pre-test schedule move; the other explains the later test result."
   },
@@ -303,10 +303,10 @@
       "blue_mica_staffing_deployment_spares.xlsx"
     ],
     "supporting_references": [
-      "After-Action Sections 1, 3, and 4",
-      "Refresh Plan Sections 2-4",
-      "Compliance Summary Section 3",
-      "DeployPlan!C4:D4"
+      "Sections 1, 3, 4, and 5",
+      "Sections 2-4",
+      "Section 2 P1L012-P1L023; Section 3 P1L024-P1L029",
+      "DeployPlan!A7:F7"
     ],
     "rationale": "The slip had both compliance and training/readiness causes."
   },
@@ -321,9 +321,9 @@
       "harbor_scribe_steering_group_minutes.docx"
     ],
     "supporting_references": [
-      "Issue Digest Sections 2-3",
-      "Workshop Sections 2-4",
-      "Minutes Sections 2-4"
+      "Sections 2-3",
+      "Sections 2-4",
+      "Sections 2-4; table T1R2:T1R4"
     ],
     "rationale": "Multiple artifacts show that the schedule decision was broader than a single cyber item."
   },
@@ -337,8 +337,8 @@
       "ember_reach_procurement_scoring_workbook.xlsx"
     ],
     "supporting_references": [
-      "Selection Notes Sections 2 and 3",
-      "Scorecard!A3:E5; PriceComparison!A3:D5"
+      "Sections 2-5",
+      "Scorecard!A6:E8; PriceComparison!A6:D8"
     ],
     "rationale": "The notes describe Helion as the best pure technical paper, while the workbook shows weaker schedule posture."
   },
@@ -352,8 +352,8 @@
       "ember_reach_first_article_test_summary_final.pdf"
     ],
     "supporting_references": [
-      "RFP Section 1 and Section 2 table",
-      "FAT Section 1 Summary; Section 2 table"
+      "Section 1 P1L010-P1L012; table P1L021-P1L024",
+      "Section 1 P1L006-P1L010; table P1L020-P1L021"
     ],
     "rationale": "This requires matching the requirement to the later test result."
   },
@@ -361,16 +361,18 @@
     "question_id": "M10",
     "difficulty": "Medium",
     "question_text": "Which Blue Mica document is best for the total spares cost, and which one is best for the reason spares had to grow?",
-    "expected_answer": "The workbook\u2019s Spares tab is best for the total spares cost (1.94M), while the after-action notes are best for the operational reason the spare posture had to grow.",
+    "expected_answer": "Use the refresh plan, corroborated by the after-action cost signal, for the stated planned spares cost of about $1.94M; use the after-action notes for the operational reason spares had to grow. The workbook has spares line items, but its visible quantities and unit costs sum to about $1.19M, so it should not be cited alone for the $1.94M total.",
     "source_documents": [
-      "blue_mica_staffing_deployment_spares.xlsx",
-      "blue_mica_after_action_notes.txt"
+      "blue_mica_refresh_plan_rev_a.docx",
+      "blue_mica_after_action_notes.txt",
+      "blue_mica_staffing_deployment_spares.xlsx"
     ],
     "supporting_references": [
-      "Spares!E6",
-      "After-Action Sections 2 and 6"
+      "Section 5 P016-P017",
+      "Sections 2 and 6",
+      "Spares!A6:D8 line items only; no reliable $1.94M total"
     ],
-    "rationale": "The spreadsheet carries the number; the narrative explains the cause."
+    "rationale": "The narrative artifacts state the $1.94M spares figure and the operational reason; the workbook spares rows do not support $1.94M on their own, so the prior workbook-only citation was not valid."
   },
   {
     "question_id": "M11",
@@ -383,9 +385,9 @@
       "ember_reach_source_selection_notes.txt"
     ],
     "supporting_references": [
-      "BOM!F3",
-      "Constraint Report Section 3",
-      "Selection Notes Sections 1-3"
+      "BOM!A6:F6",
+      "Section 3 Detail on Cabinet Housings",
+      "Sections 1-3"
     ],
     "rationale": "The answer requires entity disambiguation across scenarios."
   },
@@ -400,9 +402,9 @@
       "asterion_budget_schedule_tracker.xlsx"
     ],
     "supporting_references": [
-      "Issue Digest Sections 1 and 4",
-      "ECP Section 4 Cost Impact",
-      "Summary!B5:B7"
+      "Sections 1 and 4",
+      "Section 4 P013-P015",
+      "Summary!B5:B6"
     ],
     "rationale": "The draft note has the pre-change figure; the ECP/workbook have the approved current figure."
   },
@@ -416,8 +418,8 @@
       "harbor_scribe_training_workshop_notes.txt"
     ],
     "supporting_references": [
-      "Training!B7",
-      "Workshop Section 3"
+      "Training!B6:B9 (36+84+24+18=162)",
+      "Section 3"
     ],
     "rationale": "The workbook has the exact total, and the workshop notes explain the curriculum changes behind it."
   },
@@ -431,8 +433,8 @@
       "iron_vale_supplier_proposal_aegis.docx"
     ],
     "supporting_references": [
-      "Risks!E6",
-      "Pricing Section 4; Schedule table"
+      "Risks!E6:E8 (0.68+0.20+0.00=0.88); CostOptions!A6:F6",
+      "Section 4 P013-P015; table T1R2"
     ],
     "rationale": "The workbook aggregates mitigation, while the proposal shows one supplier-cost component."
   },
@@ -447,9 +449,9 @@
       "ember_reach_procurement_scoring_workbook.xlsx"
     ],
     "supporting_references": [
-      "FAT Sections 1-3",
-      "Transition Plan Sections 3-4",
-      "Schedule!B5:C5"
+      "Sections 1-3",
+      "Sections 3-4",
+      "Schedule!A8:C8"
     ],
     "rationale": "The test result identifies the corrective action; the transition plan/workbook show the moved milestone."
   },
@@ -465,10 +467,10 @@
       "asterion_monthly_status_review_final.pdf"
     ],
     "supporting_references": [
-      "Issue Digest Sections 2-4",
-      "ECP Sections 1-5",
-      "IMS!B3:D3",
-      "Status Review Sections 1 and 3"
+      "Sections 1-4",
+      "Sections 1-5",
+      "IMS!A6:D6",
+      "Section 1 P1L006-P1L013; Section 3 P1L027-P1L034"
     ],
     "rationale": "Answering fully requires linking draft causal context to final approved dates."
   },
@@ -483,9 +485,9 @@
       "asterion_monthly_status_review_final.pdf"
     ],
     "supporting_references": [
-      "ECP Section 4",
-      "Issue Digest Section 2 Issue A-17",
-      "Status Review Section 4"
+      "Section 4 P013-P015; Section 6 P019-P021",
+      "Section 2 Issue A-17",
+      "Sections 1, 3, and 4"
     ],
     "rationale": "The ECP quantifies approved cost growth, while the issue digest and status review preserve the separate supplier-risk thread."
   },
@@ -500,9 +502,9 @@
       "iron_vale_supplier_proposal_aegis.docx"
     ],
     "supporting_references": [
-      "Integration Notes Sections 2-4",
-      "Test Summary Sections 1-3",
-      "Proposal Section 2"
+      "Sections 2-4",
+      "Sections 1-3",
+      "Section 2 P006-P008; table T1R4"
     ],
     "rationale": "The answer requires multi-document root-cause synthesis."
   },
@@ -517,9 +519,9 @@
       "iron_vale_schedule_risk_workbook.xlsx"
     ],
     "supporting_references": [
-      "Proposal Sections 2-5",
-      "Integration Notes Sections 3-5",
-      "IMS!C4; Risks!A3:F5"
+      "Sections 2-5; table T1R2:T1R5",
+      "Sections 3-5",
+      "IMS!A8:E8; Risks!A6:B8"
     ],
     "rationale": "A full answer requires both the supplier proposal and the separate schedule/risk drivers."
   },
@@ -534,9 +536,9 @@
       "trident_echo_shock_qualification_brief_final.pdf"
     ],
     "supporting_references": [
-      "CostSummary!B10:D10 and line items",
-      "Constraint Report Sections 1, 4, and 5",
-      "Shock Brief Sections 1-3"
+      "CostSummary!B6:C12 component sums ($22.44M to $23.31M); BOM!A9:F9",
+      "Sections 1, 4, and 5",
+      "Sections 1-3"
     ],
     "rationale": "The cost story and the test-result story are related but not identical."
   },
@@ -552,10 +554,10 @@
       "blue_mica_staffing_deployment_spares.xlsx"
     ],
     "supporting_references": [
-      "Compliance Sections 1-3",
-      "Vendor Review Section 3",
-      "After-Action Sections 1-4",
-      "DeployPlan!C4:D4"
+      "Sections 1-3",
+      "Section 3 P007-P009; table T1R3",
+      "Sections 1, 3, and 4",
+      "DeployPlan!A7:D7"
     ],
     "rationale": "This requires distinguishing hardware quality from documentation/readiness execution."
   },
@@ -572,11 +574,11 @@
       "harbor_scribe_resource_kpi_workbook.xlsx"
     ],
     "supporting_references": [
-      "Issue Digest Sections 2-4",
-      "Workshop Sections 2-4",
-      "Minutes Sections 2-4",
-      "Audit Sections 2-3",
-      "Rollout!B3:C3; KPI!B3:C3"
+      "Sections 2-4",
+      "Sections 2-4",
+      "Sections 2-4",
+      "Sections 2-3",
+      "Rollout!A6:C6; KPI!A6:C6"
     ],
     "rationale": "A complete answer combines causes of the slip with evidence of business benefit."
   },
@@ -592,10 +594,10 @@
       "ember_reach_supplier_transition_plan.docx"
     ],
     "supporting_references": [
-      "Selection Notes Sections 2-5",
-      "Scorecard!A3:E5",
-      "FAT Sections 1-3",
-      "Transition Plan Sections 3-4"
+      "Sections 2-5",
+      "Scorecard!A6:E8",
+      "Sections 1-3",
+      "Sections 3-4"
     ],
     "rationale": "The answer requires linking trade-study narrative to post-award test evidence and schedule."
   },
@@ -611,10 +613,10 @@
       "blue_mica_after_action_notes.txt"
     ],
     "supporting_references": [
-      "Asterion SOW Sections 1-4",
-      "Issue Digest Section 6",
-      "Vendor Review Section 2",
-      "After-Action Section 2"
+      "Sections 1-4; Section 2 P008",
+      "Section 6 Analyst Notes",
+      "Section 2 P005-P006; Section 5 P014",
+      "Sections 2 and 5"
     ],
     "rationale": "This is an intentional cross-scenario entity-disambiguation challenge."
   },
@@ -630,10 +632,10 @@
       "ember_reach_procurement_scoring_workbook.xlsx"
     ],
     "supporting_references": [
-      "Action Log CAR-22 Summary",
-      "Constraint Report Section 3",
-      "Selection Notes Sections 2-3",
-      "Scorecard!E5"
+      "CAR-22 Summary",
+      "Section 3 Detail on Cabinet Housings",
+      "Sections 1-3",
+      "Scorecard!A8:E8"
     ],
     "rationale": "The challenge is to separate two similar supplier names across unrelated programs."
   },
@@ -649,10 +651,10 @@
       "asterion_monthly_status_review_final.pdf"
     ],
     "supporting_references": [
-      "Issue Digest Sections 1 and 4",
-      "ECP Section 4",
-      "Summary!B5:B7",
-      "Status Review Section 1"
+      "Sections 1 and 4",
+      "Section 4 P013-P015; Section 6 P021",
+      "Summary!B5:B6",
+      "Section 1 P1L010-P1L013"
     ],
     "rationale": "The answer requires understanding versioning and superseded figures."
   },
@@ -667,9 +669,9 @@
       "iron_vale_endurance_test_summary_final.pdf"
     ],
     "supporting_references": [
-      "Ground Test Plan Sections 1-2",
-      "Proposal Sections 2-5",
-      "Test Summary Sections 1-3"
+      "Section 1 P1L010-P1L012; table P1L020-P1L024",
+      "Sections 1-5; table T1R5",
+      "Sections 1-3"
     ],
     "rationale": "The answer requires comparing requirement, failure, and proposed recovery rather than reading any one document in isolation."
   },
@@ -685,10 +687,10 @@
       "trident_echo_shock_qualification_brief_final.pdf"
     ],
     "supporting_references": [
-      "Constraint Report Section 4",
-      "Action Log narrative commentary",
-      "Milestones!B3:C3",
-      "Shock Brief Sections 1-3"
+      "Sections 1, 4, and 7",
+      "Action T-03/T-04; Narrative Commentary",
+      "Milestones!A6:E7",
+      "Sections 1-3"
     ],
     "rationale": "This question requires ordering causes correctly in time."
   },
@@ -696,18 +698,18 @@
     "question_id": "H14",
     "difficulty": "Hard",
     "question_text": "Which artifacts best support a question about Blue Mica\u2019s cost split and the operational rationale for adding trainers?",
-    "expected_answer": "Use the Blue Mica staffing/deployment/spares workbook for the cost split\u2014$14.62M fielding, $1.94M spares, and $0.83M training\u2014and use the after-action notes plus the refresh plan for the rationale that training was too compressed and needed added trainer coverage.",
+    "expected_answer": "Use the after-action notes and refresh plan for the published Blue Mica cost split ($14.62M fielding, $1.94M spares, about $0.83M training) and the operational rationale for adding trainer coverage. The workbook corroborates fielding and training component detail, but its spares line items do not support the $1.94M total on their own.",
     "source_documents": [
-      "blue_mica_staffing_deployment_spares.xlsx",
       "blue_mica_after_action_notes.txt",
-      "blue_mica_refresh_plan_rev_a.docx"
+      "blue_mica_refresh_plan_rev_a.docx",
+      "blue_mica_staffing_deployment_spares.xlsx"
     ],
     "supporting_references": [
-      "FieldingCosts!B7; Spares!E6; Training!D6",
-      "After-Action Sections 3 and 6",
-      "Refresh Plan Section 3"
+      "Sections 3 and 6",
+      "Sections 3 and 5",
+      "FieldingCosts!B6:B9; Training!B6:C8; Spares!A6:D8 line items only"
     ],
-    "rationale": "This tests both numeric retrieval and narrative justification across formats."
+    "rationale": "The narrative artifacts provide the published cost split and rationale; the workbook corroborates fielding/training detail but has a spares-total conflict, so it should not be the sole source for $1.94M."
   },
   {
     "question_id": "H15",
@@ -721,10 +723,10 @@
       "ember_reach_supplier_transition_plan.docx"
     ],
     "supporting_references": [
-      "Requirements!B3/B5; PriceComparison!D3",
-      "RFP Sections 1-2",
-      "FAT Sections 1-3",
-      "Transition Plan Sections 3-4"
+      "Requirements!A6:B8; PriceComparison!A6:D6; Schedule!A8:C8; Risks!A6:D6",
+      "Sections 1-3",
+      "Sections 1-3",
+      "Sections 3-4"
     ],
     "rationale": "This distinguishes between meeting source-selection thresholds and still needing disciplined post-award corrective action."
   }

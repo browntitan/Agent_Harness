@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import datetime as dt
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
@@ -51,6 +52,52 @@ def _coerce_list(value: Any) -> List[str]:
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]
     return [part.strip(" '\"") for part in text.split(",") if part.strip(" '\"")]
+
+
+def _lookup_keys(value: Any) -> List[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    keys = {text, text.lower()}
+    try:
+        path = Path(text)
+        if path.name:
+            keys.add(path.name)
+            keys.add(path.name.lower())
+        if path.stem:
+            keys.add(path.stem)
+            keys.add(path.stem.lower())
+    except Exception:
+        pass
+    return [key for key in keys if key]
+
+
+def _source_info_from_entry(entry: Dict[str, Any]) -> Dict[str, str]:
+    doc_id = str(entry.get("doc_id") or entry.get("source_doc_id") or "").strip()
+    title = str(entry.get("title") or entry.get("source_title") or doc_id).strip()
+    source_path = str(entry.get("source_path") or "").strip()
+    materialized_path = str(entry.get("materialized_path") or "").strip()
+    return {
+        "doc_id": doc_id,
+        "title": title,
+        "source_path": source_path,
+        "source_display_path": str(entry.get("source_display_path") or "").strip(),
+        "source_type": str(entry.get("source_type") or "").strip(),
+        "collection_id": str(entry.get("collection_id") or "").strip(),
+        "materialized_path": materialized_path,
+        "materialized_filename": str(entry.get("materialized_filename") or (Path(materialized_path).name if materialized_path else "")).strip(),
+    }
+
+
+def _resolve_source_info(candidates: Sequence[str], source_lookup: Dict[str, Dict[str, str]] | None) -> Dict[str, str]:
+    if not source_lookup:
+        return {}
+    for candidate in candidates:
+        for key in _lookup_keys(candidate):
+            info = source_lookup.get(key)
+            if info:
+                return dict(info)
+    return {}
 
 
 def _term_overlap(query: str, haystack: str) -> float:
@@ -195,6 +242,49 @@ class GraphRagArtifactBundle:
                     mapping[key] = doc_id
         return mapping
 
+    def source_manifest(self) -> List[Dict[str, str]]:
+        candidates = [
+            self.project_root / "source_manifest.json",
+            self.project_root / "graph_manifest.json",
+            self.project_root.parent / "source_manifest.json",
+            self.project_root.parent / "graph_manifest.json",
+            self.artifact_dir.parent / "source_manifest.json",
+            self.artifact_dir.parent / "graph_manifest.json",
+        ]
+        for path in candidates:
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            raw_sources = payload.get("materialized_sources") or payload.get("sources") or []
+            if not isinstance(raw_sources, list):
+                continue
+            return [
+                _source_info_from_entry(dict(item))
+                for item in raw_sources
+                if isinstance(item, dict)
+            ]
+        return []
+
+    def source_lookup(self) -> Dict[str, Dict[str, str]]:
+        lookup: Dict[str, Dict[str, str]] = {}
+        for info in self.source_manifest():
+            for value in [
+                info.get("doc_id"),
+                info.get("title"),
+                info.get("source_path"),
+                info.get("source_display_path"),
+                info.get("materialized_path"),
+                info.get("materialized_filename"),
+            ]:
+                for key in _lookup_keys(value):
+                    lookup[key] = dict(info)
+        return lookup
+
     def to_pandas(self) -> Dict[str, Any]:
         if pd is None:
             raise RuntimeError("pandas is required for GraphRAG Python query execution.")
@@ -313,7 +403,12 @@ def _row_text(row: Dict[str, Any], keys: Iterable[str]) -> str:
     return " ".join(str(row.get(key) or "") for key in keys if str(row.get(key) or "").strip())
 
 
-def _candidate_doc_ids(row: Dict[str, Any], *, text_unit_doc_map: Dict[str, str] | None = None) -> List[str]:
+def _candidate_doc_ids(
+    row: Dict[str, Any],
+    *,
+    text_unit_doc_map: Dict[str, str] | None = None,
+    source_lookup: Dict[str, Dict[str, str]] | None = None,
+) -> List[str]:
     doc_ids = _coerce_list(
         row.get("doc_ids")
         or row.get("document_ids")
@@ -325,6 +420,13 @@ def _candidate_doc_ids(row: Dict[str, Any], *, text_unit_doc_map: Dict[str, str]
             mapped = str(text_unit_doc_map.get(chunk_id) or "").strip()
             if mapped and mapped not in doc_ids:
                 doc_ids.append(mapped)
+    resolved: List[str] = []
+    for doc_id in doc_ids:
+        source_info = _resolve_source_info([doc_id], source_lookup)
+        resolved_doc_id = str(source_info.get("doc_id") or doc_id).strip()
+        if resolved_doc_id and resolved_doc_id not in resolved:
+            resolved.append(resolved_doc_id)
+    doc_ids = resolved
     return [doc_id for doc_id in doc_ids if doc_id]
 
 
@@ -352,10 +454,24 @@ def _build_hit(
     summary: str,
     row: Dict[str, Any],
     text_unit_doc_map: Dict[str, str] | None = None,
+    source_lookup: Dict[str, Dict[str, str]] | None = None,
     extra_metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     chunk_ids = _candidate_chunk_ids(row)
-    doc_ids = _candidate_doc_ids(row, text_unit_doc_map=text_unit_doc_map)
+    source_info = _resolve_source_info(
+        [
+            *(_coerce_list(row.get("doc_ids") or row.get("document_ids") or row.get("source_doc_ids") or row.get("documents"))),
+            *chunk_ids,
+            str(row.get("source_path") or ""),
+            str(row.get("title") or row.get("name") or ""),
+        ],
+        source_lookup,
+    )
+    doc_ids = _candidate_doc_ids(row, text_unit_doc_map=text_unit_doc_map, source_lookup=source_lookup)
+    if not doc_ids and source_info.get("doc_id"):
+        doc_ids = [str(source_info.get("doc_id") or "")]
+    if not source_info and doc_ids:
+        source_info = _resolve_source_info(doc_ids, source_lookup)
     return {
         "graph_id": graph_id,
         "backend": backend,
@@ -364,8 +480,8 @@ def _build_hit(
         "chunk_ids": chunk_ids,
         "score": score,
         "title": title,
-        "source_path": str(row.get("source_path") or ""),
-        "source_type": str(row.get("source_type") or ""),
+        "source_path": str(row.get("source_path") or source_info.get("source_path") or ""),
+        "source_type": str(row.get("source_type") or source_info.get("source_type") or ""),
         "relationship_path": [
             item
             for item in [
@@ -375,7 +491,7 @@ def _build_hit(
             if item
         ],
         "summary": summary,
-        "metadata": {**dict(extra_metadata or {}), "raw_row": dict(row)},
+        "metadata": {**dict(extra_metadata or {}), "source": source_info, "raw_row": dict(row)},
     }
 
 
@@ -388,6 +504,7 @@ def normalize_context_hits(
     limit: int,
     doc_ids: Sequence[str] | None = None,
     text_unit_doc_map: Dict[str, str] | None = None,
+    source_lookup: Dict[str, Dict[str, str]] | None = None,
 ) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     scoped_doc_ids = {str(item) for item in (doc_ids or []) if str(item)}
@@ -413,6 +530,7 @@ def normalize_context_hits(
                 summary=summary or str(response or "")[:280],
                 row=row,
                 text_unit_doc_map=text_unit_doc_map,
+                source_lookup=source_lookup,
                 extra_metadata={"context_table": name, "api_response": str(response or "")[:2000]},
             )
             if scoped_doc_ids and hit["doc_id"] and hit["doc_id"] not in scoped_doc_ids:
@@ -437,6 +555,7 @@ def search_artifact_rows(
     scoped_doc_ids = {str(item) for item in (doc_ids or []) if str(item)}
     candidates: List[Dict[str, Any]] = []
     text_unit_doc_map = bundle.text_unit_doc_map()
+    source_lookup = bundle.source_lookup()
     table_order = ["text_units", "relationships", "entities", "community_reports", "communities"]
     if method == "global":
         table_order = ["community_reports", "communities", "entities"]
@@ -472,6 +591,7 @@ def search_artifact_rows(
                 summary=summary[:500],
                 row=row,
                 text_unit_doc_map=text_unit_doc_map,
+                source_lookup=source_lookup,
                 extra_metadata={"context_table": table_name},
             )
             if scoped_doc_ids and hit["doc_id"] and hit["doc_id"] not in scoped_doc_ids:

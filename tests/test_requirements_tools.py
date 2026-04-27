@@ -7,8 +7,13 @@ from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.messages import SessionState
 from agentic_chatbot_next.persistence.postgres.chunks import ChunkRecord
 from agentic_chatbot_next.rag.ingest import backfill_requirement_statements
-from agentic_chatbot_next.rag.requirements import MANDATORY_MODE, STRICT_SHALL_MODE
-from agentic_chatbot_next.rag.requirements_service import RequirementExtractionService
+from agentic_chatbot_next.rag.requirements import (
+    BROAD_REQUIREMENT_MODE,
+    MANDATORY_MODE,
+    REQUIREMENT_EXTRACTOR_VERSION,
+    STRICT_SHALL_MODE,
+)
+from agentic_chatbot_next.rag.requirements_service import RequirementExtractionService, infer_requirement_mode
 from agentic_chatbot_next.runtime.context import RuntimePaths
 from agentic_chatbot_next.runtime.kernel import RuntimeKernel
 from agentic_chatbot_next.sandbox.workspace import SessionWorkspace
@@ -25,8 +30,19 @@ class FakeRequirementStore:
     def delete_doc_statements(self, doc_id: str, tenant_id: str) -> None:
         self._rows.pop((tenant_id, doc_id), None)
 
-    def has_doc_statements(self, doc_id: str, tenant_id: str) -> bool:
-        return bool(self._rows.get((tenant_id, doc_id)))
+    def has_doc_statements(self, doc_id: str, tenant_id: str, *, extractor_version: str = "") -> bool:
+        rows = list(self._rows.get((tenant_id, doc_id), []))
+        if not extractor_version:
+            return bool(rows)
+        return any(str(getattr(row, "extractor_version", "") or "") == extractor_version for row in rows)
+
+    def document_inventory_status(self, doc_id: str, tenant_id: str) -> dict[str, object]:
+        rows = list(self._rows.get((tenant_id, doc_id), []))
+        return {
+            "row_count": len(rows),
+            "extractor_version": str(getattr(rows[0], "extractor_version", "") or "") if rows else "",
+            "extractor_mode": str(getattr(rows[0], "extractor_mode", "") or "") if rows else "",
+        }
 
     def list_statements(
         self,
@@ -167,6 +183,16 @@ def test_extract_requirement_statements_prefers_single_supported_upload_and_retu
 
     assert result["statement_count"] == 2
     assert result["document_count"] == 1
+    assert result["extractor_version"] == REQUIREMENT_EXTRACTOR_VERSION
+    assert result["preview_columns"] == [
+        "document_title",
+        "source_location",
+        "source_structure",
+        "requirement_text",
+        "source_excerpt",
+        "risk_rationale",
+        "confidence",
+    ]
     assert result["preview_rows"][0]["document_title"] == "SPEC_A.docx"
     assert "Extracted 2 requirement statements from 1 document." == result["summary_text"]
 
@@ -322,10 +348,62 @@ extract all requirements/ shall statements from the uploaded document
     result = service.extract_for_user_request(wrapped)
 
     assert result["handled"] is True
+    assert result["mode"] == BROAD_REQUIREMENT_MODE
+    assert result["statement_count"] == 3
+    assert result["ignored_document_targets"] == []
+    assert result["selected_doc_ids"] == ["UPLOAD_wrapped"]
+    assert result["preview_rows"][0]["source_excerpt"]
+    assert result["sanitized_user_query"] == "extract all requirements/ shall statements from the uploaded document"
+
+
+def test_requirements_service_uses_strict_mode_only_for_explicit_shall_requests(tmp_path: Path) -> None:
+    upload_record = _record(
+        doc_id="UPLOAD_strict",
+        title="Strict_SPEC.docx",
+        source_type="upload",
+        collection_id="owui-chat-strict",
+        file_type="docx",
+        source_path="/tmp/Strict_SPEC.docx",
+    )
+    stores = _stores(
+        [upload_record],
+        {
+            "UPLOAD_strict": [
+                ChunkRecord(
+                    chunk_id="UPLOAD_strict#chunk0001",
+                    doc_id="UPLOAD_strict",
+                    tenant_id="tenant",
+                    collection_id="owui-chat-strict",
+                    chunk_index=0,
+                    content=(
+                        "The system shall retain audit logs. "
+                        "The system shall not expose debug ports. "
+                        "The operator must review alerts."
+                    ),
+                    chunk_type="requirement",
+                )
+            ]
+        },
+    )
+    session = _session(
+        tmp_path,
+        uploaded_doc_ids=["UPLOAD_strict"],
+        metadata={"upload_collection_id": "owui-chat-strict", "collection_id": "owui-chat-strict"},
+    )
+    service = RequirementExtractionService(
+        SimpleNamespace(default_collection_id="default", default_tenant_id="tenant"),
+        stores,
+        session,
+    )
+
+    assert infer_requirement_mode("extract all requirements/ shall statements from the uploaded document") == BROAD_REQUIREMENT_MODE
+    assert infer_requirement_mode("extract only shall statements from the uploaded document") == STRICT_SHALL_MODE
+
+    result = service.extract_for_user_request("extract only shall statements from the uploaded document")
+
     assert result["mode"] == STRICT_SHALL_MODE
     assert result["statement_count"] == 2
-    assert result["ignored_document_targets"] == []
-    assert result["sanitized_user_query"] == "extract all requirements/ shall statements from the uploaded document"
+    assert [row["modality"] for row in result["preview_rows"]] == ["shall", "shall_not"]
 
 
 def test_export_requirement_statements_writes_csv_artifact(tmp_path: Path) -> None:
@@ -369,6 +447,7 @@ def test_export_requirement_statements_writes_csv_artifact(tmp_path: Path) -> No
     assert result["artifact"]["filename"] == "rfp-corpus__requirement_statements.csv"
     exported = session.workspace.read_text("rfp-corpus__requirement_statements.csv")
     assert "document_title,modality,location,statement_text" in exported
+    assert "source_excerpt,source_location,source_structure,binding_strength,risk_label,risk_rationale" in exported
     assert "SPEC_B.md,shall" in exported
 
 
@@ -612,7 +691,10 @@ def test_runtime_kernel_runs_requirements_workflow_before_react(tmp_path: Path) 
 
     assert result is not None
     assert result.metadata["turn_outcome"] == "requirements_extraction"
-    assert result.metadata["requirements_extraction"]["statement_count"] == 1
+    assert result.metadata["sanitized_user_query"] == "extract all requirements/ shall statements from the uploaded document"
+    assert result.metadata["selected_requirement_doc_ids"] == ["UPLOAD_req"]
+    assert result.metadata["requirements_extraction"]["statement_count"] == 2
     assert "Runtime_SPEC.docx" in result.text
+    assert "Source Text" in result.text
     assert len(result.metadata["artifacts"]) == 2
     assert result.messages[-1].artifact_refs

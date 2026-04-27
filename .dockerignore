@@ -32,6 +32,13 @@ dist
 build
 *.tsbuildinfo
 
+# Development/demo/test trees excluded from production image context.
+# Use bind mounts or a dedicated test/demo Dockerfile when these are needed.
+claude-code-main
+tests
+new_demo_notebook
+defense_rag_test_corpus
+
 # Runtime state owned by Docker volumes in v3
 data/runtime
 data/workspaces

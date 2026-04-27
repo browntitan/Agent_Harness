@@ -109,4 +109,23 @@ describe('buildArchitectureMapLayout', () => {
       layer: 'highlighted',
     })
   })
+
+  it('keeps every edge in the normal layer when the overview has no selection', () => {
+    const edges: ArchitectureEdge[] = [
+      { id: 'edge-default', source: 'router-core', target: 'agent-general', kind: 'routing_path', label: 'Default AGENT' },
+      { id: 'edge-skill-store', source: 'agent-general', target: 'service-skill-store', kind: 'service_dependency', label: 'Skill Store' },
+    ]
+
+    const layout = buildArchitectureMapLayout({
+      layers: LAYERS,
+      nodes: NODES,
+      edges,
+      highlightedEdgeIds: new Set(),
+      highlightedNodeIds: new Set(),
+    })
+
+    expect(layout.edges).toHaveLength(2)
+    expect(layout.edges.every(edge => edge.layer === 'normal')).toBe(true)
+    expect(layout.edges.every(edge => edge.dimmed === false)).toBe(true)
+  })
 })

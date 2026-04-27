@@ -658,6 +658,27 @@ class _FakeKernel:
         self.job_manager = _FakeJobManager()
         self.router_feedback = _FakeRouterFeedback()
 
+    def export_langgraph_react_graph(self, agent_name: str = "") -> Dict[str, Any]:
+        selected_agent = agent_name or self.registry.get_default_agent_name()
+        return {
+            "status": "available",
+            "generated_at": "2026-04-08T10:00:00Z",
+            "agent_name": selected_agent,
+            "mermaid": "graph TD\n  __start__ --> agent\n  agent --> tools\n  tools --> agent\n  agent --> __end__",
+            "nodes": [
+                {"id": "__start__", "name": "__start__", "data_type": "RunnableCallable", "metadata": {}},
+                {"id": "agent", "name": "agent", "data_type": "RunnableCallable", "metadata": {}},
+                {"id": "tools", "name": "tools", "data_type": "PolicyAwareToolNode", "metadata": {}},
+                {"id": "__end__", "name": "__end__", "data_type": "RunnableCallable", "metadata": {}},
+            ],
+            "edges": [
+                {"id": "langgraph-edge-1", "source": "__start__", "target": "agent", "conditional": False, "data": None},
+                {"id": "langgraph-edge-2", "source": "agent", "target": "tools", "conditional": True, "data": "tools_condition"},
+                {"id": "langgraph-edge-3", "source": "tools", "target": "agent", "conditional": False, "data": None},
+            ],
+            "warnings": [],
+        }
+
 
 ENV_ATTR_MAP = {
     "MAX_AGENT_STEPS": "max_agent_steps",
@@ -870,6 +891,9 @@ def _make_fake_ingest() -> Any:
         collection_id: str | None = None,
         source_display_paths: Dict[str, str] | None = None,
         source_identities: Dict[str, str] | None = None,
+        source_metadata_by_path: Dict[str, Dict[str, Any]] | None = None,
+        metadata_profile: str = "auto",
+        metadata_enrichment: str = "deterministic",
     ) -> List[str]:
         doc_ids: List[str] = []
         effective_collection = str(collection_id or settings.default_collection_id)
@@ -892,6 +916,20 @@ def _make_fake_ingest() -> Any:
                 doc_structure_type="general",
                 source_display_path=(source_display_paths or {}).get(str(path), title),
                 source_identity=(source_identities or {}).get(str(path), f"path:{path}"),
+                source_metadata={
+                    **dict((source_metadata_by_path or {}).get(str(path)) or {}),
+                    "metadata_profile": metadata_profile,
+                    "metadata_enrichment": metadata_enrichment,
+                    "index_metadata": {
+                        "extractor_version": "document_index_metadata_v1",
+                        "metadata_profile": metadata_profile,
+                        "metadata_enrichment": metadata_enrichment,
+                        "doc_structure_type": "general",
+                        "tags": ["general"],
+                        "parser_chain": ["fake"],
+                        "warnings": [],
+                    },
+                },
             )
             stores.doc_store.upsert_document(record)
             stores.chunk_store.set_document_chunks(
@@ -987,6 +1025,7 @@ async def test_capabilities_route_reports_full_support_and_missing_sections(
             "agents",
             "prompts",
             "collections",
+            "uploads",
             "graphs",
             "skills",
             "access",
@@ -1384,6 +1423,11 @@ async def test_architecture_routes_reflect_live_registry_and_activity(tmp_path: 
     assert "edge-router-rag-rag_worker" in edge_ids
     assert "edge-delegate-coordinator-memory_maintainer" in edge_ids
     assert any(path["id"] == "grounded-lookup" and path["target_agent"] == "rag_worker" for path in snapshot_payload["canonical_paths"])
+    assert snapshot_payload["langgraph"]["status"] == "available"
+    assert snapshot_payload["langgraph"]["agent_name"] == "general"
+    assert "graph TD" in snapshot_payload["langgraph"]["mermaid"]
+    assert snapshot_payload["langgraph"]["nodes"]
+    assert snapshot_payload["langgraph"]["edges"]
 
     assert activity.status_code == 200
     activity_payload = activity.json()
@@ -1405,6 +1449,28 @@ async def test_architecture_routes_reflect_live_registry_and_activity(tmp_path: 
     reloaded_labels = {node["label"] for node in snapshot_after_reload.json()["nodes"]}
     assert "planner" in reloaded_labels
     assert "edge-delegate-planner-memory_maintainer" in {edge["id"] for edge in snapshot_after_reload.json()["edges"]}
+
+
+@pytest.mark.asyncio
+async def test_architecture_langgraph_export_failure_preserves_snapshot(tmp_path: Path) -> None:
+    settings = _control_panel_settings(tmp_path)
+    runtime = _build_runtime(settings)
+
+    def fail_export(_agent_name: str = "") -> Dict[str, Any]:
+        raise RuntimeError("langgraph export failed")
+
+    runtime.bot.kernel.export_langgraph_react_graph = fail_export
+    manager = _FakeManager(settings, runtime=runtime)
+
+    async with _admin_client(manager) as client:
+        snapshot = await client.get("/v1/admin/architecture", headers=_admin_headers())
+
+    payload = snapshot.json()
+    assert snapshot.status_code == 200
+    assert {node["label"] for node in payload["nodes"]} >= {"User", "API Gateway", "Router", "general"}
+    assert payload["edges"]
+    assert payload["langgraph"]["status"] == "unavailable"
+    assert payload["langgraph"]["warnings"] == ["langgraph export failed"]
 
 
 @pytest.mark.asyncio
@@ -1462,6 +1528,7 @@ async def test_collection_routes_ingest_upload_reindex_delete_and_keep_empty_col
         )
         collections = await client.get("/v1/admin/collections", headers=_admin_headers())
         documents = await client.get("/v1/admin/collections/smoke-control-panel/documents", headers=_admin_headers())
+        uploads = await client.get("/v1/admin/uploads", headers=_admin_headers())
         first_doc_id = documents.json()["documents"][0]["doc_id"]
         detail = await client.get(
             f"/v1/admin/collections/smoke-control-panel/documents/{first_doc_id}",
@@ -1494,17 +1561,60 @@ async def test_collection_routes_ingest_upload_reindex_delete_and_keep_empty_col
     listed_ids = [item["collection_id"] for item in collections.json()["collections"]]
     assert "smoke-control-panel" in listed_ids
     assert "smoke-sync" in listed_ids
-    assert len(documents.json()["documents"]) == 2
+    assert len(documents.json()["documents"]) == 1
+    assert documents.json()["documents"][0]["source_type"] == "host_path"
+    upload_payload = uploads.json()["uploads"]
+    assert any(item["title"] == "regional_controls.csv" for item in upload_payload)
+    assert all(item["source_type"] == "upload" for item in upload_payload)
     detail_payload = detail.json()
     assert detail_payload["extracted_content"]["content"]
     assert detail_payload["raw_source"]["content"]
     assert reindexed.json()["ingested_doc_ids"] == [first_doc_id]
     final_ids = [item["collection_id"] for item in final_collections.json()["collections"]]
-    assert "smoke-control-panel" in final_ids
+    assert "smoke-control-panel" not in final_ids
     assert deleted.json()["deleted"] is True
     final_after_delete_ids = [item["collection_id"] for item in collections_after_delete.json()["collections"]]
     assert "smoke-control-panel" not in final_after_delete_ids
     assert "smoke-sync" in final_ids
+
+
+@pytest.mark.asyncio
+async def test_uploaded_file_routes_manage_uploads_without_collection_listing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _control_panel_settings(tmp_path)
+    runtime = _build_runtime(settings)
+    manager = _FakeManager(settings, runtime=runtime)
+
+    monkeypatch.setattr(control_panel_routes, "ingest_paths", _make_fake_ingest())
+
+    async with _admin_client(manager) as client:
+        uploaded = await client.post(
+            "/v1/admin/uploads",
+            headers=_admin_headers(),
+            files=[("files", ("chat-context.txt", b"chat upload content", "text/plain"))],
+        )
+        collections = await client.get("/v1/admin/collections", headers=_admin_headers())
+        uploads = await client.get("/v1/admin/uploads", headers=_admin_headers())
+        doc_id = uploads.json()["uploads"][0]["doc_id"]
+        detail = await client.get(f"/v1/admin/uploads/{doc_id}", headers=_admin_headers())
+        reindexed = await client.post(
+            f"/v1/admin/uploads/{doc_id}/reindex",
+            headers=_admin_headers(),
+            json={"changes": {}},
+        )
+        deleted = await client.delete(f"/v1/admin/uploads/{doc_id}", headers=_admin_headers())
+        uploads_after_delete = await client.get("/v1/admin/uploads", headers=_admin_headers())
+
+    assert uploaded.status_code == 200
+    assert uploaded.json()["status"] == "success"
+    assert uploaded.json()["collection_id"] == "control-panel-uploads"
+    assert uploaded.json()["metadata_summary"]["document_count"] == 1
+    assert collections.json()["collections"] == []
+    assert uploads.json()["uploads"][0]["title"] == "chat-context.txt"
+    assert detail.json()["document"]["source_type"] == "upload"
+    assert detail.json()["metadata_summary"]["metadata_profile"] == "auto"
+    assert reindexed.json()["ingested_doc_ids"] == [doc_id]
+    assert deleted.json()["deleted"] is True
+    assert uploads_after_delete.json()["uploads"] == []
 
 
 @pytest.mark.asyncio
@@ -1523,6 +1633,9 @@ async def test_collection_upload_returns_partial_result_when_one_file_fails(tmp_
         collection_id: str | None = None,
         source_display_paths: Dict[str, str] | None = None,
         source_identities: Dict[str, str] | None = None,
+        source_metadata_by_path: Dict[str, Dict[str, Any]] | None = None,
+        metadata_profile: str = "auto",
+        metadata_enrichment: str = "deterministic",
     ) -> List[str]:
         target = paths[0]
         if target.name == "bad.docx":
@@ -1536,6 +1649,9 @@ async def test_collection_upload_returns_partial_result_when_one_file_fails(tmp_
             collection_id=collection_id,
             source_display_paths=source_display_paths,
             source_identities=source_identities,
+            source_metadata_by_path=source_metadata_by_path,
+            metadata_profile=metadata_profile,
+            metadata_enrichment=metadata_enrichment,
         )
 
     monkeypatch.setattr(control_panel_routes, "ingest_paths", fake_ingest_with_failure)
@@ -1615,6 +1731,29 @@ async def test_collection_path_ingest_ignores_hidden_system_files(tmp_path: Path
     assert payload["skipped_count"] == 1
     assert any(item["display_path"] == "notes.txt" and item["outcome"] == "ingested" for item in payload["files"])
     assert any(item["display_path"] == ".DS_Store" and item["outcome"] == "skipped" for item in payload["files"])
+
+
+@pytest.mark.asyncio
+async def test_collection_path_ingest_preview_returns_metadata_without_writing_docs(tmp_path: Path) -> None:
+    settings = _control_panel_settings(tmp_path)
+    runtime = _build_runtime(settings)
+    manager = _FakeManager(settings, runtime=runtime)
+    doc_path = tmp_path / "preview_spec.md"
+    doc_path.write_text("# Preview Spec\n\nREQ-001 The gateway shall authenticate users.", encoding="utf-8")
+
+    async with _admin_client(manager) as client:
+        response = await client.post(
+            "/v1/admin/collections/preview/ingest-paths",
+            headers=_admin_headers(),
+            json={"paths": [str(doc_path)], "metadata_profile": "auto", "index_preview": True},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["preview"] is True
+    assert payload["files"][0]["outcome"] == "previewed"
+    assert payload["metadata_summary"]["document_count"] == 1
+    assert runtime.bot.ctx.stores.doc_store.records == {}
 
 
 @pytest.mark.asyncio
@@ -1736,11 +1875,12 @@ async def test_collection_health_and_repair_prune_canonical_upload_duplicates(tm
             json={"changes": {}},
         )
         health_after = await client.get("/v1/admin/collections/rfp-corpus/health", headers=_admin_headers())
+        uploads_after = await client.get("/v1/admin/uploads", headers=_admin_headers())
 
     assert health_before.status_code == 200
     assert health_before.json()["maintenance_policy"] == "indexed_documents"
-    assert health_before.json()["duplicate_group_count"] == 1
-    assert health_before.json()["duplicate_groups"][0]["source_identity"].startswith("path:repo://")
+    assert health_before.json()["duplicate_group_count"] == 0
+    assert health_before.json()["duplicate_groups"] == []
 
     assert repaired.status_code == 200
     assert repaired.json()["deleted_doc_ids"] == ["doc-rfp-host"]
@@ -1748,6 +1888,7 @@ async def test_collection_health_and_repair_prune_canonical_upload_duplicates(tm
 
     assert health_after.status_code == 200
     assert health_after.json()["duplicate_group_count"] == 0
+    assert [item["doc_id"] for item in uploads_after.json()["uploads"]] == ["doc-rfp-container"]
 
 
 @pytest.mark.asyncio

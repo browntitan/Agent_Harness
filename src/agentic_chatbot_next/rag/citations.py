@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Sequence
 
 from langchain_core.documents import Document
 
@@ -31,22 +31,38 @@ def render_citation_location(metadata: Dict[str, Any]) -> str:
     return ""
 
 
-def build_citations(docs: Sequence[Document], *, max_snippet_chars: int = 320) -> List[Citation]:
+def build_citations(
+    docs: Sequence[Document],
+    *,
+    max_snippet_chars: int = 320,
+    url_resolver: Callable[[str], str] | None = None,
+) -> List[Citation]:
     citations: List[Citation] = []
     for doc in docs:
         metadata = doc.metadata or {}
+        doc_id = str(metadata.get("doc_id") or "")
+        url = (
+            str(metadata.get("url") or metadata.get("source_url") or metadata.get("document_url") or "").strip()
+        )
+        if not url and url_resolver is not None and doc_id:
+            try:
+                url = str(url_resolver(doc_id) or "").strip()
+            except Exception:
+                url = ""
         snippet = doc.page_content.strip().replace("\n", " ")
         if len(snippet) > max_snippet_chars:
             snippet = snippet[:max_snippet_chars] + "..."
         citations.append(
             Citation(
                 citation_id=str(metadata.get("chunk_id") or ""),
-                doc_id=str(metadata.get("doc_id") or ""),
+                doc_id=doc_id,
                 title=str(metadata.get("title") or ""),
                 source_type=str(metadata.get("source_type") or ""),
                 location=render_citation_location(metadata),
                 snippet=snippet,
                 collection_id=str(metadata.get("collection_id") or ""),
+                url=url,
+                source_path=str(metadata.get("source_path") or metadata.get("source_display_path") or ""),
             )
         )
     return citations

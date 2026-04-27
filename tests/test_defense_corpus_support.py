@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -95,6 +96,31 @@ def test_docx_loader_reports_clear_parser_failure(tmp_path: Path):
         _load_documents(bad_docx, _make_ingest_settings(tmp_path))
 
 
+def test_docx_loader_falls_back_when_docling_enabled_but_missing(tmp_path: Path, monkeypatch):
+    from docx import Document as DocxDocument
+
+    docx_path = tmp_path / "fallback.docx"
+    doc = DocxDocument()
+    doc.add_paragraph("Asterion monthly status reports are due every Friday.")
+    doc.save(docx_path)
+
+    settings = _make_ingest_settings(tmp_path)
+    settings.docling_enabled = True
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("docling"):
+            raise ImportError("docling intentionally absent from slim image")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    docs = _load_documents(docx_path, settings)
+
+    assert docs
+    assert "monthly status reports" in docs[0].page_content
+
+
 def test_workbook_loader_emits_sheet_aware_documents_for_defense_corpus():
     workbook_path = (
         Path(__file__).resolve().parents[1]
@@ -147,6 +173,8 @@ def test_ingest_paths_recurses_directories_and_preserves_workbook_provenance(tmp
     all_chunks = [chunk for _, batch in stores.chunk_store.added for chunk in batch]
     assert any(chunk.sheet_name == "IMS" for chunk in all_chunks)
     assert any(chunk.row_start == 2 and chunk.cell_range for chunk in all_chunks)
+    assert any((chunk.metadata_json.get("location") or {}).get("sheet_name") == "IMS" for chunk in all_chunks)
+    assert all(record.source_metadata.get("index_metadata") for record in stores.doc_store.records)
 
 
 def test_ingest_paths_allows_same_file_in_multiple_collections(tmp_path: Path):

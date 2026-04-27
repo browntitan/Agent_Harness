@@ -7,10 +7,12 @@ in-memory strings rather than the filesystem.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agentic_chatbot_next.capabilities import EffectiveCapabilities
 from agentic_chatbot_next.tools.skills_search_tool import (
     _build_index,
     _parse_sections,
@@ -301,6 +303,26 @@ class TestMakeSkillsSearchTool:
         result = tool.invoke({"query": "groupby"})
         # Either finds something or returns no-match — just shouldn't crash
         assert isinstance(result, str)
+
+    def test_disabled_skill_pack_is_invisible_to_lexical_search(self):
+        settings = _mock_settings()
+        sections = []
+        sections.extend(_parse_sections("rag_agent", CONTENT_RAG))
+        session = SimpleNamespace(
+            metadata={
+                "effective_capabilities": EffectiveCapabilities(disabled_skill_pack_ids=["rag_agent"]).to_dict()
+            }
+        )
+        with patch(
+            "agentic_chatbot_next.tools.skills_search_tool._build_index",
+            return_value=sections,
+        ):
+            tool = make_skills_search_tool(settings, session=session)
+
+        result = tool.invoke({"query": "failure recovery empty results"})
+
+        assert "Failure Recovery" not in result
+        assert "No sections found" in result or "No matching" in result
 
 
 def test_repo_prompt_search_prefers_updated_general_guidance():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 import shutil
@@ -48,6 +48,7 @@ from agentic_chatbot_next.rag.ingest import (
     get_kb_coverage_status,
     ingest_paths,
     iter_kb_source_paths,
+    preview_path_index_metadata,
     repair_collection_documents,
     repair_kb_collection,
 )
@@ -56,6 +57,7 @@ from agentic_chatbot_next.router.feedback_loop import summarize_router_outcomes
 from agentic_chatbot_next.router.router import build_router_targets
 from agentic_chatbot_next.runtime.context import filesystem_key
 from agentic_chatbot_next.sandbox.workspace import SessionWorkspace
+from agentic_chatbot_next.storage import blob_ref_from_record, build_blob_store
 from agentic_chatbot_next.skills.pack_loader import load_skill_pack_from_text
 from agentic_chatbot_next.tools.registry import build_tool_definitions
 
@@ -83,6 +85,8 @@ COLLECTION_SUPPORTED_SUFFIXES = TEXT_SOURCE_SUFFIXES | {".docx", ".pdf", ".xls",
 UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024
 MAX_COLLECTION_UPLOAD_FILES = 2_000
 MAX_COLLECTION_UPLOAD_BYTES = 512 * 1024 * 1024
+UPLOAD_SOURCE_TYPE = "upload"
+CONTROL_PANEL_UPLOAD_COLLECTION_ID = "control-panel-uploads"
 CONTROL_PANEL_REQUIRED_ROUTES: Dict[str, List[str]] = {
     "dashboard": ["/v1/admin/overview"],
     "architecture": ["/v1/admin/architecture", "/v1/admin/architecture/activity"],
@@ -90,6 +94,7 @@ CONTROL_PANEL_REQUIRED_ROUTES: Dict[str, List[str]] = {
     "agents": ["/v1/admin/agents"],
     "prompts": ["/v1/admin/prompts"],
     "collections": ["/v1/admin/collections"],
+    "uploads": ["/v1/admin/uploads"],
     "graphs": ["/v1/admin/graphs", "/v1/admin/graphs/{graph_id}"],
     "skills": ["/v1/skills"],
     "access": ["/v1/admin/access/principals", "/v1/admin/access/roles", "/v1/admin/access/effective-access"],
@@ -129,6 +134,9 @@ class PathIngestRequest(BaseModel):
     paths: List[str] = Field(default_factory=list)
     source_type: str = "host_path"
     conversation_id: Optional[str] = None
+    metadata_profile: str = "auto"
+    metadata_enrichment: str = "deterministic"
+    index_preview: bool = False
     actor: str = "control-panel"
 
 
@@ -144,6 +152,7 @@ class CollectionIngestCandidate:
     source_type: str
     collection_id: str
     source_identity: str
+    source_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class GraphAdminUpsertRequest(BaseModel):
@@ -306,6 +315,16 @@ class CanonicalPathModel(BaseModel):
     edge_ids: List[str] = Field(default_factory=list)
 
 
+class LangGraphExportModel(BaseModel):
+    status: str = "unavailable"
+    generated_at: str = ""
+    agent_name: str = ""
+    mermaid: str = ""
+    nodes: List[Dict[str, Any]] = Field(default_factory=list)
+    edges: List[Dict[str, Any]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+
+
 class ArchitectureSnapshotModel(BaseModel):
     generated_at: str
     system: Dict[str, Any] = Field(default_factory=dict)
@@ -313,6 +332,7 @@ class ArchitectureSnapshotModel(BaseModel):
     nodes: List[ArchitectureNodeModel] = Field(default_factory=list)
     edges: List[ArchitectureEdgeModel] = Field(default_factory=list)
     canonical_paths: List[CanonicalPathModel] = Field(default_factory=list)
+    langgraph: LangGraphExportModel = Field(default_factory=LangGraphExportModel)
 
 
 class ArchitectureActivityModel(BaseModel):
@@ -871,6 +891,102 @@ def _collection_health_payload(runtime: Any, tenant_id: str, collection_id: str)
     return payload
 
 
+def _is_upload_record(record: Any) -> bool:
+    return str(getattr(record, "source_type", "") or "").strip().lower() == UPLOAD_SOURCE_TYPE
+
+
+def _document_summary_from_records(collection_id: str, records: List[Any]) -> Dict[str, Any]:
+    counts: Dict[str, int] = {}
+    latest_ingested_at = ""
+    for record in records:
+        source_type = str(getattr(record, "source_type", "") or "unknown")
+        counts[source_type] = counts.get(source_type, 0) + 1
+        ingested_at = str(getattr(record, "ingested_at", "") or "")
+        if ingested_at > latest_ingested_at:
+            latest_ingested_at = ingested_at
+    return {
+        "collection_id": collection_id,
+        "document_count": len(records),
+        "latest_ingested_at": latest_ingested_at,
+        "source_type_counts": counts,
+    }
+
+
+def _collection_document_summaries(
+    runtime: Any,
+    tenant_id: str,
+    *,
+    uploads: bool,
+) -> Dict[str, Dict[str, Any]]:
+    summaries: Dict[str, List[Any]] = {}
+    for record in runtime.bot.ctx.stores.doc_store.list_documents(tenant_id=tenant_id):
+        if _is_upload_record(record) != uploads:
+            continue
+        collection_id = str(getattr(record, "collection_id", "") or "")
+        if not collection_id:
+            continue
+        summaries.setdefault(collection_id, []).append(record)
+    return {
+        collection_id: _document_summary_from_records(collection_id, records)
+        for collection_id, records in summaries.items()
+    }
+
+
+def _non_upload_collection_summary(runtime: Any, tenant_id: str, collection_id: str) -> Dict[str, Any] | None:
+    records = [
+        record
+        for record in runtime.bot.ctx.stores.doc_store.list_documents(
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+        )
+        if not _is_upload_record(record)
+    ]
+    if not records:
+        return None
+    return _document_summary_from_records(collection_id, records)
+
+
+def _filter_upload_health_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    filtered = dict(payload)
+
+    def keep_group(group: Dict[str, Any]) -> Dict[str, Any] | None:
+        if str(group.get("source_type") or "").strip().lower() == UPLOAD_SOURCE_TYPE:
+            return None
+        records = [
+            dict(record)
+            for record in list(group.get("records") or [])
+            if str(record.get("source_type") or "").strip().lower() != UPLOAD_SOURCE_TYPE
+        ]
+        if records or str(group.get("source_type") or "").strip():
+            return {**group, "records": records}
+        return None
+
+    for key in ("source_groups", "duplicate_groups", "drifted_groups"):
+        groups = [keep_group(dict(group)) for group in list(filtered.get(key) or [])]
+        filtered[key] = [group for group in groups if group is not None]
+
+    record_ids = {
+        str(record.get("doc_id") or "")
+        for group in filtered.get("source_groups", [])
+        for record in list(group.get("records") or [])
+        if str(record.get("doc_id") or "").strip()
+    }
+    active_ids = {
+        str(group.get("active_doc_id") or "")
+        for group in filtered.get("source_groups", [])
+        if str(group.get("active_doc_id") or "").strip()
+    }
+    if record_ids or active_ids:
+        filtered["indexed_doc_count"] = len(record_ids or active_ids)
+        filtered["active_doc_count"] = len(active_ids or record_ids)
+    elif int(filtered.get("indexed_doc_count") or 0) > 0:
+        filtered["indexed_doc_count"] = 0
+        filtered["active_doc_count"] = 0
+    filtered["duplicate_group_count"] = len(filtered.get("duplicate_groups") or [])
+    filtered["content_drift_count"] = len(filtered.get("drifted_groups") or [])
+    return filtered
+
+
 def _collection_storage_profile(runtime: Any, collection_graphs: List[Any]) -> Dict[str, Any]:
     configured_embedding_dim = int(getattr(runtime.settings, "embedding_dim", 0) or 0)
     actual_embedding_dims: Dict[str, int] = {}
@@ -956,10 +1072,8 @@ def _list_collection_payloads(runtime: Any, tenant_id: str) -> List[Dict[str, An
         str(record.collection_id or ""): record
         for record in (collection_store.list_collections(tenant_id=tenant_id) if collection_store is not None else [])
     }
-    doc_summaries = {
-        str(item.get("collection_id") or ""): dict(item)
-        for item in runtime.bot.ctx.stores.doc_store.list_collections(tenant_id=tenant_id)
-    }
+    doc_summaries = _collection_document_summaries(runtime, tenant_id, uploads=False)
+    upload_summaries = _collection_document_summaries(runtime, tenant_id, uploads=True)
     graphs_by_collection: Dict[str, List[Any]] = {}
     for graph in _collection_graph_indexes(runtime, tenant_id):
         collection_id = str(getattr(graph, "collection_id", "") or "")
@@ -979,6 +1093,11 @@ def _list_collection_payloads(runtime: Any, tenant_id: str) -> List[Dict[str, An
         )
         for collection_id in collection_ids
         if collection_id
+        and (
+            collection_id in doc_summaries
+            or collection_id in graphs_by_collection
+            or collection_id not in upload_summaries
+        )
     ]
 
 
@@ -990,15 +1109,20 @@ def _serialize_collection_status(
     doc_summary: Dict[str, Any] | None = None,
     graph_count: int = 0,
 ) -> Dict[str, Any]:
-    del doc_summary, graph_count
+    del graph_count
     readiness = _collection_readiness(runtime, tenant_id, collection_id)
+    document_count = (
+        int(doc_summary.get("document_count") or 0)
+        if doc_summary is not None
+        else int(readiness.document_count)
+    )
     return {
         "ready": bool(readiness.ready),
         "reason": str(readiness.reason or ""),
         "collection_id": readiness.collection_id,
         "missing_sources": list(readiness.missing_source_paths),
-        "indexed_doc_count": int(readiness.document_count),
-        "active_doc_count": int(readiness.document_count),
+        "indexed_doc_count": document_count,
+        "active_doc_count": document_count,
         "duplicate_group_count": 0,
         "content_drift_count": 0,
         "suggested_fix": str(readiness.suggested_fix or ""),
@@ -1006,11 +1130,27 @@ def _serialize_collection_status(
 
 
 def _serialize_collection_health(runtime: Any, tenant_id: str, collection_id: str) -> Dict[str, Any]:
-    return _collection_health_payload(runtime, tenant_id, collection_id)
+    return _filter_upload_health_payload(_collection_health_payload(runtime, tenant_id, collection_id))
 
 
-def _read_raw_source(record: Any) -> Dict[str, Any] | None:
-    path = Path(str(getattr(record, "source_path", "") or ""))
+def _materialize_record_source_path(runtime: Any, record: Any) -> Path | None:
+    raw_source_path = str(getattr(record, "source_path", "") or "")
+    path = Path(raw_source_path)
+    if path.exists() and path.is_file():
+        return path
+    blob_ref = blob_ref_from_record(record)
+    if blob_ref is None:
+        return None
+    try:
+        return build_blob_store(runtime.settings).materialize_to_path(blob_ref)
+    except Exception:
+        return None
+
+
+def _read_raw_source(runtime: Any, record: Any) -> Dict[str, Any] | None:
+    path = _materialize_record_source_path(runtime, record)
+    if path is None:
+        return None
     if not path.exists() or path.suffix.lower() not in TEXT_SOURCE_SUFFIXES:
         return None
     try:
@@ -1041,6 +1181,62 @@ def _reconstruct_document_content(chunks: List[Any]) -> Dict[str, Any]:
         "content": text[:MAX_EXTRACTED_CONTENT_CHARS],
         "truncated": truncated,
         "chunk_count": len(chunks),
+    }
+
+
+def _serialize_document_record(record: Any) -> Dict[str, Any]:
+    source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    return {
+        "doc_id": record.doc_id,
+        "title": record.title,
+        "source_type": record.source_type,
+        "source_path": record.source_path,
+        "source_uri": str(getattr(record, "source_uri", "") or ""),
+        "source_storage_backend": str(getattr(record, "source_storage_backend", "") or ""),
+        "source_object_bucket": str(getattr(record, "source_object_bucket", "") or ""),
+        "source_object_key": str(getattr(record, "source_object_key", "") or ""),
+        "source_size_bytes": int(getattr(record, "source_size_bytes", 0) or 0),
+        "source_content_type": str(getattr(record, "source_content_type", "") or ""),
+        "source_display_path": record.source_display_path,
+        "collection_id": record.collection_id,
+        "num_chunks": record.num_chunks,
+        "ingested_at": record.ingested_at,
+        "file_type": record.file_type,
+        "doc_structure_type": record.doc_structure_type,
+        "source_metadata": source_metadata,
+        "metadata_summary": source_metadata.get("index_metadata") if isinstance(source_metadata.get("index_metadata"), dict) else {},
+    }
+
+
+def _document_detail_payload(runtime: Any, tenant_id: str, record: Any) -> Dict[str, Any]:
+    chunks = runtime.bot.ctx.stores.chunk_store.list_document_chunks(record.doc_id, tenant_id=tenant_id)
+    extracted = _reconstruct_document_content(chunks)
+    return {
+        "document": _serialize_document_record(record),
+        "extracted_content": extracted,
+        "raw_source": _read_raw_source(runtime, record),
+        "metadata_summary": (
+            dict(getattr(record, "source_metadata", {}) or {}).get("index_metadata")
+            if isinstance(dict(getattr(record, "source_metadata", {}) or {}).get("index_metadata"), dict)
+            else {}
+        ),
+        "chunks": [
+            {
+                "chunk_id": chunk.chunk_id,
+                "chunk_index": chunk.chunk_index,
+                "chunk_type": chunk.chunk_type,
+                "page_number": chunk.page_number,
+                "section_title": chunk.section_title,
+                "clause_number": chunk.clause_number,
+                "sheet_name": chunk.sheet_name,
+                "row_start": chunk.row_start,
+                "row_end": chunk.row_end,
+                "cell_range": chunk.cell_range,
+                "metadata_json": dict(getattr(chunk, "metadata_json", {}) or {}),
+                "content": chunk.content,
+            }
+            for chunk in chunks[:200]
+        ],
     }
 
 
@@ -1107,6 +1303,61 @@ def _dedupe_relative_upload_path(relative_path: str, used_paths: set[str]) -> st
         index += 1
 
 
+def _safe_blob_key_part(value: str) -> str:
+    return "/".join(
+        part
+        for part in str(value or "").replace("\\", "/").split("/")
+        if part and part not in {".", ".."}
+    )
+
+
+def _control_panel_upload_object_key(
+    *,
+    tenant_id: str,
+    collection_id: str,
+    conversation_id: str,
+    relative_path: str,
+    index: int,
+) -> str:
+    return "/".join(
+        part
+        for part in [
+            "tenants",
+            _safe_blob_key_part(tenant_id) or "default",
+            "collections",
+            _safe_blob_key_part(collection_id) or "default",
+            "control-panel",
+            _safe_blob_key_part(conversation_id) or "upload",
+            f"{index:04d}_{uuid.uuid4().hex}",
+            _safe_blob_key_part(relative_path) or Path(relative_path or "upload").name,
+        ]
+        if part
+    )
+
+
+def _upload_source_metadata(
+    *,
+    file: UploadFile,
+    relative_path: str,
+    blob_ref: Any | None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "original_filename": str(file.filename or relative_path),
+        "mime_type": str(file.content_type or ""),
+    }
+    if blob_ref is not None:
+        metadata.update(
+            {
+                "blob_ref": blob_ref.to_dict(),
+                "source_uri": blob_ref.uri,
+                "storage_backend": blob_ref.backend,
+                "object_bucket": blob_ref.bucket,
+                "object_key": blob_ref.key,
+            }
+        )
+    return metadata
+
+
 def _ensure_collection_catalog_entry(
     runtime: Any,
     tenant_id: str,
@@ -1143,10 +1394,11 @@ def _collection_file_result(
     outcome: str,
     error: str = "",
     doc_ids: List[str] | None = None,
+    metadata_summary: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     resolved_display_path = display_path or (candidate.source_display_path if candidate else "")
     resolved_path = str(candidate.absolute_path) if candidate is not None else ""
-    return {
+    payload = {
         "display_path": resolved_display_path,
         "filename": Path(resolved_display_path or resolved_path or "unknown").name,
         "source_type": source_type or (candidate.source_type if candidate else "upload"),
@@ -1155,6 +1407,69 @@ def _collection_file_result(
         "error": error,
         "doc_ids": list(doc_ids or []),
     }
+    if metadata_summary:
+        payload["metadata_summary"] = dict(metadata_summary)
+    return payload
+
+
+def _empty_metadata_summary(metadata_profile: str = "auto") -> Dict[str, Any]:
+    return {
+        "extractor_version": "document_index_metadata_v1",
+        "metadata_profile": str(metadata_profile or "auto"),
+        "document_count": 0,
+        "chunk_count": 0,
+        "structure_type_counts": {},
+        "tag_counts": {},
+        "parser_counts": {},
+        "warnings": [],
+    }
+
+
+def _merge_metadata_summaries(summaries: List[Dict[str, Any]], *, metadata_profile: str = "auto") -> Dict[str, Any]:
+    merged = _empty_metadata_summary(metadata_profile)
+    warnings: List[str] = []
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        merged["document_count"] = int(merged.get("document_count") or 0) + int(summary.get("document_count") or 0)
+        merged["chunk_count"] = int(merged.get("chunk_count") or 0) + int(summary.get("chunk_count") or 0)
+        for key in ("structure_type_counts", "tag_counts", "parser_counts"):
+            counts = dict(merged.get(key) or {})
+            for count_key, count_value in dict(summary.get(key) or {}).items():
+                counts[str(count_key)] = int(counts.get(str(count_key), 0)) + int(count_value or 0)
+            merged[key] = dict(sorted(counts.items()))
+        for warning in list(summary.get("warnings") or []):
+            text = str(warning or "").strip()
+            if text and text not in warnings:
+                warnings.append(text)
+    merged["warnings"] = warnings[:20]
+    return merged
+
+
+def _metadata_summary_for_doc_ids(runtime: Any, tenant_id: str, doc_ids: List[str], *, metadata_profile: str = "auto") -> Dict[str, Any]:
+    summaries: List[Dict[str, Any]] = []
+    for doc_id in doc_ids:
+        record = runtime.bot.ctx.stores.doc_store.get_document(str(doc_id), tenant_id=tenant_id)
+        if record is None:
+            continue
+        source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+        index_metadata = source_metadata.get("index_metadata")
+        if not isinstance(index_metadata, dict):
+            continue
+        chunk_count = int(getattr(record, "num_chunks", 0) or 0)
+        summaries.append(
+            {
+                "extractor_version": str(index_metadata.get("extractor_version") or "document_index_metadata_v1"),
+                "metadata_profile": str(index_metadata.get("metadata_profile") or metadata_profile),
+                "document_count": 1,
+                "chunk_count": chunk_count,
+                "structure_type_counts": {str(index_metadata.get("doc_structure_type") or "general"): 1},
+                "tag_counts": {str(tag): 1 for tag in list(index_metadata.get("tags") or [])},
+                "parser_counts": {str(parser): 1 for parser in list(index_metadata.get("parser_chain") or [])},
+                "warnings": list(index_metadata.get("warnings") or []),
+            }
+        )
+    return _merge_metadata_summaries(summaries, metadata_profile=metadata_profile)
 
 
 async def _stream_upload_to_path(
@@ -1184,6 +1499,8 @@ def _collection_operation_payload(
     file_results: List[Dict[str, Any]],
     missing_paths: List[str] | None = None,
     workspace_copies: List[str] | None = None,
+    metadata_profile: str = "auto",
+    metadata_summary: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     missing = list(missing_paths or [])
     doc_ids = [doc_id for item in file_results for doc_id in item.get("doc_ids", [])]
@@ -1199,6 +1516,14 @@ def _collection_operation_payload(
     else:
         status = "success"
     errors = [str(item.get("error") or "") for item in file_results if str(item.get("error") or "").strip()]
+    resolved_metadata_summary = metadata_summary or _merge_metadata_summaries(
+        [
+            dict(item.get("metadata_summary") or {})
+            for item in file_results
+            if isinstance(item.get("metadata_summary"), dict)
+        ],
+        metadata_profile=metadata_profile,
+    )
     return {
         "collection_id": collection_id,
         "status": status,
@@ -1222,6 +1547,7 @@ def _collection_operation_payload(
         "filenames": [str(item.get("filename") or "") for item in file_results],
         "display_paths": [str(item.get("display_path") or "") for item in file_results],
         "workspace_copies": list(workspace_copies or []),
+        "metadata_summary": resolved_metadata_summary,
     }
 
 
@@ -1233,6 +1559,8 @@ def _ingest_collection_candidates(
     candidates: List[CollectionIngestCandidate],
     user_id: str,
     conversation_id: str,
+    metadata_profile: str = "auto",
+    metadata_enrichment: str = "deterministic",
 ) -> Dict[str, Any]:
     file_results: List[Dict[str, Any]] = []
     copied_paths: List[Path] = []
@@ -1248,15 +1576,25 @@ def _ingest_collection_candidates(
                 collection_id=collection_id,
                 source_display_paths={str(candidate.absolute_path): candidate.source_display_path},
                 source_identities={str(candidate.absolute_path): candidate.source_identity},
+                source_metadata_by_path={str(candidate.absolute_path): dict(candidate.source_metadata or {})},
+                metadata_profile=metadata_profile,
+                metadata_enrichment=metadata_enrichment,
             )
             outcome = "ingested" if doc_ids else "already_indexed"
             message = "" if doc_ids else "Already indexed or no extractable content was found."
+            metadata_summary = _metadata_summary_for_doc_ids(
+                runtime,
+                tenant_id,
+                doc_ids,
+                metadata_profile=metadata_profile,
+            ) if doc_ids else {}
             file_results.append(
                 _collection_file_result(
                     candidate=candidate,
                     outcome=outcome,
                     error=message,
                     doc_ids=doc_ids,
+                    metadata_summary=metadata_summary,
                 )
             )
             copied_paths.append(candidate.absolute_path)
@@ -1281,7 +1619,52 @@ def _ingest_collection_candidates(
         collection_id=collection_id,
         file_results=file_results,
         workspace_copies=workspace_copies,
+        metadata_profile=metadata_profile,
     )
+
+
+def _preview_collection_candidates(
+    runtime: Any,
+    *,
+    collection_id: str,
+    candidates: List[CollectionIngestCandidate],
+    metadata_profile: str = "auto",
+    metadata_enrichment: str = "deterministic",
+) -> Dict[str, Any]:
+    file_results: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        try:
+            preview = preview_path_index_metadata(
+                runtime.settings,
+                candidate.absolute_path,
+                metadata_profile=metadata_profile,
+                metadata_enrichment=metadata_enrichment,
+                source_metadata=dict(candidate.source_metadata or {}),
+            )
+            file_results.append(
+                _collection_file_result(
+                    candidate=candidate,
+                    outcome="previewed",
+                    metadata_summary=dict(preview.get("metadata_summary") or {}),
+                )
+            )
+            file_results[-1]["index_preview"] = preview
+        except Exception as exc:
+            file_results.append(
+                _collection_file_result(
+                    candidate=candidate,
+                    outcome="failed",
+                    error=str(exc),
+                )
+            )
+    result = _collection_operation_payload(
+        collection_id=collection_id,
+        file_results=file_results,
+        metadata_profile=metadata_profile,
+    )
+    result["status"] = "preview" if not result.get("failed_count") else "partial"
+    result["preview"] = True
+    return result
 
 
 def _render_agent_overlay_markdown(existing: Any, request: AgentUpdateRequest) -> str:
@@ -1472,6 +1855,7 @@ def _build_architecture_snapshot(runtime: Any, overlay_store: OverlayStore) -> D
     registry = runtime.bot.kernel.registry
     targets = build_router_targets(registry)
     settings = runtime.settings
+    generated_at = utc_now_iso()
     worker_names = {
         str(worker_name)
         for definition in registry.list()
@@ -1705,8 +2089,26 @@ def _build_architecture_snapshot(runtime: Any, overlay_store: OverlayStore) -> D
         },
     ]
 
+    langgraph_export: Dict[str, Any] = {
+        "status": "unavailable",
+        "generated_at": generated_at,
+        "agent_name": targets.default_agent,
+        "mermaid": "",
+        "nodes": [],
+        "edges": [],
+        "warnings": ["LangGraph export is not available on this runtime."],
+    }
+    exporter = getattr(runtime.bot.kernel, "export_langgraph_react_graph", None)
+    if callable(exporter):
+        try:
+            exported = exporter(targets.default_agent)
+            if isinstance(exported, dict):
+                langgraph_export = exported
+        except Exception as exc:
+            langgraph_export["warnings"] = [str(exc)]
+
     return {
-        "generated_at": utc_now_iso(),
+        "generated_at": generated_at,
         "system": {
             "gateway_model_id": getattr(settings, "gateway_model_id", "local"),
             "providers": {
@@ -1737,6 +2139,7 @@ def _build_architecture_snapshot(runtime: Any, overlay_store: OverlayStore) -> D
         "nodes": nodes,
         "edges": edges,
         "canonical_paths": canonical_paths,
+        "langgraph": langgraph_export,
     }
 
 
@@ -3150,6 +3553,244 @@ def list_collections(
     return {"collections": _list_collection_payloads(runtime, tenant_id)}
 
 
+@router.get("/uploads")
+def list_uploaded_files(
+    manager: RuntimeManager = Depends(_admin_manager),
+    collection_id: str = "",
+    title_contains: str = "",
+    limit: int = 100,
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    normalized_collection_id = _normalize_collection_id(collection_id) if str(collection_id or "").strip() else ""
+    records = runtime.bot.ctx.stores.doc_store.search_by_metadata(
+        tenant_id=tenant_id,
+        collection_id=normalized_collection_id,
+        source_type=UPLOAD_SOURCE_TYPE,
+        title_contains=title_contains,
+        limit=max(1, min(limit, 500)),
+    )
+    return {"uploads": [_serialize_document_record(record) for record in records]}
+
+
+@router.post("/uploads")
+async def upload_files(
+    files: List[UploadFile] = File(...),
+    relative_paths: List[str] = Form([]),
+    collection_id: str = Form(CONTROL_PANEL_UPLOAD_COLLECTION_ID),
+    conversation_id: str = Form("control-panel-upload"),
+    metadata_profile: str = Form("auto"),
+    metadata_enrichment: str = Form("deterministic"),
+    index_preview: bool = Form(False),
+    actor: str = Form("control-panel"),
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    if len(files) > MAX_COLLECTION_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many files in one upload. Limit is {MAX_COLLECTION_UPLOAD_FILES}.",
+        )
+    normalized_collection_id = _normalize_collection_id(collection_id or CONTROL_PANEL_UPLOAD_COLLECTION_ID)
+    ctx = _request_context(
+        runtime.settings,
+        tenant_id=x_tenant_id,
+        user_id=x_user_id,
+        conversation_id=conversation_id,
+    )
+    blob_store = build_blob_store(runtime.settings)
+    request_dir = (
+        blob_store.cache_dir
+        / "control-panel-incoming"
+        / f"{normalized_collection_id}-{uuid.uuid4().hex}"
+    )
+    request_dir.mkdir(parents=True, exist_ok=True)
+    candidates: List[CollectionIngestCandidate] = []
+    file_results: List[Dict[str, Any]] = []
+    used_relative_paths: set[str] = set()
+    for index, file in enumerate(files):
+        raw_relative_path = relative_paths[index] if index < len(relative_paths) else (file.filename or "")
+        relative_path = _dedupe_relative_upload_path(
+            _sanitize_relative_upload_path(raw_relative_path, file.filename or ""),
+            used_relative_paths,
+        )
+        try:
+            dest = request_dir / PurePosixPath(relative_path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            await _stream_upload_to_path(file, dest)
+            blob_ref = None
+            ingest_path = dest
+            if not index_preview:
+                blob_ref = blob_store.put_file(
+                    dest,
+                    key=_control_panel_upload_object_key(
+                        tenant_id=ctx.tenant_id,
+                        collection_id=normalized_collection_id,
+                        conversation_id=ctx.conversation_id,
+                        relative_path=relative_path,
+                        index=index,
+                    ),
+                    content_type=str(file.content_type or ""),
+                )
+                if blob_ref.backend == "local":
+                    ingest_path = blob_store.materialize_to_path(blob_ref)
+            resolved_dest = ingest_path.resolve()
+            skip_reason = _collection_candidate_skip_reason(resolved_dest)
+            if skip_reason:
+                file_results.append(
+                    _collection_file_result(
+                        display_path=relative_path,
+                        source_type=UPLOAD_SOURCE_TYPE,
+                        outcome="skipped",
+                        error=skip_reason,
+                    )
+                )
+                continue
+            candidates.append(
+                CollectionIngestCandidate(
+                    absolute_path=resolved_dest,
+                    source_display_path=relative_path,
+                    source_type=UPLOAD_SOURCE_TYPE,
+                    collection_id=normalized_collection_id,
+                    source_identity=f"upload:{relative_path}",
+                    source_metadata=_upload_source_metadata(
+                        file=file,
+                        relative_path=relative_path,
+                        blob_ref=blob_ref,
+                    ),
+                )
+            )
+        except Exception as exc:
+            file_results.append(
+                _collection_file_result(
+                    display_path=relative_path,
+                    source_type=UPLOAD_SOURCE_TYPE,
+                    outcome="failed",
+                    error=str(exc),
+                )
+            )
+    if index_preview:
+        result = _preview_collection_candidates(
+            runtime,
+            collection_id=normalized_collection_id,
+            candidates=candidates,
+            metadata_profile=metadata_profile,
+            metadata_enrichment=metadata_enrichment,
+        )
+    else:
+        result = _ingest_collection_candidates(
+            runtime,
+            tenant_id=ctx.tenant_id,
+            collection_id=normalized_collection_id,
+            candidates=candidates,
+            user_id=ctx.user_id,
+            conversation_id=ctx.conversation_id,
+            metadata_profile=metadata_profile,
+            metadata_enrichment=metadata_enrichment,
+        )
+    if file_results:
+        result = _collection_operation_payload(
+            collection_id=normalized_collection_id,
+            file_results=[*result.get("files", []), *file_results],
+            missing_paths=result.get("missing_paths", []),
+            workspace_copies=result.get("workspace_copies", []),
+            metadata_profile=metadata_profile,
+            metadata_summary=dict(result.get("metadata_summary") or {}),
+        )
+    manager.get_overlay_store().append_audit_event(
+        action="upload_file_ingest",
+        actor=actor,
+        details={"collection_id": normalized_collection_id, "count": int(result.get("ingested_count") or 0)},
+    )
+    return result
+
+
+@router.get("/uploads/{doc_id}")
+def get_uploaded_file(
+    doc_id: str,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    record = runtime.bot.ctx.stores.doc_store.get_document(doc_id, tenant_id=tenant_id)
+    if record is None or not _is_upload_record(record):
+        raise HTTPException(status_code=404, detail="Uploaded file not found.")
+    return _document_detail_payload(runtime, tenant_id, record)
+
+
+@router.post("/uploads/{doc_id}/reindex")
+def reindex_uploaded_file(
+    doc_id: str,
+    request: ConfigChangeRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    record = runtime.bot.ctx.stores.doc_store.get_document(doc_id, tenant_id=tenant_id)
+    if record is None or not _is_upload_record(record):
+        raise HTTPException(status_code=404, detail="Uploaded file not found.")
+    source_path = _materialize_record_source_path(runtime, record)
+    if source_path is None or not source_path.exists():
+        raise HTTPException(status_code=400, detail="Uploaded file source path is no longer available for reindex.")
+    runtime.bot.ctx.stores.doc_store.delete_document(doc_id, tenant_id=tenant_id)
+    source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    index_metadata = source_metadata.get("index_metadata") if isinstance(source_metadata.get("index_metadata"), dict) else {}
+    doc_ids = ingest_paths(
+        runtime.settings,
+        runtime.bot.ctx.stores,
+        [source_path],
+        source_type=UPLOAD_SOURCE_TYPE,
+        tenant_id=tenant_id,
+        collection_id=record.collection_id,
+        source_display_paths={str(source_path.resolve()): str(record.source_display_path or source_path.name)},
+        source_identities={str(source_path.resolve()): str(record.source_identity or source_path.resolve())},
+        source_metadata_by_path={str(source_path.resolve()): source_metadata},
+        metadata_profile=str(index_metadata.get("metadata_profile") or source_metadata.get("metadata_profile") or "auto"),
+        metadata_enrichment=str(index_metadata.get("metadata_enrichment") or source_metadata.get("metadata_enrichment") or "deterministic"),
+    )
+    manager.get_overlay_store().append_audit_event(
+        action="upload_file_reindex",
+        actor=request.actor,
+        details={"collection_id": record.collection_id, "doc_id": doc_id},
+    )
+    return {
+        "deleted_doc_id": doc_id,
+        "ingested_doc_ids": doc_ids,
+        "collection_id": record.collection_id,
+    }
+
+
+@router.delete("/uploads/{doc_id}")
+def delete_uploaded_file(
+    doc_id: str,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    record = runtime.bot.ctx.stores.doc_store.get_document(doc_id, tenant_id=tenant_id)
+    if record is None or not _is_upload_record(record):
+        raise HTTPException(status_code=404, detail="Uploaded file not found.")
+    blob_ref = blob_ref_from_record(record)
+    if blob_ref is not None:
+        try:
+            build_blob_store(runtime.settings).delete(blob_ref)
+        except Exception:
+            pass
+    runtime.bot.ctx.stores.doc_store.delete_document(doc_id, tenant_id=tenant_id)
+    return {
+        "deleted": True,
+        "doc_id": doc_id,
+        "collection_id": record.collection_id,
+        "title": record.title,
+    }
+
+
 @router.post("/collections")
 def create_collection(
     request: CollectionCreateRequest,
@@ -3180,7 +3821,7 @@ def create_collection(
             tenant_id,
             collection_id,
             collection_record=record,
-            doc_summary=runtime.bot.ctx.stores.doc_store.get_collection_summary(collection_id, tenant_id=tenant_id),
+            doc_summary=_non_upload_collection_summary(runtime, tenant_id, collection_id),
             collection_graphs=[
                 graph
                 for graph in _collection_graph_indexes(runtime, tenant_id)
@@ -3224,7 +3865,7 @@ def delete_collection(
     collection_store = getattr(runtime.bot.ctx.stores, "collection_store", None)
     if collection_store is None:
         raise HTTPException(status_code=503, detail="Collection catalog is not available.")
-    summary = runtime.bot.ctx.stores.doc_store.get_collection_summary(normalized_collection_id, tenant_id=tenant_id) or {}
+    summary = _non_upload_collection_summary(runtime, tenant_id, normalized_collection_id) or {}
     collection_graphs = [
         graph
         for graph in _collection_graph_indexes(runtime, tenant_id)
@@ -3376,20 +4017,33 @@ def ingest_collection_paths(
                     source_identity=f"path:{str(resolved)}",
                 )
             )
-    result = _ingest_collection_candidates(
-        runtime,
-        tenant_id=ctx.tenant_id,
-        collection_id=normalized_collection_id,
-        candidates=candidates,
-        user_id=ctx.user_id,
-        conversation_id=ctx.conversation_id,
-    )
+    if request.index_preview:
+        result = _preview_collection_candidates(
+            runtime,
+            collection_id=normalized_collection_id,
+            candidates=candidates,
+            metadata_profile=request.metadata_profile,
+            metadata_enrichment=request.metadata_enrichment,
+        )
+    else:
+        result = _ingest_collection_candidates(
+            runtime,
+            tenant_id=ctx.tenant_id,
+            collection_id=normalized_collection_id,
+            candidates=candidates,
+            user_id=ctx.user_id,
+            conversation_id=ctx.conversation_id,
+            metadata_profile=request.metadata_profile,
+            metadata_enrichment=request.metadata_enrichment,
+        )
     if file_results or missing_paths:
         result = _collection_operation_payload(
             collection_id=normalized_collection_id,
             file_results=[*result.get("files", []), *file_results],
             missing_paths=missing_paths,
             workspace_copies=result.get("workspace_copies", []),
+            metadata_profile=request.metadata_profile,
+            metadata_summary=dict(result.get("metadata_summary") or {}),
         )
     manager.get_overlay_store().append_audit_event(
         action="collection_path_ingest",
@@ -3406,6 +4060,9 @@ async def upload_collection_files(
     relative_paths: List[str] = Form([]),
     source_type: str = Form("upload"),
     conversation_id: str = Form("control-panel-upload"),
+    metadata_profile: str = Form("auto"),
+    metadata_enrichment: str = Form("deterministic"),
+    index_preview: bool = Form(False),
     actor: str = Form("control-panel"),
     manager: RuntimeManager = Depends(_admin_manager),
     x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
@@ -3424,15 +4081,19 @@ async def upload_collection_files(
         user_id=x_user_id,
         conversation_id=conversation_id,
     )
-    _ensure_collection_catalog_entry(
-        runtime,
-        ctx.tenant_id,
-        normalized_collection_id,
-        maintenance_policy=COLLECTION_MAINTENANCE_INDEXED_DOCUMENTS,
+    if str(source_type or "").strip().lower() != UPLOAD_SOURCE_TYPE:
+        _ensure_collection_catalog_entry(
+            runtime,
+            ctx.tenant_id,
+            normalized_collection_id,
+            maintenance_policy=COLLECTION_MAINTENANCE_INDEXED_DOCUMENTS,
+        )
+    blob_store = build_blob_store(runtime.settings)
+    request_dir = (
+        blob_store.cache_dir
+        / "control-panel-incoming"
+        / f"{normalized_collection_id}-{uuid.uuid4().hex}"
     )
-    uploads_dir = Path(runtime.settings.uploads_dir)
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    request_dir = uploads_dir / f"{normalized_collection_id}-{uuid.uuid4().hex}"
     request_dir.mkdir(parents=True, exist_ok=True)
     candidates: List[CollectionIngestCandidate] = []
     file_results: List[Dict[str, Any]] = []
@@ -3447,7 +4108,23 @@ async def upload_collection_files(
             dest = request_dir / PurePosixPath(relative_path)
             dest.parent.mkdir(parents=True, exist_ok=True)
             await _stream_upload_to_path(file, dest)
-            resolved_dest = dest.resolve()
+            blob_ref = None
+            ingest_path = dest
+            if not index_preview:
+                blob_ref = blob_store.put_file(
+                    dest,
+                    key=_control_panel_upload_object_key(
+                        tenant_id=ctx.tenant_id,
+                        collection_id=normalized_collection_id,
+                        conversation_id=ctx.conversation_id,
+                        relative_path=relative_path,
+                        index=index,
+                    ),
+                    content_type=str(file.content_type or ""),
+                )
+                if blob_ref.backend == "local":
+                    ingest_path = blob_store.materialize_to_path(blob_ref)
+            resolved_dest = ingest_path.resolve()
             skip_reason = _collection_candidate_skip_reason(resolved_dest)
             if skip_reason:
                 file_results.append(
@@ -3466,6 +4143,11 @@ async def upload_collection_files(
                     source_type=source_type,
                     collection_id=normalized_collection_id,
                     source_identity=f"upload:{relative_path}",
+                    source_metadata=_upload_source_metadata(
+                        file=file,
+                        relative_path=relative_path,
+                        blob_ref=blob_ref,
+                    ),
                 )
             )
         except Exception as exc:
@@ -3477,20 +4159,33 @@ async def upload_collection_files(
                     error=str(exc),
                 )
             )
-    result = _ingest_collection_candidates(
-        runtime,
-        tenant_id=ctx.tenant_id,
-        collection_id=normalized_collection_id,
-        candidates=candidates,
-        user_id=ctx.user_id,
-        conversation_id=ctx.conversation_id,
-    )
+    if index_preview:
+        result = _preview_collection_candidates(
+            runtime,
+            collection_id=normalized_collection_id,
+            candidates=candidates,
+            metadata_profile=metadata_profile,
+            metadata_enrichment=metadata_enrichment,
+        )
+    else:
+        result = _ingest_collection_candidates(
+            runtime,
+            tenant_id=ctx.tenant_id,
+            collection_id=normalized_collection_id,
+            candidates=candidates,
+            user_id=ctx.user_id,
+            conversation_id=ctx.conversation_id,
+            metadata_profile=metadata_profile,
+            metadata_enrichment=metadata_enrichment,
+        )
     if file_results:
         result = _collection_operation_payload(
             collection_id=normalized_collection_id,
             file_results=[*result.get("files", []), *file_results],
             missing_paths=result.get("missing_paths", []),
             workspace_copies=result.get("workspace_copies", []),
+            metadata_profile=metadata_profile,
+            metadata_summary=dict(result.get("metadata_summary") or {}),
         )
     manager.get_overlay_store().append_audit_event(
         action="collection_upload",
@@ -3562,26 +4257,24 @@ def list_collection_documents(
     runtime = _snapshot_or_503(manager)
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     normalized_collection_id = _normalize_collection_id(collection_id)
-    records = runtime.bot.ctx.stores.doc_store.search_by_metadata(
-        tenant_id=tenant_id,
-        collection_id=normalized_collection_id,
-        title_contains=title_contains,
-        limit=max(1, min(limit, 500)),
-    )
+    normalized_title_query = str(title_contains or "").strip().lower()
+    records = [
+        record
+        for record in runtime.bot.ctx.stores.doc_store.list_documents(
+            tenant_id=tenant_id,
+            collection_id=normalized_collection_id,
+        )
+        if not _is_upload_record(record)
+        and (
+            not normalized_title_query
+            or normalized_title_query in str(getattr(record, "title", "") or "").lower()
+        )
+    ]
+    records = sorted(records, key=lambda item: (str(getattr(item, "ingested_at", "") or ""), str(getattr(item, "title", "") or "")), reverse=True)
+    records = records[: max(1, min(limit, 500))]
     return {
         "documents": [
-            {
-                "doc_id": record.doc_id,
-                "title": record.title,
-                "source_type": record.source_type,
-                "source_path": record.source_path,
-                "source_display_path": record.source_display_path,
-                "collection_id": record.collection_id,
-                "num_chunks": record.num_chunks,
-                "ingested_at": record.ingested_at,
-                "file_type": record.file_type,
-                "doc_structure_type": record.doc_structure_type,
-            }
+            _serialize_document_record(record)
             for record in records
         ]
     }
@@ -3598,39 +4291,9 @@ def get_collection_document(
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     normalized_collection_id = _normalize_collection_id(collection_id)
     record = runtime.bot.ctx.stores.doc_store.get_document(doc_id, tenant_id=tenant_id)
-    if record is None or record.collection_id != normalized_collection_id:
+    if record is None or record.collection_id != normalized_collection_id or _is_upload_record(record):
         raise HTTPException(status_code=404, detail="Document not found.")
-    chunks = runtime.bot.ctx.stores.chunk_store.list_document_chunks(doc_id, tenant_id=tenant_id)
-    extracted = _reconstruct_document_content(chunks)
-    return {
-        "document": {
-            "doc_id": record.doc_id,
-            "title": record.title,
-            "source_type": record.source_type,
-            "source_path": record.source_path,
-            "source_display_path": record.source_display_path,
-            "collection_id": record.collection_id,
-            "num_chunks": record.num_chunks,
-            "ingested_at": record.ingested_at,
-            "file_type": record.file_type,
-            "doc_structure_type": record.doc_structure_type,
-        },
-        "extracted_content": extracted,
-        "raw_source": _read_raw_source(record),
-        "chunks": [
-            {
-                "chunk_id": chunk.chunk_id,
-                "chunk_index": chunk.chunk_index,
-                "chunk_type": chunk.chunk_type,
-                "page_number": chunk.page_number,
-                "section_title": chunk.section_title,
-                "clause_number": chunk.clause_number,
-                "sheet_name": chunk.sheet_name,
-                "content": chunk.content,
-            }
-            for chunk in chunks[:200]
-        ],
-    }
+    return _document_detail_payload(runtime, tenant_id, record)
 
 
 @router.post("/collections/{collection_id}/documents/{doc_id}/reindex")
@@ -3645,12 +4308,14 @@ def reindex_collection_document(
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     normalized_collection_id = _normalize_collection_id(collection_id)
     record = runtime.bot.ctx.stores.doc_store.get_document(doc_id, tenant_id=tenant_id)
-    if record is None or record.collection_id != normalized_collection_id:
+    if record is None or record.collection_id != normalized_collection_id or _is_upload_record(record):
         raise HTTPException(status_code=404, detail="Document not found.")
-    source_path = Path(str(record.source_path or ""))
-    if not source_path.exists():
+    source_path = _materialize_record_source_path(runtime, record)
+    if source_path is None or not source_path.exists():
         raise HTTPException(status_code=400, detail="Document source path is no longer available for reindex.")
     runtime.bot.ctx.stores.doc_store.delete_document(doc_id, tenant_id=tenant_id)
+    source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    index_metadata = source_metadata.get("index_metadata") if isinstance(source_metadata.get("index_metadata"), dict) else {}
     doc_ids = ingest_paths(
         runtime.settings,
         runtime.bot.ctx.stores,
@@ -3660,6 +4325,9 @@ def reindex_collection_document(
         collection_id=normalized_collection_id,
         source_display_paths={str(source_path.resolve()): str(record.source_display_path or source_path.name)},
         source_identities={str(source_path.resolve()): str(record.source_identity or source_path.resolve())},
+        source_metadata_by_path={str(source_path.resolve()): source_metadata},
+        metadata_profile=str(index_metadata.get("metadata_profile") or source_metadata.get("metadata_profile") or "auto"),
+        metadata_enrichment=str(index_metadata.get("metadata_enrichment") or source_metadata.get("metadata_enrichment") or "deterministic"),
     )
     manager.get_overlay_store().append_audit_event(
         action="document_reindex",
@@ -3684,7 +4352,7 @@ def delete_collection_document(
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     normalized_collection_id = _normalize_collection_id(collection_id)
     record = runtime.bot.ctx.stores.doc_store.get_document(doc_id, tenant_id=tenant_id)
-    if record is None or record.collection_id != normalized_collection_id:
+    if record is None or record.collection_id != normalized_collection_id or _is_upload_record(record):
         raise HTTPException(status_code=404, detail="Document not found.")
     runtime.bot.ctx.stores.doc_store.delete_document(doc_id, tenant_id=tenant_id)
     return {

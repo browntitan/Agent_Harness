@@ -29,6 +29,14 @@ The panel uses `CONTROL_PANEL_ADMIN_TOKEN` from `.env`.
 - access control
 - operational health and bootstrap status
 
+## Operator Docs
+
+- [Getting Started](docs/getting-started.md)
+- [Task Guide](docs/task-guide.md)
+- [Testing Routines](docs/testing-routines.md)
+- [Access Operator Guide](docs/access-operator-guide.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
 ## Local Panel Development
 
 For panel-only development, run the Vite dev server from this directory and point it at the Dockerized API:

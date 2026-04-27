@@ -100,6 +100,103 @@ class RagExecutionHints:
         }
 
 
+_INVENTORY_SHAPE_CONTROLLER_KEYS = {
+    "prefer_inventory_output",
+    "prefer_session_access_inventory",
+    "inventory_query_type",
+    "graph_inventory_only",
+}
+
+
+def _contract_value(answer_contract: Any, key: str, default: Any = "") -> Any:
+    if answer_contract is None:
+        return default
+    if isinstance(answer_contract, dict):
+        return answer_contract.get(key, default)
+    return getattr(answer_contract, key, default)
+
+
+def answer_contract_kind(answer_contract: Any) -> str:
+    return str(_contract_value(answer_contract, "kind", "") or "").strip().lower()
+
+
+def answer_contract_allows_inventory(answer_contract: Any) -> bool:
+    return answer_contract_kind(answer_contract) == "inventory"
+
+
+def _answer_contract_broad_coverage(answer_contract: Any) -> bool:
+    return bool(_contract_value(answer_contract, "broad_coverage", False))
+
+
+def _result_mode_for_answer_contract(answer_contract: Any) -> str:
+    kind = answer_contract_kind(answer_contract)
+    if kind == "comparison":
+        return "comparison"
+    if kind == "requirements_extraction":
+        return "requirement_inventory"
+    if kind == "inventory":
+        return "inventory"
+    return "answer"
+
+
+def apply_answer_contract_override(
+    hints: RagExecutionHints,
+    *,
+    answer_contract: Any = None,
+    heuristic: RagExecutionHints | None = None,
+    explicit: RagExecutionHints | None = None,
+) -> RagExecutionHints:
+    if answer_contract is None or answer_contract_allows_inventory(answer_contract):
+        return hints
+
+    controller_hints = dict(hints.controller_hints or {})
+    inventory_shaped = normalize_result_mode(hints.result_mode) == "inventory" or bool(
+        controller_hints.get("prefer_inventory_output")
+    )
+    if not inventory_shaped:
+        return hints
+
+    for key in _INVENTORY_SHAPE_CONTROLLER_KEYS:
+        controller_hints.pop(key, None)
+
+    explicit_mode = normalize_result_mode(getattr(explicit, "result_mode", "") if explicit is not None else "")
+    heuristic_mode = normalize_result_mode(getattr(heuristic, "result_mode", "") if heuristic is not None else "")
+    result_mode = (
+        explicit_mode
+        if explicit_mode and explicit_mode != "inventory"
+        else heuristic_mode
+        if heuristic_mode and heuristic_mode != "inventory"
+        else _result_mode_for_answer_contract(answer_contract)
+    )
+
+    research_profile = hints.research_profile
+    coverage_goal = hints.coverage_goal
+    if not _answer_contract_broad_coverage(answer_contract):
+        explicit_profile = normalize_research_profile(
+            getattr(explicit, "research_profile", "") if explicit is not None else ""
+        )
+        heuristic_profile = normalize_research_profile(
+            getattr(heuristic, "research_profile", "") if heuristic is not None else ""
+        )
+        explicit_coverage = normalize_coverage_goal(
+            getattr(explicit, "coverage_goal", "") if explicit is not None else ""
+        )
+        heuristic_coverage = normalize_coverage_goal(
+            getattr(heuristic, "coverage_goal", "") if heuristic is not None else ""
+        )
+        research_profile = explicit_profile or heuristic_profile
+        coverage_goal = explicit_coverage or heuristic_coverage or "targeted"
+
+    return RagExecutionHints(
+        research_profile=research_profile,
+        coverage_goal=coverage_goal,
+        result_mode=result_mode,
+        controller_hints=controller_hints,
+        matched_skill_ids=list(hints.matched_skill_ids),
+        matched_skill_names=list(hints.matched_skill_names),
+    )
+
+
 def normalize_structured_query(query: str) -> str:
     text = str(query or "").strip()
     if not text:
@@ -423,6 +520,9 @@ def coerce_rag_execution_hints(
 
 
 __all__ = [
+    "answer_contract_allows_inventory",
+    "answer_contract_kind",
+    "apply_answer_contract_override",
     "apply_bounded_synthesis_override",
     "RagExecutionHints",
     "coerce_controller_hints",

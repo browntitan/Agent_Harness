@@ -13,7 +13,7 @@ RUN git clone --depth 1 --branch ${OPENWEBUI_VERSION} https://github.com/open-we
 
 COPY deployment/openwebui/image/patches/openwebui-status-upserts.patch /tmp/openwebui-status-upserts.patch
 
-RUN git apply /tmp/openwebui-status-upserts.patch
+RUN git apply --recount /tmp/openwebui-status-upserts.patch
 
 RUN npm ci --force
 RUN npm run build

@@ -21,6 +21,7 @@ import type {
   GraphResearchTunePayload,
   McpConnectionRecord,
   McpToolCatalogRecord,
+  UploadedFileSummary,
 } from './types'
 
 class ApiError extends Error {
@@ -42,6 +43,7 @@ const SECTION_ROUTE_MAP = {
   agents: ['/v1/admin/agents'],
   prompts: ['/v1/admin/prompts'],
   collections: ['/v1/admin/collections'],
+  uploads: ['/v1/admin/uploads'],
   graphs: ['/v1/admin/graphs', '/v1/admin/graphs/{graph_id}'],
   skills: ['/v1/skills'],
   access: ['/v1/admin/access/principals', '/v1/admin/access/roles', '/v1/admin/access/effective-access'],
@@ -281,23 +283,68 @@ export const api = {
       body: JSON.stringify({ changes: {} }),
     })
   },
-  ingestPaths(token: string, collectionId: string, paths: string[]) {
+  ingestPaths(token: string, collectionId: string, paths: string[], metadataProfile = 'auto', indexPreview = false) {
     return apiFetch<CollectionOperationResult>(`/v1/admin/collections/${collectionId}/ingest-paths`, token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths, source_type: 'host_path' }),
+      body: JSON.stringify({
+        paths,
+        source_type: 'host_path',
+        metadata_profile: metadataProfile,
+        index_preview: indexPreview,
+      }),
     })
   },
-  uploadFiles(token: string, collectionId: string, files: File[], relativePaths: string[] = []) {
+  uploadFiles(token: string, collectionId: string, files: File[], relativePaths: string[] = [], metadataProfile = 'auto', indexPreview = false) {
     const form = new FormData()
     files.forEach((file, index) => {
       form.append('files', file)
       form.append('relative_paths', relativePaths[index] ?? '')
     })
+    form.append('metadata_profile', metadataProfile)
+    form.append('index_preview', String(indexPreview))
     return apiFetch<CollectionOperationResult>(`/v1/admin/collections/${collectionId}/upload`, token, {
       method: 'POST',
       body: form,
     })
+  },
+  listUploadedFiles(token: string) {
+    return apiFetch<{ uploads: UploadedFileSummary[] }>('/v1/admin/uploads', token)
+  },
+  uploadUploadedFiles(token: string, files: File[], relativePaths: string[] = [], collectionId = '', metadataProfile = 'auto', indexPreview = false) {
+    const form = new FormData()
+    files.forEach((file, index) => {
+      form.append('files', file)
+      form.append('relative_paths', relativePaths[index] ?? '')
+    })
+    if (collectionId.trim()) form.append('collection_id', collectionId.trim())
+    form.append('metadata_profile', metadataProfile)
+    form.append('index_preview', String(indexPreview))
+    return apiFetch<CollectionOperationResult>('/v1/admin/uploads', token, {
+      method: 'POST',
+      body: form,
+    })
+  },
+  getUploadedFile(token: string, docId: string) {
+    return apiFetch<Record<string, unknown>>(`/v1/admin/uploads/${docId}`, token)
+  },
+  reindexUploadedFile(token: string, docId: string) {
+    return apiFetch<Record<string, unknown>>(
+      `/v1/admin/uploads/${docId}/reindex`,
+      token,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ changes: {} }),
+      },
+    )
+  },
+  deleteUploadedFile(token: string, docId: string) {
+    return apiFetch<Record<string, unknown>>(
+      `/v1/admin/uploads/${docId}`,
+      token,
+      { method: 'DELETE' },
+    )
   },
   listCollectionDocuments(token: string, collectionId: string) {
     return apiFetch<{ documents: Array<Record<string, unknown>> }>(

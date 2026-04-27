@@ -7,6 +7,17 @@ from agentic_chatbot_next.benchmark.defense_corpus import (
     load_defense_answer_key,
     run_defense_benchmark,
 )
+from agentic_chatbot_next.benchmark.capability_suite import (
+    CapabilityCase,
+    CapabilityResult,
+    CapabilitySummary,
+    deterministic_answer_match,
+    deterministic_source_match,
+    load_cases,
+    run_suite,
+    score_case,
+    summarize_results,
+)
 from agentic_chatbot_next.benchmark.ollama_throughput import (
     OllamaBenchmarkError,
     OllamaBenchmarkFailure,
@@ -25,6 +36,15 @@ __all__ = [
     "evaluate_defense_contract",
     "load_defense_answer_key",
     "run_defense_benchmark",
+    "CapabilityCase",
+    "CapabilityResult",
+    "CapabilitySummary",
+    "deterministic_answer_match",
+    "deterministic_source_match",
+    "load_cases",
+    "run_suite",
+    "score_case",
+    "summarize_results",
     "OllamaBenchmarkError",
     "OllamaBenchmarkFailure",
     "OllamaModelThroughputReport",

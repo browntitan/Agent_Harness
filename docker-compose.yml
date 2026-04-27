@@ -7,7 +7,18 @@ x-app-build: &app-build
 x-app-env: &app-env
   DATABASE_BACKEND: postgres
   VECTOR_STORE_BACKEND: pgvector
-  OBJECT_STORE_BACKEND: local
+  OBJECT_STORE_BACKEND: ${OBJECT_STORE_BACKEND:-local}
+  OBJECT_STORE_BUCKET: ${OBJECT_STORE_BUCKET:-agentic-uploads}
+  OBJECT_STORE_PREFIX: ${OBJECT_STORE_PREFIX:-}
+  OBJECT_STORE_ENDPOINT_URL: ${OBJECT_STORE_ENDPOINT_URL:-}
+  OBJECT_STORE_REGION: ${OBJECT_STORE_REGION:-us-east-1}
+  OBJECT_STORE_ACCESS_KEY: ${OBJECT_STORE_ACCESS_KEY:-}
+  OBJECT_STORE_SECRET_KEY: ${OBJECT_STORE_SECRET_KEY:-}
+  OBJECT_STORE_SESSION_TOKEN: ${OBJECT_STORE_SESSION_TOKEN:-}
+  OBJECT_STORE_CACHE_DIR: ${OBJECT_STORE_CACHE_DIR:-./data/cache/blob-store}
+  AZURE_BLOB_CONNECTION_STRING: ${AZURE_BLOB_CONNECTION_STRING:-}
+  AZURE_STORAGE_ACCOUNT_NAME: ${AZURE_STORAGE_ACCOUNT_NAME:-}
+  AZURE_STORAGE_ACCOUNT_KEY: ${AZURE_STORAGE_ACCOUNT_KEY:-}
   SKILLS_BACKEND: local
   PROMPTS_BACKEND: local
   LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
@@ -103,6 +114,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    profiles: ["object-store"]
+    restart: unless-stopped
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-volume.max=0"]
+    ports:
+      - "${SEAWEEDFS_S3_PORT:-8333}:8333"
+      - "${SEAWEEDFS_MASTER_PORT:-9333}:9333"
+    volumes:
+      - seaweedfs_data:/data
 
   ollama:
     image: ollama/ollama:latest
@@ -431,6 +453,7 @@ services:
 
 volumes:
   rag_postgres_data:
+  seaweedfs_data:
   ollama_data:
   openwebui_data:
   app_runtime:

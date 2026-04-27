@@ -542,10 +542,16 @@ def resolve_turn_intent(user_text: str, metadata: Mapping[str, Any] | None) -> R
         requested_scope = _merge_scope(previous.requested_scope, _infer_requested_scope(normalized_user_text, session_metadata))
         requested_scope["clarification_resolution"] = normalized_user_text
         pending_reason = str(pending.get("reason") or "").strip().lower()
+        requirement_candidate_documents = [
+            dict(item)
+            for item in (session_metadata.get("requirements_candidate_documents") or [])
+            if isinstance(item, Mapping)
+        ]
         selected_collection_id = ""
         selected_collection_ids: list[str] = []
         selected_graph_ids: list[str] = []
         selected_document_names: list[str] = []
+        selected_document_ids: list[str] = []
         if pending_reason == "kb_collection_selection":
             selected_collection_id = match_requested_kb_collection_id(
                 normalized_user_text,
@@ -581,6 +587,13 @@ def resolve_turn_intent(user_text: str, metadata: Mapping[str, Any] | None) -> R
             lowered_response = normalized_user_text.casefold()
             if re.search(r"\ball\s+(?:documents?|docs?|files?)\b", lowered_response):
                 requested_scope["requirements_all_documents"] = True
+                selected_document_ids = [
+                    str(item.get("doc_id") or "").strip()
+                    for item in requirement_candidate_documents
+                    if str(item.get("doc_id") or "").strip()
+                ]
+                if selected_document_ids:
+                    requested_scope["document_ids"] = list(selected_document_ids)
             else:
                 ordinal_map = {
                     "first": 0,
@@ -607,6 +620,19 @@ def resolve_turn_intent(user_text: str, metadata: Mapping[str, Any] | None) -> R
                             break
                 if selected_document_names:
                     requested_scope["document_names"] = list(selected_document_names)
+                    selected_titles = {item.casefold() for item in selected_document_names}
+                    selected_document_ids = [
+                        str(item.get("doc_id") or "").strip()
+                        for item in requirement_candidate_documents
+                        if str(item.get("doc_id") or "").strip()
+                        and (
+                            str(item.get("title") or "").strip().casefold() in selected_titles
+                            or str(item.get("doc_id") or "").strip().casefold() in selected_titles
+                        )
+                    ]
+                    if selected_document_ids:
+                        requested_scope["document_ids"] = list(selected_document_ids)
+                        requested_scope["selected_doc_ids"] = list(selected_document_ids)
         answer_contract = previous.answer_contract
         evidence_contract = previous.evidence_contract
         if selected_collection_id:
