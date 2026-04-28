@@ -1,0 +1,3 @@
+[Network]
+NetworkName=agentic-chatbot-v3
+Driver=bridge

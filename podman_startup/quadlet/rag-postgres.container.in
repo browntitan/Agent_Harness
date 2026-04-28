@@ -1,0 +1,24 @@
+[Unit]
+Description=Agentic Chatbot v3 PostgreSQL with pgvector
+After=agentic-network.service
+Requires=agentic-network.service
+
+[Container]
+Image=docker.io/pgvector/pgvector:pg16
+ContainerName=rag-postgres
+Network=agentic.network
+NetworkAlias=rag-postgres
+EnvironmentFile=__ENV_DIR__/postgres.env
+PublishPort=127.0.0.1:__RAG_DB_PORT__:5432
+Volume=rag_postgres_data.volume:/var/lib/postgresql/data
+HealthCmd=pg_isready -U __RAG_DB_USER__ -d __RAG_DB_NAME__
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=12
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

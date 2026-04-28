@@ -1,0 +1,21 @@
+[Unit]
+Description=Agentic Chatbot v3 Open WebUI
+After=app.service
+Requires=app.service
+
+[Container]
+Image=localhost/agentic-chatbot-v3-openwebui:latest
+Pull=never
+ContainerName=openwebui
+Network=agentic.network
+NetworkAlias=openwebui
+EnvironmentFile=__ENV_DIR__/openwebui.env
+PublishPort=__OPENWEBUI_PORT__:8080
+Volume=openwebui_data.volume:/app/backend/data
+
+[Service]
+Restart=always
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

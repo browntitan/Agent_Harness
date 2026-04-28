@@ -124,8 +124,15 @@ def test_planner_input_packet_marks_clause_policy_risks() -> None:
             "requested_kb_collection_id": "internal policy guidance",
             "effective_capabilities": {"permission_mode": "default"},
         },
+        available_agents=["planner", "general", "rag_worker"],
+        available_tools=["read_indexed_doc", "search_indexed_docs"],
+        available_skill_packs=["policy_guidance"],
     )
 
     assert "mixed_evidence_scopes" in packet["risk_flags"]
     assert "requires_per_item_loop" in packet["risk_flags"]
+    assert "buyer_response_policy_review" in packet["risk_flags"]
     assert packet["selected_kb_collections"] == ["internal policy guidance"]
+    assert packet["available_agents"] == ["planner", "general", "rag_worker"]
+    assert packet["available_tools"] == ["read_indexed_doc", "search_indexed_docs"]
+    assert packet["available_skill_packs"] == ["policy_guidance"]

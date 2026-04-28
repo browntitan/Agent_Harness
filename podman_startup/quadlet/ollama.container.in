@@ -1,0 +1,26 @@
+[Unit]
+Description=Agentic Chatbot v3 Ollama GPU runtime
+After=agentic-network.service
+Requires=agentic-network.service
+
+[Container]
+Image=docker.io/ollama/ollama:latest
+ContainerName=ollama
+Network=agentic.network
+NetworkAlias=ollama
+EnvironmentFile=__ENV_DIR__/ollama.env
+PublishPort=127.0.0.1:__OLLAMA_PORT__:11434
+Volume=ollama_data.volume:/root/.ollama
+AddDevice=nvidia.com/gpu=all
+SecurityLabelDisable=true
+HealthCmd=ollama list
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=30
+
+[Service]
+Restart=always
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

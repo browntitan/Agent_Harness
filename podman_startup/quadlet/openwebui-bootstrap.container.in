@@ -1,0 +1,20 @@
+[Unit]
+Description=Agentic Chatbot v3 Open WebUI bootstrap
+After=openwebui.service
+Requires=openwebui.service
+
+[Container]
+Image=docker.io/library/python:3.12-slim
+ContainerName=openwebui-bootstrap
+Network=agentic.network
+EnvironmentFile=__ENV_DIR__/openwebui-bootstrap.env
+Volume=__REPO_ROOT__/deployment/openwebui:/config:ro,z
+Exec=python /config/bootstrap_openwebui.py
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=default.target

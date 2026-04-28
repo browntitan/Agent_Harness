@@ -1,0 +1,21 @@
+[Unit]
+Description=Agentic Chatbot v3 Ollama model bootstrap
+After=ollama.service
+Requires=ollama.service
+
+[Container]
+Image=docker.io/ollama/ollama:latest
+ContainerName=ollama-bootstrap
+Network=agentic.network
+EnvironmentFile=__ENV_DIR__/ollama-bootstrap.env
+Volume=__REPO_ROOT__/podman_startup/scripts:/bootstrap:ro,z
+Entrypoint=/bin/sh
+Exec=/bootstrap/bootstrap_ollama_models.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=default.target

@@ -69,3 +69,7 @@ new_demo_notebook/.artifacts/*
 .~lock.*
 slide-*.jpg
 Agent Powerpoint Creator/
+
+
+.claude/
+claude-code-main/

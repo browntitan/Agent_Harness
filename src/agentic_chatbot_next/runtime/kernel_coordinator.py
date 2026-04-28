@@ -23,6 +23,7 @@ from agentic_chatbot_next.runtime.task_plan import (
     WorkerExecutionRequest,
     select_execution_batch,
 )
+from agentic_chatbot_next.runtime.task_decomposition import build_planner_input_packet
 from agentic_chatbot_next.runtime.turn_contracts import (
     build_execution_digest,
     filter_context_messages,
@@ -2208,6 +2209,40 @@ class KernelCoordinatorController:
 
         planner = self.kernel._resolve_agent(planner_name)
         finalizer = self.kernel._resolve_agent(finalizer_name)
+        effective_capabilities = coerce_effective_capabilities(
+            dict(session_state.metadata or {}).get("effective_capabilities")
+            or dict(dict(session_state.metadata or {}).get("route_context") or {}).get("effective_capabilities")
+        )
+        registry_agents = list(self.kernel.registry.list())
+        available_agents = [
+            definition.name
+            for definition in registry_agents
+            if effective_capabilities is None or effective_capabilities.allows_agent(definition.name)
+        ]
+        available_tools = sorted(
+            {
+                str(tool_name)
+                for definition in registry_agents
+                for tool_name in list(getattr(definition, "allowed_tools", []) or [])
+                if str(tool_name).strip()
+                and (effective_capabilities is None or effective_capabilities.allows_tool(str(tool_name)))
+            }
+        )
+        planner_input_packet = build_planner_input_packet(
+            user_text,
+            session_metadata=dict(session_state.metadata or {}),
+            available_agents=available_agents,
+            available_tools=available_tools,
+        )
+        planner_context_summary = {
+            "attachment_count": len(planner_input_packet.get("attachments") or []),
+            "selected_kb_collections": list(planner_input_packet.get("selected_kb_collections") or []),
+            "permission_mode": str(planner_input_packet.get("permission_mode") or ""),
+            "risk_flags": list(planner_input_packet.get("risk_flags") or []),
+            "available_agent_count": len(planner_input_packet.get("available_agents") or []),
+            "available_tool_count": len(planner_input_packet.get("available_tools") or []),
+            "available_skill_pack_count": len(planner_input_packet.get("available_skill_packs") or []),
+        }
 
         self.kernel._emit(
             "coordinator_planning_started",
@@ -2216,10 +2251,17 @@ class KernelCoordinatorController:
             payload={
                 "conversation_id": session_state.conversation_id,
                 "planner_agent": planner.name,
+                "planner_context": planner_context_summary,
                 **dict(session_state.metadata.get("route_context") or {}),
             },
         )
-        planner_result = self.kernel.run_agent(planner, session_state, user_text=user_text, callbacks=callbacks)
+        planner_result = self.kernel.run_agent(
+            planner,
+            session_state,
+            user_text=user_text,
+            callbacks=callbacks,
+            task_payload={"planner_input_packet": planner_input_packet},
+        )
         if is_clarification_turn(planner_result.metadata):
             from agentic_chatbot_next.runtime.kernel import AgentRunResult
 
@@ -2246,6 +2288,7 @@ class KernelCoordinatorController:
                 "conversation_id": session_state.conversation_id,
                 "task_count": len(planner_payload.get("tasks") or []),
                 "planner_agent": planner.name,
+                "planner_context": planner_context_summary,
                 **dict(session_state.metadata.get("route_context") or {}),
             },
         )
@@ -2728,6 +2771,7 @@ class KernelCoordinatorController:
         assistant_metadata = {
             "agent_name": agent.name,
             "planner_payload": planner_payload,
+            "planner_input_packet": planner_input_packet,
             "task_execution_state": execution_state.to_dict(),
             "verification": verification_payload,
             "revision_rounds_used": revision_round,

@@ -1,7 +1,22 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from agentic_chatbot_next.contracts.agents import AgentDefinition
+from agentic_chatbot_next.contracts.messages import SessionState
+from agentic_chatbot_next.runtime.query_loop import QueryLoop
 from agentic_chatbot_next.runtime.task_plan import build_fallback_plan, normalise_task_plan, select_execution_batch
 from agentic_chatbot_next.runtime.turn_contracts import resolve_turn_intent
+
+
+class RecordingChatModel:
+    def __init__(self, response_text: str) -> None:
+        self.response_text = response_text
+        self.calls: list[dict[str, object]] = []
+
+    def invoke(self, messages, config=None):
+        self.calls.append({"messages": list(messages), "config": dict(config or {})})
+        return SimpleNamespace(content=self.response_text)
 
 
 def test_single_step_request_produces_one_sequential_task():
@@ -210,6 +225,70 @@ def test_normalise_task_plan_repairs_collapsed_mixed_calculation_and_retrieval_p
 
     assert [task["executor"] for task in plan] == ["utility", "rag_worker", "general"]
     assert all("4.2" not in task["doc_scope"] for task in plan)
+
+
+def test_planner_prompt_includes_context_packet_and_keeps_repair_safety_net():
+    query = (
+        "Calculate 18% of 4.2 million and, separately, search indexed docs for rate limit policy; "
+        "return both results together."
+    )
+    chat = RecordingChatModel(
+        """
+        {
+          "summary": "Collapsed plan",
+          "tasks": [
+            {
+              "id": "task_1",
+              "title": "Handle request",
+              "executor": "rag_worker",
+              "mode": "sequential",
+              "input": "Calculate 18% of 4.2 million and search indexed docs for rate limit policy.",
+              "doc_scope": ["4.2"],
+              "skill_queries": []
+            }
+          ]
+        }
+        """
+    )
+    loop = QueryLoop(
+        settings=SimpleNamespace(
+            planner_max_tasks=4,
+            memory_enabled=False,
+            context_budget_enabled=False,
+            tiktoken_enabled=False,
+        ),
+        providers=SimpleNamespace(chat=chat),
+    )
+    agent = AgentDefinition(
+        name="planner",
+        mode="planner",
+        prompt_file="planner_agent.md",
+    )
+    packet = {
+        "permission_mode": "default",
+        "risk_flags": ["mixed_evidence_scopes"],
+        "available_agents": ["planner", "utility", "rag_worker", "general"],
+        "available_tools": ["calculator", "search_indexed_docs"],
+    }
+
+    result = loop.run(
+        agent,
+        SessionState(tenant_id="tenant", user_id="user", conversation_id="conv"),
+        user_text=query,
+        task_payload={"planner_input_packet": packet},
+    )
+
+    prompt = str(chat.calls[0]["messages"][-1].content)
+    assert "PLANNER_CONTEXT:" in prompt
+    assert '"permission_mode":"default"' in prompt
+    assert '"available_agents":["planner","utility","rag_worker","general"]' in prompt
+    assert result.metadata["planner_input_packet"] == packet
+    assert result.metadata["plan_repair_applied"] is True
+    assert [task["executor"] for task in result.metadata["planner_payload"]["tasks"]] == [
+        "utility",
+        "rag_worker",
+        "general",
+    ]
 
 
 def test_graph_mutation_request_routes_to_general_admin_guidance():

@@ -973,6 +973,67 @@ def test_coordinator_runs_planner_workers_finalizer_and_verifier_with_scoped_wor
     assert worker_histories == [[]]
 
 
+def test_coordinator_passes_planner_input_packet_to_planner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    kernel = RuntimeKernel(
+        _make_runtime_settings(tmp_path),
+        providers=SimpleNamespace(),
+        stores=SimpleNamespace(),
+    )
+    coordinator = kernel.registry.get("coordinator")
+    assert coordinator is not None
+
+    query = (
+        "Look through the document I uploaded and extract all clauses and associated redlines, "
+        "then loop through each clause/redline and search the internal policy guidance collection. "
+        "Return recommended buyer actions to write back to the supplier."
+    )
+    session_state = SessionState(
+        tenant_id="tenant",
+        user_id="user",
+        conversation_id="conv",
+        metadata={
+            "uploaded_doc_ids": ["UPLOAD_123"],
+            "requested_kb_collection_id": "internal policy guidance",
+            "effective_capabilities": {
+                "enabled_agents": ["coordinator", "planner", "general", "rag_worker", "finalizer", "verifier"],
+                "enabled_tools": ["read_indexed_doc"],
+                "enabled_skill_pack_ids": ["policy_guidance"],
+                "permission_mode": "plan",
+            },
+        },
+    )
+    planner_payloads = []
+
+    def fake_run_agent(agent, session_state, *, user_text, callbacks, task_payload=None):
+        assert agent.mode == "planner"
+        planner_payloads.append(dict(task_payload or {}))
+        return SimpleNamespace(
+            text="",
+            messages=list(session_state.messages),
+            metadata={"planner_payload": {"summary": "Preview only.", "tasks": []}},
+        )
+
+    monkeypatch.setattr(kernel, "run_agent", fake_run_agent)
+
+    result = kernel._run_coordinator(
+        coordinator,
+        session_state,
+        user_text=query,
+        callbacks=[],
+    )
+
+    assert "Plan mode is enabled" in result.text
+    packet = planner_payloads[0]["planner_input_packet"]
+    assert packet["attachments"] == ["UPLOAD_123"]
+    assert packet["selected_kb_collections"] == ["internal policy guidance"]
+    assert packet["permission_mode"] == "plan"
+    assert set(packet["available_agents"]) == {"coordinator", "general", "rag_worker", "planner", "finalizer", "verifier"}
+    assert packet["available_tools"] == ["read_indexed_doc"]
+    assert packet["available_skill_packs"] == ["policy_guidance"]
+    assert "mixed_evidence_scopes" in packet["risk_flags"]
+    assert "requires_per_item_loop" in packet["risk_flags"]
+
+
 def test_spawn_worker_tool_blocks_background_launch_for_agents_that_disallow_it(tmp_path: Path) -> None:
     kernel = RuntimeKernel(
         _make_runtime_settings(tmp_path),

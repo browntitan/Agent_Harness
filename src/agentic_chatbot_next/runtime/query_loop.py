@@ -310,6 +310,7 @@ class QueryLoop:
                 session_state,
                 user_text=user_text,
                 skill_context=skill_context,
+                task_payload=dict(task_payload or {}),
                 callbacks=callbacks,
                 providers=active_providers,
             )
@@ -1248,16 +1249,32 @@ class QueryLoop:
         *,
         user_text: str,
         skill_context: str,
+        task_payload: Dict[str, Any],
         callbacks: List[Any],
         providers: Any,
     ) -> QueryLoopResult:
+        payload = dict(task_payload or {})
+        planner_input_packet = dict(payload.get("planner_input_packet") or {})
         system_prompt = self._build_system_prompt(
             agent,
             session_state,
             user_text=user_text,
             providers=providers,
             skill_context=skill_context,
+            task_payload=payload,
         )
+        planner_context_block = ""
+        if planner_input_packet:
+            planner_context_block = (
+                "PLANNER_CONTEXT:\n"
+                + json.dumps(
+                    planner_input_packet,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n\n"
+            )
         prompt = (
             "Return JSON only with this schema:\n"
             "{"
@@ -1271,6 +1288,7 @@ class QueryLoop:
             "]}\n\n"
             f"Limit the number of tasks to {self.settings.planner_max_tasks}.\n"
             "Only mark tasks as parallel when they are truly independent.\n\n"
+            f"{planner_context_block}"
             f"USER_REQUEST:\n{user_text}"
         )
         text = ""
@@ -1287,7 +1305,10 @@ class QueryLoop:
             return QueryLoopResult(
                 text=text,
                 messages=list(session_state.messages) + [RuntimeMessage(role="assistant", content=text, metadata=assistant_metadata)],
-                metadata=dict(assistant_metadata),
+                metadata={
+                    "planner_input_packet": planner_input_packet,
+                    **dict(assistant_metadata),
+                },
             )
         obj = extract_json(text or "") or {}
         raw_tasks = obj.get("tasks") if isinstance(obj.get("tasks"), list) else []
@@ -1327,6 +1348,7 @@ class QueryLoop:
             messages=list(session_state.messages) + [RuntimeMessage(role="assistant", content=rendered, metadata=assistant_metadata)],
             metadata={
                 "planner_payload": payload,
+                "planner_input_packet": planner_input_packet,
                 "planner_raw_task_count": len(raw_tasks),
                 "planner_normalized_task_count": len(task_plan),
                 "plan_repair_applied": plan_repair_applied,

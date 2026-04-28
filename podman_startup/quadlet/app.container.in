@@ -1,0 +1,45 @@
+[Unit]
+Description=Agentic Chatbot v3 FastAPI runtime
+After=app-bootstrap.service
+Requires=app-bootstrap.service
+
+[Container]
+Image=localhost/agentic-chatbot-v3-app:latest
+Pull=never
+ContainerName=app
+Network=agentic.network
+NetworkAlias=app
+EnvironmentFile=__ENV_DIR__/app.env
+Environment=WAIT_FOR_DB=true
+Environment=APP_AUTO_MIGRATE=false
+Environment=APP_AUTO_INIT_KB=false
+Environment=APP_AUTO_INDEX_SKILLS=false
+Environment=APP_AUTO_SYNC_KB=false
+Environment=DB_WAIT_TIMEOUT_SECONDS=90
+PublishPort=__APP_API_PORT__:8000
+Volume=__REPO_ROOT__/data/agents:/app/data/agents:ro,z
+Volume=__REPO_ROOT__/data/prompts:/app/data/prompts:ro,z
+Volume=__REPO_ROOT__/data/skills:/app/data/skills:ro,z
+Volume=__REPO_ROOT__/data/skill_packs:/app/data/skill_packs:ro,z
+Volume=__REPO_ROOT__/data/router:/app/data/router:ro,z
+Volume=__REPO_ROOT__/data/kb:/app/data/kb:ro,z
+Volume=__REPO_ROOT__/data/demo:/app/data/demo:ro,z
+Volume=__REPO_ROOT__/docs:/app/docs:ro,z
+Volume=app_runtime.volume:/app/data/runtime
+Volume=app_uploads.volume:/app/data/uploads
+Volume=app_workspaces.volume:/app/data/workspaces
+Volume=app_cache.volume:/app/data/cache
+Volume=app_control_panel_data.volume:/app/data/control_panel
+Volume=graphrag_projects.volume:/app/data/graphrag/projects
+Exec=python run.py serve-api --host 0.0.0.0 --port 8000
+HealthCmd=curl -fsS http://127.0.0.1:8000/health/ready >/dev/null || exit 1
+HealthInterval=15s
+HealthTimeout=5s
+HealthRetries=10
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
