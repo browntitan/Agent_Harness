@@ -19,6 +19,7 @@ __pycache__
 .env
 .env.*
 !.env.example
+podman_startup/certs
 
 # Node/build output
 node_modules

@@ -101,6 +101,22 @@ CONNECTOR_SECRET_API_KEY=
 
 ## 3. Build Images
 
+If your EC2 host builds through the Northrop Grumman contractor proxy, place the company certificate in the default location first:
+
+```bash
+mkdir -p podman_startup/certs
+cp /path/to/NG-Certificate-Chain.cer podman_startup/certs/NG-Certificate-Chain.cer
+```
+
+The build script passes these proxy defaults unless overridden by your shell or `.env`:
+
+```env
+HTTP_PROXY=http://contractorproxyeast.northgrum.com:80
+HTTPS_PROXY=http://contractorproxyeast.northgrum.com:80
+NO_PROXY=localhost,127.0.0.1,::1,0.0.0.0,rag-postgres,ollama,app,openwebui,.northgrum.com,169.254.169.254,169.254.170.2
+PODMAN_BUILD_CA_CERT=podman_startup/certs/NG-Certificate-Chain.cer
+```
+
 From the repo root:
 
 ```bash
@@ -111,6 +127,18 @@ This builds:
 
 - `localhost/agentic-chatbot-v3-app:latest`
 - `localhost/agentic-chatbot-v3-openwebui:latest`
+
+To force a clean rebuild after a failed proxy/certificate attempt:
+
+```bash
+podman_startup/scripts/stop.sh || true
+systemctl --user reset-failed || true
+
+podman rm -f rag-postgres ollama ollama-bootstrap app-bootstrap app openwebui openwebui-bootstrap 2>/dev/null || true
+podman rmi -f localhost/agentic-chatbot-v3-app:latest localhost/agentic-chatbot-v3-openwebui:latest 2>/dev/null || true
+podman builder prune -af
+podman image prune -af
+```
 
 ## 4. Install Rootless Quadlets
 
