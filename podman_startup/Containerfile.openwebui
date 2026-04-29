@@ -4,23 +4,28 @@ ARG OPENWEBUI_VERSION=v0.8.6
 ARG HTTP_PROXY=""
 ARG HTTPS_PROXY=""
 ARG NO_PROXY="localhost,127.0.0.1,::1,0.0.0.0"
+ARG ONNX_RUNTIME_VERSION=1.20.1
+ARG ONNX_RUNTIME_ARTIFACT=onnxruntime-linux-x64-gpu-1.20.1.tgz
 
 FROM node:22-alpine3.20 AS build
 ARG OPENWEBUI_VERSION
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
+ARG ONNX_RUNTIME_VERSION
+ARG ONNX_RUNTIME_ARTIFACT
 
 ENV HTTP_PROXY=${HTTP_PROXY} \
     HTTPS_PROXY=${HTTPS_PROXY} \
     NO_PROXY=${NO_PROXY} \
     http_proxy=${HTTP_PROXY} \
     https_proxy=${HTTPS_PROXY} \
-    no_proxy=${NO_PROXY}
+    no_proxy=${NO_PROXY} \
+    ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 
 WORKDIR /src
 
-RUN apk add --no-cache git ca-certificates \
+RUN apk add --no-cache git ca-certificates tar \
     && update-ca-certificates \
     && if [ -n "$HTTP_PROXY" ]; then npm config set proxy "$HTTP_PROXY"; fi \
     && if [ -n "$HTTPS_PROXY" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi \
@@ -32,10 +37,26 @@ RUN apk add --no-cache git ca-certificates \
 RUN git clone --depth 1 --branch ${OPENWEBUI_VERSION} https://github.com/open-webui/open-webui.git .
 
 COPY deployment/openwebui/image/patches/openwebui-status-upserts.patch /tmp/openwebui-status-upserts.patch
+COPY podman_startup/vendor/${ONNX_RUNTIME_ARTIFACT} /tmp/${ONNX_RUNTIME_ARTIFACT}
 
 RUN git apply --recount /tmp/openwebui-status-upserts.patch
 
 RUN npm install --force
+
+RUN mkdir -p /tmp/onnxruntime-gpu \
+    && tar -xzf /tmp/${ONNX_RUNTIME_ARTIFACT} -C /tmp/onnxruntime-gpu \
+    && find /tmp/onnxruntime-gpu -type f \( \
+      -name 'libonnxruntime_providers_cuda.so' \
+      -o -name 'libonnxruntime_providers_tensorrt.so' \
+      -o -name 'libonnxruntime_providers_shared.so' \
+      -o -name "libonnxruntime.so.${ONNX_RUNTIME_VERSION}" \
+    \) -exec cp {} node_modules/onnxruntime-node/bin/napi-v3/linux/x64/ \; \
+    && test -f node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime_providers_cuda.so \
+    && test -f node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime_providers_tensorrt.so \
+    && test -f node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime_providers_shared.so \
+    && test -f node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so.${ONNX_RUNTIME_VERSION} \
+    && rm -rf /tmp/onnxruntime-gpu /tmp/${ONNX_RUNTIME_ARTIFACT}
+
 RUN npm run build
 
 FROM ghcr.io/open-webui/open-webui:${OPENWEBUI_VERSION}

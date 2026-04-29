@@ -101,11 +101,12 @@ CONNECTOR_SECRET_API_KEY=
 
 ## 3. Build Images
 
-If your EC2 host builds through the Northrop Grumman contractor proxy, place the company certificate in the default location first:
+The Open WebUI build needs the ONNX Runtime GPU artifact that `onnxruntime-node` normally downloads from GitHub during `npm install`. The build script downloads that artifact on the host first, verifies it with `tar`, then injects it into the Podman image build so the in-container `npm install` does not make that GitHub artifact request.
 
-```bash
-mkdir -p podman_startup/certs
-cp /path/to/NG-Certificate-Chain.cer podman_startup/certs/NG-Certificate-Chain.cer
+The default artifact is:
+
+```text
+podman_startup/vendor/onnxruntime-linux-x64-gpu-1.20.1.tgz
 ```
 
 The build script passes these proxy defaults unless overridden by your shell or `.env`:
@@ -114,7 +115,9 @@ The build script passes these proxy defaults unless overridden by your shell or 
 HTTP_PROXY=http://contractorproxyeast.northgrum.com:80
 HTTPS_PROXY=http://contractorproxyeast.northgrum.com:80
 NO_PROXY=localhost,127.0.0.1,::1,0.0.0.0,rag-postgres,ollama,app,openwebui,.northgrum.com,169.254.169.254,169.254.170.2
-PODMAN_BUILD_CA_CERT=podman_startup/certs/NG-Certificate-Chain.cer
+ONNX_RUNTIME_VERSION=1.20.1
+ONNX_RUNTIME_ARTIFACT=onnxruntime-linux-x64-gpu-1.20.1.tgz
+ONNX_RUNTIME_URL=https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-gpu-1.20.1.tgz
 ```
 
 From the repo root:
@@ -128,7 +131,7 @@ This builds:
 - `localhost/agentic-chatbot-v3-app:latest`
 - `localhost/agentic-chatbot-v3-openwebui:latest`
 
-To force a clean rebuild after a failed proxy/certificate attempt:
+To force a clean rebuild after a failed build attempt:
 
 ```bash
 podman_startup/scripts/stop.sh || true
@@ -138,6 +141,12 @@ podman rm -f rag-postgres ollama ollama-bootstrap app-bootstrap app openwebui op
 podman rmi -f localhost/agentic-chatbot-v3-app:latest localhost/agentic-chatbot-v3-openwebui:latest 2>/dev/null || true
 podman builder prune -af
 podman image prune -af
+```
+
+To force the ONNX Runtime artifact to download again:
+
+```bash
+rm -f podman_startup/vendor/onnxruntime-linux-x64-gpu-1.20.1.tgz
 ```
 
 ## 4. Install Rootless Quadlets
