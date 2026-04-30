@@ -2211,6 +2211,7 @@ class RuntimeKernel:
                 "title": str(worker_request.get("title") or ""),
                 "doc_scope": list(worker_request.get("doc_scope") or []),
                 "detail": str(worker_request.get("description") or ""),
+                "parallel_group_id": str(dict(worker_request.get("metadata") or {}).get("parallel_group_id") or ""),
                 **dict(session_state.metadata.get("route_context") or {}),
             },
         )
@@ -2265,6 +2266,7 @@ class RuntimeKernel:
                 "detail": str(worker_request.get("description") or ""),
                 "status": str(refreshed.status or "completed"),
                 "output_path": refreshed.output_path,
+                "parallel_group_id": str(dict(worker_request.get("metadata") or {}).get("parallel_group_id") or ""),
                 **dict(session_state.metadata.get("route_context") or {}),
             },
         )

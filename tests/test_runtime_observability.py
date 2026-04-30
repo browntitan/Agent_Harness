@@ -248,6 +248,12 @@ def test_runtime_trace_callback_redacts_and_truncates_tool_payloads(tmp_path: Pa
         "",
         run_id=run_id,
         inputs={"query": "hello", "api_key": "sk-live-secret", "nested": {"token": "tok-secret"}},
+        metadata={
+            "parent_agent": "coordinator",
+            "agentic_parallel_group_id": "tool-wave-general-1-call",
+            "agentic_parallel_execution_mode": "parallel",
+            "agentic_parallel_group_size": 2,
+        },
     )
     callback.on_tool_end(
         {"ok": True, "text": "x" * 13_000, "authorization": "Bearer abc"},
@@ -261,11 +267,18 @@ def test_runtime_trace_callback_redacts_and_truncates_tool_payloads(tmp_path: Pa
     assert start["payload"]["tool_call_id"] == str(run_id)
     assert start["payload"]["input"]["api_key"] == "[redacted]"
     assert start["payload"]["input"]["nested"]["token"] == "[redacted]"
+    assert set(start["payload"]["redacted_fields"]) == {"input.api_key", "input.nested.token"}
+    assert start["payload"]["payload_limit_chars"] == 12_000
+    assert start["payload"]["parent_agent"] == "coordinator"
+    assert start["payload"]["parallel_group_id"] == "tool-wave-general-1-call"
+    assert start["payload"]["parallel_execution_mode"] == "parallel"
+    assert start["payload"]["parallel_group_size"] == 2
     assert "sk-live-secret" not in json.dumps(start["payload"])
     assert end["payload"]["tool_call_id"] == str(run_id)
     assert end["payload"]["output"].startswith("{")
     assert end["payload"]["truncated"] is True
     assert "output" in end["payload"]["truncated_fields"]
+    assert "output.authorization" in end["payload"]["redacted_fields"]
     assert "Bearer abc" not in json.dumps(end["payload"])
 
 
@@ -2193,6 +2206,10 @@ def test_live_progress_sink_translates_tool_lifecycle_to_status_cards() -> None:
                 "status": "running",
                 "input_preview": '{"query":"trace"}',
                 "input": {"query": "trace"},
+                "parent_agent": "coordinator",
+                "parallel_group_id": "tool-wave-general-1-call-1",
+                "redacted_fields": ["input.api_key"],
+                "payload_limit_chars": 12000,
                 "started_at": "2026-04-23T10:00:00Z",
             },
         )
@@ -2212,6 +2229,10 @@ def test_live_progress_sink_translates_tool_lifecycle_to_status_cards() -> None:
                 "input": {"query": "trace"},
                 "output_preview": '{"hits":1}',
                 "output": {"hits": 1},
+                "parent_agent": "coordinator",
+                "parallel_group_id": "tool-wave-general-1-call-1",
+                "redacted_fields": ["input.api_key"],
+                "payload_limit_chars": 12000,
                 "started_at": "2026-04-23T10:00:00Z",
                 "completed_at": "2026-04-23T10:00:01Z",
                 "duration_ms": 1000,
@@ -2227,11 +2248,126 @@ def test_live_progress_sink_translates_tool_lifecycle_to_status_cards() -> None:
     assert started["done"] is False
     assert started["agentic_tool_call"]["tool_call_id"] == "call-1"
     assert started["agentic_tool_call"]["input"] == {"query": "trace"}
+    assert started["agentic_tool_call"]["parent_agent"] == "coordinator"
+    assert started["agentic_tool_call"]["parallel_group_id"] == "tool-wave-general-1-call-1"
+    assert started["agentic_tool_call"]["redacted_fields"] == ["input.api_key"]
+    assert started["agentic_tool_call"]["payload_limit_chars"] == 12000
     assert completed["status_id"] == "tool-call-1"
     assert completed["done"] is True
     assert completed["agentic_tool_call"]["status"] == "completed"
     assert completed["agentic_tool_call"]["output"] == {"hits": 1}
     assert completed["agentic_tool_call"]["source_event_id"] == "evt_end"
+
+
+def test_live_progress_sink_translates_worker_agent_activity_payloads() -> None:
+    sink = LiveProgressSink()
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_worker_start",
+            event_type="worker_agent_started",
+            session_id="tenant:user:conv",
+            job_id="job-1",
+            agent_name="rag_worker",
+            payload={
+                "job_id": "job-1",
+                "task_id": "T2",
+                "title": "Find source evidence",
+                "detail": "Searching evidence for task T2.",
+                "parent_agent": "coordinator",
+                "parallel_group_id": "worker-batch-T1-T2",
+            },
+        )
+    )
+
+    event = sink.events.get_nowait()
+
+    assert event["type"] == "worker_start"
+    assert event["status_id"] == "agent-agent-worker-rag_worker-T2-job-1"
+    assert event["agentic_status"]["version"] == 1
+    assert event["agentic_status"]["kind"] == "agent"
+    assert event["agentic_agent_activity"] == {
+        "version": 1,
+        "activity_id": "agent-worker-rag_worker-T2-job-1",
+        "agent_name": "rag_worker",
+        "role": "worker",
+        "status": "running",
+        "title": "rag_worker working on T2",
+        "description": "Searching evidence for task T2.",
+        "parent_agent": "coordinator",
+        "task_id": "T2",
+        "job_id": "job-1",
+        "parallel_group_id": "worker-batch-T1-T2",
+        "started_at": "",
+        "completed_at": "",
+        "duration_ms": None,
+    }
+
+
+def test_live_progress_sink_translates_top_level_agent_completion_activity() -> None:
+    sink = LiveProgressSink()
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_agent_done",
+            event_type="agent_run_completed",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            payload={"status": "completed", "detail": "General agent finished."},
+        )
+    )
+
+    event = sink.events.get_nowait()
+
+    assert event["type"] == "summary"
+    assert event["status"] == "complete"
+    assert event["agentic_agent_activity"]["role"] == "top_level"
+    assert event["agentic_agent_activity"]["status"] == "completed"
+    assert event["agentic_status"]["kind"] == "agent"
+
+
+def test_live_progress_sink_translates_parallel_group_payloads() -> None:
+    sink = LiveProgressSink()
+    members = [
+        {"agent_name": "rag_worker", "task_id": "T1", "job_id": "job-1"},
+        {"agent_name": "table_worker", "task_id": "T2", "job_id": "job-2"},
+    ]
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_group_start",
+            event_type="coordinator_worker_batch_started",
+            session_id="tenant:user:conv",
+            agent_name="coordinator",
+            payload={
+                "group_id": "worker-batch-T1-T2",
+                "group_kind": "worker_batch",
+                "status": "running",
+                "execution_mode": "parallel",
+                "size": 2,
+                "members": members,
+                "reason": "Coordinator dispatched this worker batch in parallel.",
+                "started_at": "2026-04-23T10:00:00Z",
+            },
+        )
+    )
+
+    event = sink.events.get_nowait()
+
+    assert event["type"] == "parallel_group_trace"
+    assert event["status_id"] == "group-worker-batch-T1-T2"
+    assert event["status"] == "in_progress"
+    assert event["agentic_status"]["kind"] == "parallel_group"
+    assert event["agentic_parallel_group"] == {
+        "version": 1,
+        "group_id": "worker-batch-T1-T2",
+        "group_kind": "worker_batch",
+        "status": "running",
+        "execution_mode": "parallel",
+        "size": 2,
+        "members": members,
+        "reason": "Coordinator dispatched this worker batch in parallel.",
+        "started_at": "2026-04-23T10:00:00Z",
+        "completed_at": "",
+        "duration_ms": None,
+    }
 
 
 def test_live_progress_sink_uses_planner_agent_for_coordinator_planning_events() -> None:

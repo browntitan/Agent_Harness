@@ -1324,8 +1324,14 @@ def _stream_with_progress(
             break
         if event is None:  # sentinel: processing complete
             break
-        if isinstance(event, dict) and isinstance(event.get("agentic_tool_call"), dict):
+        if isinstance(event, dict) and any(
+            isinstance(event.get(key), dict)
+            for key in ("agentic_tool_call", "agentic_agent_activity", "agentic_parallel_group")
+        ):
             yield _named_sse_event("status", event)
+            if tracker is not None and not isinstance(event.get("agentic_tool_call"), dict):
+                for snapshot in tracker.progress_snapshots(event, time.monotonic()):
+                    yield _named_sse_event("status", snapshot)
             continue
         yield f"event: progress\ndata: {_json_dumps(event)}\n\n"
         if tracker is not None:

@@ -63,6 +63,23 @@ def _event_index(events: list[tuple[str, str, str]], kind: str, name: str) -> in
     return next(index for index, event in enumerate(events) if event[:2] == (kind, name))
 
 
+class _EventSink:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def emit(self, event) -> None:
+        self.events.append(event)
+
+
+def _tool_context(event_sink: _EventSink) -> SimpleNamespace:
+    return SimpleNamespace(
+        event_sink=event_sink,
+        session=SimpleNamespace(session_id="tenant:user:conv", conversation_id="conv"),
+        active_agent="general",
+        metadata={"job_id": "job-1"},
+    )
+
+
 def test_policy_aware_tool_node_runs_independent_tools_in_parallel_and_preserves_order() -> None:
     probe = _ConcurrencyProbe()
     alpha = _make_probe_tool("alpha_tool", probe)
@@ -89,6 +106,52 @@ def test_policy_aware_tool_node_runs_independent_tools_in_parallel_and_preserves
     assert probe.peak == 2
 
 
+def test_policy_aware_tool_node_emits_parallel_tool_wave_audit_events() -> None:
+    probe = _ConcurrencyProbe()
+    event_sink = _EventSink()
+    alpha = _make_probe_tool("alpha_tool", probe)
+    beta = _make_probe_tool("beta_tool", probe)
+    node = PolicyAwareToolNode(
+        [alpha, beta],
+        max_tool_calls=4,
+        max_parallel_tool_calls=4,
+        tool_context=_tool_context(event_sink),
+    )
+
+    result = node.invoke(
+        {
+            "messages": [
+                HumanMessage(content="Run the independent tools."),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        _tool_call("alpha_tool", "tool_alpha", value="first"),
+                        _tool_call("beta_tool", "tool_beta", value="second"),
+                    ],
+                ),
+            ]
+        }
+    )
+
+    assert [message.content for message in result["messages"]] == ["alpha_tool:first", "beta_tool:second"]
+    assert [event.event_type for event in event_sink.events] == [
+        "tool_parallel_group_started",
+        "tool_parallel_group_completed",
+    ]
+    started = event_sink.events[0]
+    completed = event_sink.events[1]
+    assert started.session_id == "tenant:user:conv"
+    assert started.agent_name == "general"
+    assert started.job_id == "job-1"
+    assert started.payload["group_kind"] == "tool_wave"
+    assert started.payload["execution_mode"] == "parallel"
+    assert started.payload["size"] == 2
+    assert [member["tool_call_id"] for member in started.payload["members"]] == ["tool_alpha", "tool_beta"]
+    assert completed.payload["group_id"] == started.payload["group_id"]
+    assert completed.payload["status"] == "completed"
+    assert completed.payload["duration_ms"] >= 0
+
+
 def test_policy_aware_tool_node_serializes_conflicting_concurrency_keys() -> None:
     probe = _ConcurrencyProbe()
     alpha = _make_probe_tool("alpha_tool", probe, metadata={"concurrency_key": "memory"})
@@ -113,6 +176,41 @@ def test_policy_aware_tool_node_serializes_conflicting_concurrency_keys() -> Non
     outputs = result["messages"]
     assert [message.content for message in outputs] == ["alpha_tool:first", "beta_tool:second"]
     assert probe.peak == 1
+
+
+def test_policy_aware_tool_node_marks_conflicting_tool_waves_as_sequential() -> None:
+    probe = _ConcurrencyProbe()
+    event_sink = _EventSink()
+    alpha = _make_probe_tool("alpha_tool", probe, metadata={"concurrency_key": "memory"})
+    beta = _make_probe_tool("beta_tool", probe, metadata={"concurrency_key": "memory"})
+    node = PolicyAwareToolNode(
+        [alpha, beta],
+        max_tool_calls=4,
+        max_parallel_tool_calls=4,
+        tool_context=_tool_context(event_sink),
+    )
+
+    result = node.invoke(
+        {
+            "messages": [
+                HumanMessage(content="Serialize the memory tools."),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        _tool_call("alpha_tool", "tool_alpha", value="first"),
+                        _tool_call("beta_tool", "tool_beta", value="second"),
+                    ],
+                ),
+            ]
+        }
+    )
+
+    assert [message.content for message in result["messages"]] == ["alpha_tool:first", "beta_tool:second"]
+    assert probe.peak == 1
+    started_events = [event for event in event_sink.events if event.event_type == "tool_parallel_group_started"]
+    assert len(started_events) == 2
+    assert {event.payload["execution_mode"] for event in started_events} == {"sequential"}
+    assert [event.payload["size"] for event in started_events] == [1, 1]
 
 
 def test_policy_aware_tool_node_respects_max_parallel_tool_calls() -> None:

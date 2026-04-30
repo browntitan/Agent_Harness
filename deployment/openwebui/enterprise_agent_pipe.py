@@ -1114,6 +1114,9 @@ def _status_signature(payload: Mapping[str, Any]) -> str:
         str(payload.get("why") or ""),
         str(payload.get("waiting_on") or ""),
         _agentic_status_signature(payload.get("agentic_status")),
+        _agentic_status_signature(payload.get("agentic_agent_activity")),
+        _agentic_status_signature(payload.get("agentic_parallel_group")),
+        _agentic_status_signature(payload.get("agentic_tool_call")),
     ]
     return "\u241f".join(parts)
 

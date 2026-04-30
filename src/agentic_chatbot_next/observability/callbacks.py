@@ -114,7 +114,8 @@ def _preview(value: Any, *, limit: int = _TOOL_PREVIEW_LIMIT) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def _redact_sensitive(value: Any, *, depth: int = 0) -> Any:
+def _redact_sensitive(value: Any, *, depth: int = 0, path: str = "", redacted_fields: Optional[List[str]] = None) -> Any:
+    redacted_fields = redacted_fields if redacted_fields is not None else []
     if depth > 8:
         return _preview(value, limit=240)
     compatible = make_json_compatible(value)
@@ -122,23 +123,61 @@ def _redact_sensitive(value: Any, *, depth: int = 0) -> Any:
         redacted: Dict[str, Any] = {}
         for key, item in compatible.items():
             key_text = str(key)
+            field_path = f"{path}.{key_text}" if path else key_text
             if _SENSITIVE_KEY_RE.search(key_text):
                 redacted[key_text] = "[redacted]"
+                if field_path not in redacted_fields:
+                    redacted_fields.append(field_path)
             else:
-                redacted[key_text] = _redact_sensitive(item, depth=depth + 1)
+                redacted[key_text] = _redact_sensitive(
+                    item,
+                    depth=depth + 1,
+                    path=field_path,
+                    redacted_fields=redacted_fields,
+                )
         return redacted
     if isinstance(compatible, list):
-        return [_redact_sensitive(item, depth=depth + 1) for item in compatible]
+        return [
+            _redact_sensitive(
+                item,
+                depth=depth + 1,
+                path=f"{path}[{index}]" if path else f"[{index}]",
+                redacted_fields=redacted_fields,
+            )
+            for index, item in enumerate(compatible)
+        ]
     return compatible
 
 
-def _bounded_tool_value(value: Any) -> tuple[Any, str, bool]:
-    redacted = _redact_sensitive(value)
+def _bounded_tool_value(value: Any) -> tuple[Any, str, bool, List[str]]:
+    redacted_fields: List[str] = []
+    redacted = _redact_sensitive(value, redacted_fields=redacted_fields)
     text = redacted if isinstance(redacted, str) else json.dumps(redacted, ensure_ascii=False, default=str)
     text = str(text)
     if len(text) <= _TOOL_DETAIL_CHAR_LIMIT:
-        return redacted, _preview(redacted), False
-    return text[: _TOOL_DETAIL_CHAR_LIMIT - 3] + "...", _preview(text), True
+        return redacted, _preview(redacted), False, redacted_fields
+    return text[: _TOOL_DETAIL_CHAR_LIMIT - 3] + "...", _preview(text), True, redacted_fields
+
+
+def _prefixed_fields(prefix: str, fields: List[str]) -> List[str]:
+    return [f"{prefix}.{field}" if field else prefix for field in fields]
+
+
+def _merge_unique_fields(*field_lists: Any) -> List[str]:
+    merged: List[str] = []
+    for fields in field_lists:
+        for field in list(fields or []):
+            value = str(field or "").strip()
+            if value and value not in merged:
+                merged.append(value)
+    return merged
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _merge_truncation(existing: Any, *field_flags: tuple[str, bool]) -> tuple[bool, List[str]]:
@@ -280,7 +319,19 @@ class RuntimeTraceCallbackHandler(BaseCallbackHandler):
         run_key = str(run_id)
         tool_name = str(serialized.get("name") or "tool")
         input_value = inputs if inputs is not None else input_str
-        safe_input, input_preview, input_truncated = _bounded_tool_value(input_value)
+        safe_input, input_preview, input_truncated, input_redacted_fields = _bounded_tool_value(input_value)
+        callback_metadata = dict(metadata or {})
+        parent_agent = str(
+            callback_metadata.get("parent_agent")
+            or self.metadata.get("parent_agent")
+            or self.metadata.get("suggested_agent")
+            or ""
+        )
+        parallel_group_id = str(
+            callback_metadata.get("agentic_parallel_group_id")
+            or callback_metadata.get("parallel_group_id")
+            or ""
+        )
         started_at = utc_now_iso()
         run_metadata = {
             "tool_name": tool_name,
@@ -288,8 +339,14 @@ class RuntimeTraceCallbackHandler(BaseCallbackHandler):
             "input_preview": input_preview,
             "input": safe_input,
             "tags": list(tags or []),
-            "callback_metadata": dict(metadata or {}),
+            "callback_metadata": callback_metadata,
             "parent_run_id": str(parent_run_id or ""),
+            "parent_agent": parent_agent,
+            "parallel_group_id": parallel_group_id,
+            "parallel_execution_mode": str(callback_metadata.get("agentic_parallel_execution_mode") or ""),
+            "parallel_group_size": _safe_int(callback_metadata.get("agentic_parallel_group_size")),
+            "payload_limit_chars": _TOOL_DETAIL_CHAR_LIMIT,
+            "redacted_fields": _prefixed_fields("input", input_redacted_fields),
             "started_at": started_at,
             "completed_at": "",
             "duration_ms": None,
@@ -322,7 +379,7 @@ class RuntimeTraceCallbackHandler(BaseCallbackHandler):
             if isinstance(started_perf, (int, float))
             else None
         )
-        safe_output, output_preview, output_truncated = _bounded_tool_value(output)
+        safe_output, output_preview, output_truncated, output_redacted_fields = _bounded_tool_value(output)
         truncated, truncated_fields = _merge_truncation(
             run_metadata.get("truncated_fields") or run_metadata.get("truncated"),
             ("output", output_truncated),
@@ -332,6 +389,10 @@ class RuntimeTraceCallbackHandler(BaseCallbackHandler):
             "parent_run_id": str(parent_run_id or ""),
             "output_preview": output_preview,
             "output": safe_output,
+            "redacted_fields": _merge_unique_fields(
+                run_metadata.get("redacted_fields"),
+                _prefixed_fields("output", output_redacted_fields),
+            ),
             "completed_at": utc_now_iso(),
             "duration_ms": duration_ms,
             "status": "completed",
@@ -358,7 +419,7 @@ class RuntimeTraceCallbackHandler(BaseCallbackHandler):
             if isinstance(started_perf, (int, float))
             else None
         )
-        error_text, error_preview, error_truncated = _bounded_tool_value(str(error))
+        error_text, error_preview, error_truncated, error_redacted_fields = _bounded_tool_value(str(error))
         truncated, truncated_fields = _merge_truncation(
             run_metadata.get("truncated_fields") or run_metadata.get("truncated"),
             ("error", error_truncated),
@@ -368,6 +429,10 @@ class RuntimeTraceCallbackHandler(BaseCallbackHandler):
             "parent_run_id": str(parent_run_id or ""),
             "error": error_text,
             "error_preview": error_preview,
+            "redacted_fields": _merge_unique_fields(
+                run_metadata.get("redacted_fields"),
+                _prefixed_fields("error", error_redacted_fields),
+            ),
             "completed_at": utc_now_iso(),
             "duration_ms": duration_ms,
             "status": "error",

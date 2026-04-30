@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from agentic_chatbot_next.capabilities import coerce_effective_capabilities
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.jobs import JobRecord
-from agentic_chatbot_next.contracts.messages import RuntimeMessage, SessionState
+from agentic_chatbot_next.contracts.messages import RuntimeMessage, SessionState, utc_now_iso
 from agentic_chatbot_next.runtime.artifacts import get_handoff_artifact, list_handoff_artifacts, register_handoff_artifact
 from agentic_chatbot_next.runtime.clarification import is_clarification_turn
 from agentic_chatbot_next.runtime.doc_focus import build_doc_focus_result
@@ -3083,6 +3083,7 @@ class KernelCoordinatorController:
         artifact_refs: List[str] = []
         jobs: List[tuple[str, WorkerExecutionRequest, Any]] = []
         team_channel_id = ""
+        parallel_group_id = self._worker_batch_group_id(batch) if len(batch) > 1 else ""
         if bool(getattr(self.kernel.settings, "team_mailbox_enabled", False)) and len(batch) > 1:
             member_agents = [
                 str(task.get("executor") or "").strip()
@@ -3133,6 +3134,9 @@ class KernelCoordinatorController:
             if team_channel_id:
                 worker_request.metadata["team_channel_id"] = team_channel_id
                 worker_request.controller_hints["team_channel_id"] = team_channel_id
+            if parallel_group_id:
+                worker_request.metadata["parallel_group_id"] = parallel_group_id
+                worker_request.controller_hints["parallel_group_id"] = parallel_group_id
             if handoff_artifacts:
                 self.kernel._emit(
                     "worker_handoff_consumed",
@@ -3209,13 +3213,67 @@ class KernelCoordinatorController:
 
         real_jobs = [job for job_id, _, job in jobs if job_id != "synthetic"]
         run_parallel = self.should_run_task_batch_in_parallel(batch=batch, real_jobs=real_jobs)
-        if run_parallel:
-            for job in real_jobs:
-                self.kernel.job_manager.start_background_job(job, self.kernel._job_runner)
-            self.wait_for_jobs([job.job_id for job in real_jobs])
+        group_started_at = utc_now_iso()
+        group_started_perf = time.perf_counter()
+        if parallel_group_id:
+            self._emit_worker_parallel_group(
+                session_state=session_state,
+                agent_name=agent.name,
+                event_type="coordinator_worker_batch_started",
+                group_id=parallel_group_id,
+                status="running",
+                execution_mode="parallel" if run_parallel else "sequential",
+                jobs=jobs,
+                reason=(
+                    "Coordinator dispatched this worker batch in parallel."
+                    if run_parallel
+                    else "Coordinator is running this worker batch sequentially because at least one task is not parallel-safe."
+                ),
+                started_at=group_started_at,
+            )
+        try:
+            if run_parallel:
+                for job in real_jobs:
+                    self.kernel.job_manager.start_background_job(job, self.kernel._job_runner)
+                self.wait_for_jobs([job.job_id for job in real_jobs])
+            else:
+                for job in real_jobs:
+                    self.kernel.job_manager.run_job_inline(job, self.kernel._job_runner)
+        except Exception:
+            if parallel_group_id:
+                self._emit_worker_parallel_group(
+                    session_state=session_state,
+                    agent_name=agent.name,
+                    event_type="coordinator_worker_batch_completed",
+                    group_id=parallel_group_id,
+                    status="error",
+                    execution_mode="parallel" if run_parallel else "sequential",
+                    jobs=jobs,
+                    reason="Coordinator worker batch stopped with an error.",
+                    started_at=group_started_at,
+                    completed_at=utc_now_iso(),
+                    duration_ms=max(0, int((time.perf_counter() - group_started_perf) * 1000)),
+                )
+            raise
         else:
-            for job in real_jobs:
-                self.kernel.job_manager.run_job_inline(job, self.kernel._job_runner)
+            if parallel_group_id:
+                self._emit_worker_parallel_group(
+                    session_state=session_state,
+                    agent_name=agent.name,
+                    event_type="coordinator_worker_batch_completed",
+                    group_id=parallel_group_id,
+                    status="completed",
+                    execution_mode="parallel" if run_parallel else "sequential",
+                    jobs=jobs,
+                    reason=(
+                        "Coordinator completed this worker batch in parallel."
+                        if run_parallel
+                        else "Coordinator completed this worker batch sequentially."
+                    ),
+                    started_at=group_started_at,
+                    completed_at=utc_now_iso(),
+                    duration_ms=max(0, int((time.perf_counter() - group_started_perf) * 1000)),
+                )
 
         results: List[Dict[str, Any]] = []
         for job_id, worker_request, record in jobs:
@@ -3232,6 +3290,56 @@ class KernelCoordinatorController:
             artifact_refs.append(result.artifact_ref)
             results.append(result.to_dict())
         return results
+
+    def _worker_batch_group_id(self, batch: List[Dict[str, Any]]) -> str:
+        task_ids = [str(task.get("id") or task.get("task_id") or "").strip() for task in batch]
+        key = "-".join(item for item in task_ids if item) or str(len(batch))
+        return f"worker-batch-{key}"
+
+    def _emit_worker_parallel_group(
+        self,
+        *,
+        session_state: SessionState,
+        agent_name: str,
+        event_type: str,
+        group_id: str,
+        status: str,
+        execution_mode: str,
+        jobs: List[tuple[str, WorkerExecutionRequest, Any]],
+        reason: str,
+        started_at: str,
+        completed_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
+        members: List[Dict[str, Any]] = []
+        for job_id, worker_request, _record in jobs:
+            members.append(
+                {
+                    "agent_name": worker_request.agent_name,
+                    "task_id": worker_request.task_id,
+                    "job_id": "" if job_id == "synthetic" else job_id,
+                    "title": worker_request.title,
+                    "description": worker_request.description,
+                }
+            )
+        self.kernel._emit(
+            event_type,
+            session_state.session_id,
+            agent_name=agent_name,
+            payload={
+                "conversation_id": session_state.conversation_id,
+                "group_id": group_id,
+                "group_kind": "worker_batch",
+                "status": status,
+                "execution_mode": execution_mode,
+                "size": len(members),
+                "members": members,
+                "reason": reason,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+            },
+        )
 
     def should_run_task_batch_in_parallel(self, *, batch: List[Dict[str, Any]], real_jobs: List[Any]) -> bool:
         if len(real_jobs) <= 1:

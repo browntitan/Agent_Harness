@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 import inspect
+from time import perf_counter
 from typing import Any, cast
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolCall, ToolMessage
@@ -11,6 +12,9 @@ from langchain_core.runnables.config import get_config_list, get_executor_for_co
 from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.store.base import BaseStore
 from pydantic import BaseModel
+
+from agentic_chatbot_next.contracts.messages import utc_now_iso
+from agentic_chatbot_next.observability.events import RuntimeEvent
 
 
 def _current_turn_messages(messages: Sequence[Any]) -> list[Any]:
@@ -65,23 +69,64 @@ class PolicyAwareToolNode(ToolNode):
         outputs: list[Any] = [None] * len(tool_calls)
 
         with get_executor_for_config(config) as executor:
-            for wave in self._build_waves(scheduled_calls):
+            for wave_index, wave in enumerate(self._build_waves(scheduled_calls), start=1):
                 if not wave:
                     continue
+                started_at = utc_now_iso()
+                started_perf = perf_counter()
+                self._emit_tool_parallel_group(
+                    "tool_parallel_group_started",
+                    wave=wave,
+                    wave_index=wave_index,
+                    status="running",
+                    started_at=started_at,
+                )
                 wave_calls = [call for _, call in wave]
                 wave_input_types = [input_type] * len(wave_calls)
-                wave_configs = [config_list[index] for index, _ in wave]
+                group_id = self._tool_wave_group_id(wave_index, wave)
+                execution_mode = self._wave_execution_mode(wave)
+                wave_configs = [
+                    self._config_with_parallel_group(
+                        config_list[index],
+                        group_id=group_id,
+                        execution_mode=execution_mode,
+                        group_size=len(wave),
+                        call_index=index,
+                    )
+                    for index, _ in wave
+                ]
                 wave_runtime_args = self._runtime_args_for_wave(
                     input,
                     wave_calls=wave_calls,
                     wave_configs=wave_configs,
                     runtime=runtime,
                 )
-                wave_outputs = list(
-                    executor.map(self._run_one, wave_calls, wave_input_types, wave_runtime_args)
-                )
+                try:
+                    wave_outputs = list(
+                        executor.map(self._run_one, wave_calls, wave_input_types, wave_runtime_args)
+                    )
+                except Exception:
+                    self._emit_tool_parallel_group(
+                        "tool_parallel_group_completed",
+                        wave=wave,
+                        wave_index=wave_index,
+                        status="error",
+                        started_at=started_at,
+                        completed_at=utc_now_iso(),
+                        duration_ms=max(0, int((perf_counter() - started_perf) * 1000)),
+                    )
+                    raise
                 for (index, _), output in zip(wave, wave_outputs):
                     outputs[index] = output
+                self._emit_tool_parallel_group(
+                    "tool_parallel_group_completed",
+                    wave=wave,
+                    wave_index=wave_index,
+                    status="completed",
+                    started_at=started_at,
+                    completed_at=utc_now_iso(),
+                    duration_ms=max(0, int((perf_counter() - started_perf) * 1000)),
+                )
 
         for index, call in overflow_calls:
             outputs[index] = self._tool_budget_exceeded_message(
@@ -107,25 +152,66 @@ class PolicyAwareToolNode(ToolNode):
         config_list = get_config_list(config, len(scheduled_calls))
         outputs: list[Any] = [None] * len(tool_calls)
 
-        for wave in self._build_waves(scheduled_calls):
+        for wave_index, wave in enumerate(self._build_waves(scheduled_calls), start=1):
             if not wave:
                 continue
+            started_at = utc_now_iso()
+            started_perf = perf_counter()
+            self._emit_tool_parallel_group(
+                "tool_parallel_group_started",
+                wave=wave,
+                wave_index=wave_index,
+                status="running",
+                started_at=started_at,
+            )
             wave_calls = [call for _, call in wave]
-            wave_configs = [config_list[index] for index, _ in wave]
+            group_id = self._tool_wave_group_id(wave_index, wave)
+            execution_mode = self._wave_execution_mode(wave)
+            wave_configs = [
+                self._config_with_parallel_group(
+                    config_list[index],
+                    group_id=group_id,
+                    execution_mode=execution_mode,
+                    group_size=len(wave),
+                    call_index=index,
+                )
+                for index, _ in wave
+            ]
             wave_runtime_args = self._runtime_args_for_wave(
                 input,
                 wave_calls=wave_calls,
                 wave_configs=wave_configs,
                 runtime=runtime,
             )
-            wave_outputs = await asyncio.gather(
-                *(
-                    self._arun_one(call, input_type, runtime_arg)
-                    for call, runtime_arg in zip(wave_calls, wave_runtime_args)
+            try:
+                wave_outputs = await asyncio.gather(
+                    *(
+                        self._arun_one(call, input_type, runtime_arg)
+                        for call, runtime_arg in zip(wave_calls, wave_runtime_args)
+                    )
                 )
-            )
+            except Exception:
+                self._emit_tool_parallel_group(
+                    "tool_parallel_group_completed",
+                    wave=wave,
+                    wave_index=wave_index,
+                    status="error",
+                    started_at=started_at,
+                    completed_at=utc_now_iso(),
+                    duration_ms=max(0, int((perf_counter() - started_perf) * 1000)),
+                )
+                raise
             for (index, _), output in zip(wave, wave_outputs):
                 outputs[index] = output
+            self._emit_tool_parallel_group(
+                "tool_parallel_group_completed",
+                wave=wave,
+                wave_index=wave_index,
+                status="completed",
+                started_at=started_at,
+                completed_at=utc_now_iso(),
+                duration_ms=max(0, int((perf_counter() - started_perf) * 1000)),
+            )
 
         for index, call in overflow_calls:
             outputs[index] = self._tool_budget_exceeded_message(
@@ -199,6 +285,90 @@ class PolicyAwareToolNode(ToolNode):
         tool = self._get_tools_by_name().get(call["name"])
         metadata = dict(getattr(tool, "metadata", {}) or {})
         return str(metadata.get("concurrency_key") or "").strip()
+
+    def _wave_execution_mode(self, wave: list[tuple[int, ToolCall]]) -> str:
+        return "parallel" if len(wave) > 1 else "sequential"
+
+    def _tool_wave_group_id(self, wave_index: int, wave: list[tuple[int, ToolCall]]) -> str:
+        first_call = wave[0][1] if wave else {}
+        first_call_id = str(first_call.get("id") or first_call.get("name") or wave_index)
+        active_agent = str(getattr(self.tool_context, "active_agent", "") or "agent")
+        return f"tool-wave-{active_agent}-{wave_index}-{first_call_id}"
+
+    def _config_with_parallel_group(
+        self,
+        config: RunnableConfig,
+        *,
+        group_id: str,
+        execution_mode: str,
+        group_size: int,
+        call_index: int,
+    ) -> RunnableConfig:
+        next_config = dict(config or {})
+        metadata = dict(next_config.get("metadata") or {})
+        metadata.update(
+            {
+                "agentic_parallel_group_id": group_id,
+                "agentic_parallel_execution_mode": execution_mode,
+                "agentic_parallel_group_size": group_size,
+                "agentic_tool_call_index": call_index,
+            }
+        )
+        next_config["metadata"] = metadata
+        return cast(RunnableConfig, next_config)
+
+    def _emit_tool_parallel_group(
+        self,
+        event_type: str,
+        *,
+        wave: list[tuple[int, ToolCall]],
+        wave_index: int,
+        status: str,
+        started_at: str,
+        completed_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
+        tool_context = self.tool_context
+        event_sink = getattr(tool_context, "event_sink", None)
+        session = getattr(tool_context, "session", None)
+        session_id = str(getattr(session, "session_id", "") or "")
+        if event_sink is None or not session_id:
+            return
+        members = [
+            {
+                "tool_call_id": str(call.get("id") or ""),
+                "tool_name": str(call.get("name") or ""),
+                "concurrency_key": self._concurrency_key(call),
+            }
+            for _, call in wave
+        ]
+        execution_mode = self._wave_execution_mode(wave)
+        event_sink.emit(
+            RuntimeEvent(
+                event_type=event_type,
+                session_id=session_id,
+                agent_name=str(getattr(tool_context, "active_agent", "") or ""),
+                job_id=str((getattr(tool_context, "metadata", {}) or {}).get("job_id") or ""),
+                payload={
+                    "conversation_id": str(getattr(session, "conversation_id", "") or ""),
+                    "group_id": self._tool_wave_group_id(wave_index, wave),
+                    "group_kind": "tool_wave",
+                    "status": status,
+                    "execution_mode": execution_mode,
+                    "size": len(wave),
+                    "members": members,
+                    "reason": (
+                        "Independent tool calls were scheduled in the same executor wave."
+                        if execution_mode == "parallel"
+                        else "This tool call ran alone because of wave size, budget, or concurrency constraints."
+                    ),
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_ms": duration_ms,
+                    "max_parallel": self.max_parallel_tool_calls,
+                },
+            )
+        )
 
     def _tool_budget_exceeded_message(
         self,

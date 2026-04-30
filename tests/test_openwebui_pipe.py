@@ -1135,6 +1135,165 @@ def test_pipe_forwards_backend_tool_call_status_cards(monkeypatch) -> None:
     assert "agentic_tool_call" not in emitted[-1]["data"]
 
 
+def test_pipe_forwards_backend_agent_and_parallel_audit_status_cards(monkeypatch) -> None:
+    module = _load_pipe_module()
+    pipe = module.Pipe()
+    emitted: list[dict[str, object]] = []
+
+    agent_status = {
+        "type": "worker_start",
+        "status_id": "agent-worker-T2",
+        "status_key": "agent-worker-T2",
+        "description": "RAG Worker is searching evidence for task T2",
+        "status": "in_progress",
+        "done": False,
+        "hidden": False,
+        "elapsed_ms": 0,
+        "agent": "rag_worker",
+        "selected_agent": "coordinator",
+        "phase": "searching_knowledge_base",
+        "phase_label": "Searching Knowledge Base",
+        "phase_elapsed_ms": 0,
+        "status_elapsed_ms": 0,
+        "source_event_type": "worker_agent_started",
+        "label": "RAG Worker is searching evidence for task T2",
+        "detail": "Searching evidence for task T2.",
+        "job_id": "job-2",
+        "task_id": "T2",
+        "why": "",
+        "waiting_on": "",
+        "timestamp": 1713139200000,
+        "agentic_status": {"version": 1, "state": "active", "kind": "agent", "title": "RAG Worker", "subtitle": ""},
+        "agentic_agent_activity": {
+            "version": 1,
+            "activity_id": "agent-worker-rag_worker-T2-job-2",
+            "agent_name": "rag_worker",
+            "role": "worker",
+            "status": "running",
+            "title": "RAG Worker is searching evidence for task T2",
+            "description": "Searching evidence for task T2.",
+            "parent_agent": "coordinator",
+            "task_id": "T2",
+            "job_id": "job-2",
+            "parallel_group_id": "worker-batch-T1-T2",
+            "started_at": "2026-04-23T10:00:00Z",
+            "completed_at": "",
+            "duration_ms": None,
+        },
+    }
+    parallel_status = {
+        "type": "parallel_group_trace",
+        "status_id": "group-worker-batch-T1-T2",
+        "status_key": "group-worker-batch-T1-T2",
+        "description": "Parallel worker batch: 2 running",
+        "status": "in_progress",
+        "done": False,
+        "hidden": False,
+        "elapsed_ms": 0,
+        "agent": "coordinator",
+        "selected_agent": "coordinator",
+        "phase": "searching_knowledge_base",
+        "phase_label": "Searching Knowledge Base",
+        "phase_elapsed_ms": 0,
+        "status_elapsed_ms": 0,
+        "source_event_type": "coordinator_worker_batch_started",
+        "label": "Parallel worker batch: 2 running",
+        "detail": "Coordinator dispatched this worker batch in parallel.",
+        "job_id": "",
+        "task_id": "",
+        "why": "",
+        "waiting_on": "",
+        "timestamp": 1713139200001,
+        "agentic_status": {
+            "version": 1,
+            "state": "active",
+            "kind": "parallel_group",
+            "title": "Parallel worker batch",
+            "subtitle": "",
+        },
+        "agentic_parallel_group": {
+            "version": 1,
+            "group_id": "worker-batch-T1-T2",
+            "group_kind": "worker_batch",
+            "status": "running",
+            "execution_mode": "parallel",
+            "size": 2,
+            "members": [
+                {"agent_name": "rag_worker", "task_id": "T1", "job_id": "job-1"},
+                {"agent_name": "table_worker", "task_id": "T2", "job_id": "job-2"},
+            ],
+            "reason": "Coordinator dispatched this worker batch in parallel.",
+            "started_at": "2026-04-23T10:00:00Z",
+            "completed_at": "",
+            "duration_ms": None,
+        },
+    }
+
+    class _StreamResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            lines = [
+                "event: status",
+                f"data: {json.dumps(parallel_status)}",
+                "",
+                "event: status",
+                f"data: {json.dumps(agent_status)}",
+                "",
+                'data: {"choices":[{"delta":{"content":"Auditable answer."},"finish_reason":null}]}',
+                "",
+                "data: [DONE]",
+                "",
+            ]
+            for item in lines:
+                yield item
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+    class _AsyncClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+        def stream(self, method, url, *, headers=None, json=None, **kwargs):
+            del method, url, headers, json, kwargs
+            return _StreamContext()
+
+    async def emit(event):
+        emitted.append(event)
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _AsyncClient)
+
+    result = asyncio.run(
+        pipe.pipe(
+            {"messages": [{"role": "user", "content": "Show audit status."}]},
+            __event_emitter__=emit,
+        )
+    )
+
+    agent_events = [item["data"] for item in emitted if item["data"].get("agentic_agent_activity")]
+    parallel_events = [item["data"] for item in emitted if item["data"].get("agentic_parallel_group")]
+
+    assert result == "Auditable answer."
+    assert len(parallel_events) == 1
+    assert parallel_events[0]["agentic_parallel_group"]["execution_mode"] == "parallel"
+    assert len(agent_events) == 1
+    assert agent_events[0]["agentic_agent_activity"]["parallel_group_id"] == "worker-batch-T1-T2"
+
+
 def test_pipe_ignores_stale_backend_status_updates(monkeypatch) -> None:
     module = _load_pipe_module()
     pipe = module.Pipe()

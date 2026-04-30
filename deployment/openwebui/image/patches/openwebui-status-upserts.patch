@@ -22,8 +22,20 @@ index a44756f..0cc3ed8 100644
 +		return status?.agentic_tool_call?.version === 1;
 +	};
 +
++	const isAgentActivityStatus = (status: any): boolean => {
++		return status?.agentic_agent_activity?.version === 1;
++	};
++
++	const isParallelGroupStatus = (status: any): boolean => {
++		return status?.agentic_parallel_group?.version === 1;
++	};
++
++	const isAuditStatus = (status: any): boolean => {
++		return isToolStatus(status) || isAgentActivityStatus(status) || isParallelGroupStatus(status);
++	};
++
 +	const latestNonToolStatus = (history: any[] = []) => {
-+		return [...history].reverse().find((status) => !isToolStatus(status)) ?? null;
++		return [...history].reverse().find((status) => !isAuditStatus(status)) ?? null;
 +	};
 +
 +	const isNewerStatus = (incoming: any, current: any): boolean => {
@@ -86,7 +98,7 @@ index a44756f..0cc3ed8 100644
 -						message.statusHistory = [data];
 +					const history = Array.isArray(message?.statusHistory) ? message.statusHistory : [];
 +					message.statusHistory = upsertStatusHistory(history, data);
-+					if (!isToolStatus(data) && isNewerStatus(data, message?.currentStatus)) {
++					if (!isAuditStatus(data) && isNewerStatus(data, message?.currentStatus)) {
 +						message.currentStatus = data;
  					}
  				} else if (type === 'chat:completion') {
@@ -133,6 +145,8 @@ index ab3bc89..55e3378 100644
 +				};
 +			};
 +			agentic_tool_call?: Record<string, unknown>;
++			agentic_agent_activity?: Record<string, unknown>;
++			agentic_parallel_group?: Record<string, unknown>;
  		}[];
 +		currentStatus?: {
 +			done: boolean;
@@ -165,6 +179,8 @@ index ab3bc89..55e3378 100644
 +				};
 +			};
 +			agentic_tool_call?: Record<string, unknown>;
++			agentic_agent_activity?: Record<string, unknown>;
++			agentic_parallel_group?: Record<string, unknown>;
 +		};
  		status?: {
  			done: boolean;
@@ -194,6 +210,8 @@ index ab3bc89..55e3378 100644
 +				};
 +			};
 +			agentic_tool_call?: Record<string, unknown>;
++			agentic_agent_activity?: Record<string, unknown>;
++			agentic_parallel_group?: Record<string, unknown>;
  		};
  		done: boolean;
  		error?: boolean | { content: string };
@@ -229,6 +247,8 @@ index 5aaf774..aba6604 100644
  
  	import StatusItem from './StatusHistory/StatusItem.svelte';
 +	import ToolCallStack from './StatusHistory/ToolCallStack.svelte';
++	import AgentActivityStack from './StatusHistory/AgentActivityStack.svelte';
++	import ParallelGroupStack from './StatusHistory/ParallelGroupStack.svelte';
  	export let statusHistory = [];
 +	export let currentStatus = null;
  	export let expand = false;
@@ -245,15 +265,23 @@ index 5aaf774..aba6604 100644
  	let status = null;
 +	let visibleHistory = [];
 +	let toolStatuses = [];
++	let agentStatuses = [];
++	let parallelGroupStatuses = [];
 +	const isToolStatus = (status) => status?.agentic_tool_call?.version === 1;
++	const isAgentActivityStatus = (status) => status?.agentic_agent_activity?.version === 1;
++	const isParallelGroupStatus = (status) => status?.agentic_parallel_group?.version === 1;
++	const isAuditStatus = (status) =>
++		isToolStatus(status) || isAgentActivityStatus(status) || isParallelGroupStatus(status);
 +	const latestNonToolStatus = (items = []) =>
-+		[...items].reverse().find((status) => !isToolStatus(status)) ?? null;
++		[...items].reverse().find((status) => !isAuditStatus(status)) ?? null;
  
 -	$: if (history && history.length > 0) {
 -		status = history.at(-1);
-+	$: visibleHistory = (history ?? []).filter((status) => !isToolStatus(status));
++	$: visibleHistory = (history ?? []).filter((status) => !isAuditStatus(status));
 +	$: toolStatuses = (history ?? []).filter((status) => isToolStatus(status));
-+	$: if (currentStatus && !isToolStatus(currentStatus)) {
++	$: agentStatuses = (history ?? []).filter((status) => isAgentActivityStatus(status));
++	$: parallelGroupStatuses = (history ?? []).filter((status) => isParallelGroupStatus(status));
++	$: if (currentStatus && !isAuditStatus(currentStatus)) {
 +		status = currentStatus;
 +	} else if (visibleHistory && visibleHistory.length > 0) {
 +		status = latestNonToolStatus(visibleHistory);
@@ -270,7 +298,7 @@ index 5aaf774..aba6604 100644
  </script>
  
 -{#if history && history.length > 0}
-+{#if status || toolStatuses.length > 0}
++{#if status || toolStatuses.length > 0 || agentStatuses.length > 0 || parallelGroupStatuses.length > 0}
  	{#if status?.hidden !== true}
  		<div class="text-sm flex flex-col w-full">
 -			<button
@@ -300,6 +328,8 @@ index 5aaf774..aba6604 100644
 +				</button>
 +			{/if}
 +
++			<ParallelGroupStack {parallelGroupStatuses} />
++			<AgentActivityStack {agentStatuses} />
 +			<ToolCallStack {toolStatuses} />
  
  			{#if showHistory}
@@ -324,6 +354,171 @@ index 5aaf774..aba6604 100644
  												class="w-[0.5px] ml-[6.5px] h-[calc(100%-14px)] bg-gray-300 dark:bg-gray-700"
  											/>
  										{/if}
+diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentActivityStack.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentActivityStack.svelte
+new file mode 100644
+index 0000000..3a73b62
+--- /dev/null
++++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentActivityStack.svelte
+@@ -0,0 +1,82 @@
++<script>
++	export let agentStatuses = [];
++
++	const activity = (status) => status?.agentic_agent_activity ?? {};
++	const activityKey = (status, index) =>
++		status?.status_id ?? activity(status)?.activity_id ?? `agent-${index}`;
++
++	const statusLabel = (item) => {
++		const status = String(item?.status ?? '').toLowerCase();
++		if (status === 'running') return 'Running';
++		if (status === 'queued') return 'Queued';
++		if (status === 'waiting') return 'Waiting';
++		if (status === 'error') return 'Failed';
++		return 'Completed';
++	};
++
++	const statusClasses = (item) => {
++		const status = String(item?.status ?? '').toLowerCase();
++		if (status === 'error') {
++			return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200';
++		}
++		if (status === 'completed') {
++			return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-200';
++		}
++		return 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/30 dark:text-sky-200';
++	};
++
++	const meta = (item) =>
++		[
++			item?.role,
++			item?.task_id ? `task ${item.task_id}` : '',
++			item?.job_id ? `job ${item.job_id}` : '',
++			item?.parallel_group_id ? `group ${item.parallel_group_id}` : ''
++		]
++			.filter(Boolean)
++			.join(' · ');
++</script>
++
++{#if agentStatuses && agentStatuses.length > 0}
++	<div
++		class="mt-1 flex w-full flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-slate-50/70 p-2 dark:border-slate-800 dark:bg-slate-950/40"
++	>
++		<div class="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
++			Agents
++		</div>
++
++		{#each agentStatuses as agentStatus, idx (activityKey(agentStatus, idx))}
++			{@const item = activity(agentStatus)}
++			<details
++				class="group rounded-lg border border-slate-200 bg-white text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
++				open={item?.status === 'running'}
++			>
++				<summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
++					<div class="min-w-0">
++						<div class="flex min-w-0 items-center gap-2">
++							<span class="truncate text-xs font-semibold">{item?.agent_name ?? 'agent'}</span>
++							<span
++								class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold {statusClasses(item)}"
++							>
++								{statusLabel(item)}
++							</span>
++						</div>
++						<div class="truncate text-[11px] text-slate-500 dark:text-slate-400">
++							{item?.title || item?.description || meta(item)}
++						</div>
++					</div>
++					<span class="transition group-open:rotate-90 text-[11px] text-slate-500">&rsaquo;</span>
++				</summary>
++
++				<div class="flex flex-col gap-1 border-t border-slate-100 px-3 py-2 text-[11px] leading-5 text-slate-600 dark:border-slate-800 dark:text-slate-300">
++					{#if item?.description}<div>{item.description}</div>{/if}
++					{#if meta(item)}<div>{meta(item)}</div>{/if}
++					{#if item?.parent_agent}<div>Parent: {item.parent_agent}</div>{/if}
++				</div>
++			</details>
++		{/each}
++	</div>
++{/if}
+diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ParallelGroupStack.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ParallelGroupStack.svelte
+new file mode 100644
+index 0000000..78679e1
+--- /dev/null
++++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ParallelGroupStack.svelte
+@@ -0,0 +1,93 @@
++<script>
++	export let parallelGroupStatuses = [];
++
++	const group = (status) => status?.agentic_parallel_group ?? {};
++	const groupKey = (status, index) => status?.status_id ?? group(status)?.group_id ?? `group-${index}`;
++	const label = (item) => {
++		const mode = String(item?.execution_mode ?? '').toLowerCase();
++		const kind = String(item?.group_kind ?? 'group').replaceAll('_', ' ');
++		const count = Number(item?.size ?? item?.members?.length ?? 0);
++		return `${mode === 'parallel' ? 'Parallel ' : ''}${kind}: ${count}`;
++	};
++	const statusClasses = (item) => {
++		const status = String(item?.status ?? '').toLowerCase();
++		if (status === 'error') {
++			return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200';
++		}
++		if (status === 'completed') {
++			return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-200';
++		}
++		return 'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/70 dark:bg-indigo-950/30 dark:text-indigo-200';
++	};
++	const statusLabel = (item) => {
++		const status = String(item?.status ?? '').toLowerCase();
++		if (status === 'running') return 'Running';
++		if (status === 'error') return 'Failed';
++		return 'Completed';
++	};
++</script>
++
++{#if parallelGroupStatuses && parallelGroupStatuses.length > 0}
++	<div
++		class="mt-1 flex w-full flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-slate-50/70 p-2 dark:border-slate-800 dark:bg-slate-950/40"
++	>
++		<div class="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
++			Parallel work
++		</div>
++
++		{#each parallelGroupStatuses as groupStatus, idx (groupKey(groupStatus, idx))}
++			{@const item = group(groupStatus)}
++			<details
++				class="group rounded-lg border border-slate-200 bg-white text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
++				open={item?.status === 'running'}
++			>
++				<summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
++					<div class="min-w-0">
++						<div class="flex min-w-0 items-center gap-2">
++							<span class="truncate text-xs font-semibold">{label(item)}</span>
++							<span
++								class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold {statusClasses(item)}"
++							>
++								{statusLabel(item)}
++							</span>
++						</div>
++						<div class="truncate text-[11px] text-slate-500 dark:text-slate-400">
++							{item?.reason || item?.group_id}
++						</div>
++					</div>
++					<span class="transition group-open:rotate-90 text-[11px] text-slate-500">&rsaquo;</span>
++				</summary>
++
++				<div class="flex flex-col gap-1 border-t border-slate-100 px-3 py-2 text-[11px] leading-5 text-slate-600 dark:border-slate-800 dark:text-slate-300">
++					{#if item?.reason}<div>{item.reason}</div>{/if}
++					{#each item?.members ?? [] as member}
++						<div class="rounded bg-slate-50 px-2 py-1 dark:bg-slate-900">
++							{member.agent_name ?? member.tool_name ?? 'member'}
++							{#if member.task_id} · task {member.task_id}{/if}
++							{#if member.tool_call_id} · call {member.tool_call_id}{/if}
++							{#if member.job_id} · job {member.job_id}{/if}
++						</div>
++					{/each}
++				</div>
++			</details>
++		{/each}
++	</div>
++{/if}
 diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte
 new file mode 100644
 index 0000000..2b95f0a
@@ -354,6 +549,8 @@ index 0000000..2b95f0a
 +	};
 +
 +	const oneLine = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
++
++	const hasValue = (value) => value !== null && value !== undefined && value !== '';
 +
 +	const formatDuration = (value) => {
 +		if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -425,9 +622,19 @@ index 0000000..2b95f0a
 +							>
 +								{statusLabel(tool)}
 +							</span>
++							{#if tool?.agent_name || tool?.parent_agent}
++								<span class="shrink-0 rounded-full border border-slate-200 px-2 py-0.5 text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
++									{tool?.agent_name ?? tool?.parent_agent}
++								</span>
++							{/if}
++							{#if tool?.parallel_group_id}
++								<span class="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:border-indigo-900/70 dark:bg-indigo-950/30 dark:text-indigo-200">
++									parallel
++								</span>
++							{/if}
 +						</div>
 +						<div class="truncate text-[11px] text-slate-500 dark:text-slate-400">
-+							{oneLine(tool?.output_preview || tool?.error || tool?.input_preview || '')}
++							{oneLine(tool?.output_preview || tool?.error_preview || tool?.error || tool?.input_preview || '')}
 +						</div>
 +					</div>
 +					<div class="flex shrink-0 items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
@@ -439,7 +646,7 @@ index 0000000..2b95f0a
 +				</summary>
 +
 +				<div class="flex flex-col gap-2 border-t border-slate-100 px-3 py-2 dark:border-slate-800">
-+					{#if tool?.input_preview}
++					{#if tool?.input_preview || hasValue(tool?.input)}
 +						<div class="rounded-md bg-slate-50 p-2 dark:bg-slate-900">
 +							<div class="mb-1 flex items-center justify-between gap-2">
 +								<div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -458,7 +665,7 @@ index 0000000..2b95f0a
 +						</div>
 +					{/if}
 +
-+					{#if tool?.output_preview || tool?.error}
++					{#if tool?.output_preview || tool?.error_preview || hasValue(tool?.output) || tool?.error}
 +						<div class="rounded-md bg-slate-50 p-2 dark:bg-slate-900">
 +							<div class="mb-1 flex items-center justify-between gap-2">
 +								<div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -473,13 +680,23 @@ index 0000000..2b95f0a
 +									{copiedKey === `${key}:output` ? 'Copied' : 'Copy'}
 +								</button>
 +							</div>
-+							<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5">{compact(tool?.error ?? tool?.output, tool?.output_preview)}</pre>
++							<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5">{compact(tool?.error ?? tool?.output, tool?.error_preview ?? tool?.output_preview)}</pre>
 +						</div>
 +					{/if}
 +
 +					{#if tool?.truncated}
 +						<div class="text-[11px] text-amber-700 dark:text-amber-300">
-+							Payload truncated. Full trace reference: {tool?.source_event_id}
++							Payload limited to {tool?.payload_limit_chars ?? 'the configured'} characters. Trace reference: {tool?.source_event_id}
++						</div>
++					{/if}
++					{#if tool?.redacted_fields?.length}
++						<div class="text-[11px] text-slate-500 dark:text-slate-400">
++							Redacted fields: {tool.redacted_fields.join(', ')}
++						</div>
++					{/if}
++					{#if tool?.parallel_group_id}
++						<div class="text-[11px] text-indigo-700 dark:text-indigo-300">
++							Parallel group: {tool.parallel_group_id}
 +						</div>
 +					{/if}
 +				</div>

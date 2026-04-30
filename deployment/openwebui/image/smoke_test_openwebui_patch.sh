@@ -26,6 +26,12 @@ test -f "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/
 grep -R "agentic_tool_call" \
   "${WORKDIR}/open-webui/src/lib/components/chat/Chat.svelte" \
   "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory" >/dev/null
+grep -R "agentic_agent_activity" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Chat.svelte" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory" >/dev/null
+grep -R "agentic_parallel_group" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Chat.svelte" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory" >/dev/null
 
 if [[ "${SKIP_DOCKER_BUILD:-0}" == "1" ]]; then
   echo "Patch applies cleanly. Docker build skipped because SKIP_DOCKER_BUILD=1."
