@@ -103,7 +103,8 @@ mount for `/app/src`.
 - native macOS Ollama: model runtime reached from containers through `host.docker.internal`
 - `ollama` / `ollama-bootstrap`: optional Dockerized model runtime behind the `docker-ollama` profile
 - `app-bootstrap`: runs migrations, skill indexing, KB sync, and a runtime registry smoke check
-- `app`: FastAPI gateway and control-panel static host, marked healthy only after `/health/ready` passes
+- `app`: FastAPI gateway, OpenAI-compatible API, control-panel static host, MCP/capability
+  APIs, graph APIs, and admin routes, marked healthy only after `/health/ready` passes
 - `openwebui`: chat UI
 - `openwebui-bootstrap`: installs the Enterprise Agent pipe/model
 - `langfuse-*`: optional local Langfuse observability stack behind the `observability` profile
@@ -125,7 +126,11 @@ docker compose logs -n 100 openwebui-bootstrap
 - Upload a small file in OpenWebUI and ask the agent to summarize it. OpenWebUI is only
   a byte transport in this stack; the file is first ingested into the agent document
   repository, and all retrieval/citations come from that repository.
-- In the control panel, confirm collections, graphs, skills, and operations load.
+- In the control panel, confirm collections, uploads, graphs, skills, MCP connections,
+  access/capability panels, runtime config, agents/prompts, and operations load.
+- If MCP is enabled, create or test a Streamable HTTP connection from the control panel or
+  `/v1/mcp/connections` and confirm refreshed tools appear in the cached catalog before
+  trying to call them from chat.
 - In Langfuse, confirm a model-backed turn appears after keys from `.env` are initialized.
 
 ## Reset
@@ -142,4 +147,6 @@ Full fresh reset:
 docker compose down --remove-orphans -v
 ```
 
-The v3 runtime intentionally stores mutable state in Docker volumes, including uploaded files, workspaces, runtime traces, control-panel overlays, GraphRAG projects, Open WebUI data, and Langfuse stores.
+The v3 runtime intentionally stores mutable state in Docker volumes, including uploaded files,
+workspaces, runtime traces, managed memory, runtime skills, access/capability rows, MCP
+catalogs, control-panel overlays, GraphRAG projects, Open WebUI data, and Langfuse stores.

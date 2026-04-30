@@ -61,7 +61,8 @@ Used by:
 
 ## Optional graph backend
 
-The runtime now also supports an optional Neo4j-backed graph layer for GraphRAG.
+The runtime now supports a managed graph layer for GraphRAG. `GRAPH_BACKEND` defaults to
+`microsoft_graphrag`; `neo4j` is retained as an optional compatibility backend.
 
 This is not a fourth LLM provider role. It is a feature-flagged retrieval backend that
 augments the normal PostgreSQL / pgvector stack when enabled.
@@ -70,6 +71,29 @@ Relevant settings:
 
 - `GRAPH_SEARCH_ENABLED`
 - `GRAPH_INGEST_ENABLED`
+- `GRAPH_BACKEND`
+- `GRAPHRAG_PROJECTS_DIR`
+- `GRAPHRAG_USE_CONTAINER`
+- `GRAPHRAG_CONTAINER_IMAGE`
+- `GRAPHRAG_CLI_COMMAND`
+- `GRAPHRAG_LLM_PROVIDER`
+- `GRAPHRAG_BASE_URL`
+- `GRAPHRAG_API_KEY`
+- `GRAPHRAG_CHAT_MODEL`
+- `GRAPHRAG_INDEX_CHAT_MODEL`
+- `GRAPHRAG_COMMUNITY_REPORT_MODE`
+- `GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL`
+- `GRAPHRAG_EMBED_MODEL`
+- `GRAPHRAG_CONCURRENCY`
+- `GRAPHRAG_REQUEST_TIMEOUT_SECONDS`
+- `GRAPHRAG_INDEX_REQUEST_TIMEOUT_SECONDS`
+- `GRAPHRAG_COMMUNITY_REPORT_REQUEST_TIMEOUT_SECONDS`
+- `GRAPHRAG_COMMUNITY_REPORT_MAX_INPUT_LENGTH`
+- `GRAPHRAG_COMMUNITY_REPORT_MAX_LENGTH`
+- `GRAPHRAG_JOB_TIMEOUT_SECONDS`
+- `GRAPHRAG_STALE_RUN_AFTER_SECONDS`
+- `GRAPHRAG_DEFAULT_QUERY_METHOD`
+- `GRAPHRAG_ARTIFACT_CACHE_TTL_SECONDS`
 - `NEO4J_URI`
 - `NEO4J_USERNAME`
 - `NEO4J_PASSWORD`
@@ -78,10 +102,14 @@ Relevant settings:
 
 Operational notes:
 
-- Neo4j is optional and lazily used
+- managed GraphRAG catalog records, graph sources, graph runs, query cache rows, and canonical
+  entities are PostgreSQL-backed
+- Neo4j is optional and lazily used when the Neo4j backend is selected/configured
 - PostgreSQL / pgvector remains the default and the citation source of truth
-- the graph layer is integrated through the existing runtime plus LangChain Neo4j helpers,
+- the graph layer is integrated through the existing runtime, graph tools, and `graph_manager`,
   not a top-level LangGraph rewrite of the whole application
+- graph prompts, graph-bound skills, research tuning, build/refresh actions, and graph
+  admin flows are operator-managed through the control panel
 
 ## Circuit-breaker layer
 
@@ -348,9 +376,35 @@ The provider layer now feeds the live next runtime directly. Important nearby se
 - `LLM_ROUTER_MODE`
 - `LLM_ROUTER_CONFIDENCE_THRESHOLD`
 - `MEMORY_ENABLED`
+- `MEMORY_MANAGER_MODE`
+- `MEMORY_SELECTOR_MODEL`
+- `MEMORY_WRITER_MODEL`
+- `MEMORY_CANDIDATE_TOP_K`
+- `MEMORY_CONTEXT_TOKEN_BUDGET`
 - `ROUTER_PATTERNS_PATH`
 - `ENABLE_COORDINATOR_MODE`
 - `RUNTIME_EVENTS_ENABLED`
+- `MAX_PARALLEL_TOOL_CALLS`
+- `DEFERRED_TOOL_DISCOVERY_ENABLED`
+- `DEFERRED_TOOL_DISCOVERY_TOP_K`
+- `DEFERRED_TOOL_DISCOVERY_REQUIRE_SEARCH`
+- `MCP_TOOL_PLANE_ENABLED`
+- `MCP_USER_SELF_SERVICE_ENABLED`
+- `MCP_REQUIRE_HTTPS`
+- `MCP_ALLOW_PRIVATE_NETWORK`
+- `MCP_CONNECTION_TIMEOUT_SECONDS`
+- `MCP_TOOL_CALL_TIMEOUT_SECONDS`
+- `MCP_CATALOG_REFRESH_SECONDS`
+- `AUTHZ_ENABLED`
+- `TEAM_MAILBOX_ENABLED`
+- `TEAM_MAILBOX_MAX_CHANNELS_PER_SESSION`
+- `TEAM_MAILBOX_MAX_OPEN_MESSAGES_PER_CHANNEL`
+- `TEAM_MAILBOX_CLAIM_LIMIT`
+- `WORKER_SCHEDULER_ENABLED`
+- `WORKER_SCHEDULER_URGENT_RESERVED_SLOTS`
+- `WORKER_SCHEDULER_TENANT_BUDGET_TOKENS_PER_MINUTE`
+- `WORKER_SCHEDULER_TENANT_BUDGET_BURST_TOKENS`
+- `CONTEXT_BUDGET_ENABLED`
 - `LLM_CIRCUIT_BREAKER_ENABLED`
 - `LLM_CIRCUIT_BREAKER_WINDOW_SIZE`
 - `LLM_CIRCUIT_BREAKER_MIN_SAMPLES`

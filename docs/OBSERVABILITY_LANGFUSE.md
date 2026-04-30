@@ -71,7 +71,7 @@ workspace draft as a download artifact.
 Related local artifacts:
 
 - `data/workspaces/<filesystem_key(session_id)>/`
-- `data/memory/tenants/<tenant>/users/<user>/...`
+- `data/memory/tenants/<tenant>/users/<user>/...` memory projections when enabled
 - `new_demo_notebook/.artifacts/server.log`
 - `new_demo_notebook/.artifacts/executed/agentic_system_showcase.executed.ipynb`
 
@@ -128,8 +128,17 @@ The runtime emits structured `RuntimeEvent` records for:
 - memory extraction lifecycle:
   `memory_extraction_started`, `memory_extraction_completed`,
   `memory_extraction_failed`, `memory_extraction_skipped`
+- managed memory manager lifecycle:
+  `memory_manager_completed`, `memory_manager_failed`
 - callback-driven model lifecycle: `model_start`, `model_end`, `model_error`
 - callback-driven tool lifecycle: `tool_start`, `tool_end`, `tool_error`
+- deferred tool lifecycle:
+  `deferred_tool_catalog_built`, `deferred_tool_discovery_searched`,
+  `deferred_tool_invoked`, `deferred_tool_denied`
+- team mailbox lifecycle:
+  `team_mailbox_channel_created`, `team_mailbox_message_posted`,
+  `team_mailbox_message_claimed`, `team_mailbox_message_resolved`,
+  `team_mailbox_digest_created`
 - provider resilience and degraded-service lifecycle:
   `llm_circuit_breaker_opened`, `llm_circuit_breaker_half_opened`,
   `llm_circuit_breaker_closed`, `router_degraded_to_deterministic`,
@@ -159,6 +168,9 @@ When available, the payload also includes runtime-specific fields such as:
   the long-form writing path
 - coordinator worker and verifier metadata
 - RAG worker task ids and doc scopes for worker lifecycle events
+- capability-profile source and hidden/unavailable values when gateway responses include
+  effective capability metadata
+- scheduler state, queue class, token budget, and budget block reason on task/job responses
 
 ## Streaming progress layer
 
@@ -215,9 +227,9 @@ Common payload fields in that stream include:
 - `why`
 - `waiting_on`
 
-When `MEMORY_ENABLED=false`, the runtime does not emit the `memory_extraction_*` event family in
-either the durable event log or the streaming progress layer because the memory-maintenance paths
-are disabled entirely.
+When `MEMORY_ENABLED=false`, the runtime does not emit managed memory or
+`memory_extraction_*` event families in either the durable event log or the streaming progress
+layer because the memory-maintenance paths are disabled entirely.
 
 ## Acceptance triage locations
 
@@ -232,7 +244,7 @@ When live acceptance fails, inspect artifacts in this order:
 7. `data/runtime/jobs/<filesystem_key(job_id)>/artifacts/output.md`
 8. `data/runtime/jobs/<filesystem_key(job_id)>/artifacts/result.json`
 9. `data/workspaces/<filesystem_key(session_id)>/`
-10. `data/memory/tenants/<tenant>/users/<user>/...`
+10. `data/memory/tenants/<tenant>/users/<user>/...` memory projections when enabled
 
 For long-form writing failures or partial completions, inspect the workspace directory for the
 generated draft plus `long_output_*_manifest.json` and any `long_output_*_section_*.md` files,
@@ -242,6 +254,10 @@ asynchronously.
 These files are the durable acceptance artifacts for server readiness, worker orchestration,
 RAG grounding, data-analyst execution, coordinator job flow, and memory/notification
 verification.
+
+For MCP/capability issues, inspect the gateway response, control-panel operation logs, and
+PostgreSQL-backed MCP/capability records first; local runtime files only show the tool
+binding/invocation consequences once a chat turn or job runs.
 
 ## Why both layers exist
 
@@ -268,6 +284,13 @@ The live SSE progress layer is useful for:
 - `LANGFUSE_DEBUG`
 - `RUNTIME_EVENTS_ENABLED`
 - `RUNTIME_DIR`
+- `MEMORY_MANAGER_MODE`
+- `DEFERRED_TOOL_DISCOVERY_ENABLED`
+- `MCP_TOOL_PLANE_ENABLED`
+- `TEAM_MAILBOX_ENABLED`
+- `WORKER_SCHEDULER_ENABLED`
+- `CONTEXT_BUDGET_ENABLED`
+- `AUTHZ_ENABLED`
 
 ## Operational takeaway
 

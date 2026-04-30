@@ -20,12 +20,32 @@ runtime kernel owns them.
 **How:** tools live under `src/agentic_chatbot_next/tools/`; skill loading and retrieval
 live under `src/agentic_chatbot_next/skills/`.
 
-## File-backed runtime state
+## File-backed runtime traces, DB-backed runtime data
 
-**Why:** traces, resumes, and worker inspection are simpler when artifacts are directly
-inspectable on disk.
+**Why:** traces, resumes, and worker inspection are simpler when runtime artifacts are directly
+inspectable on disk, while searchable/shared state belongs in typed stores.
 
-**How:** `data/runtime`, `data/workspaces`, and `data/memory` when `MEMORY_ENABLED=true`.
+**How:** `data/runtime` and `data/workspaces` hold session/job/workspace artifacts.
+PostgreSQL holds documents, chunks, skills, managed memory, requirements, access rows,
+capability profiles, MCP catalogs, and graph metadata. `data/memory` is now an inspection
+projection and fallback path when `MEMORY_ENABLED=true`.
+
+## Capability-scoped tool plane
+
+**Why:** agent allow-lists alone are not enough once runtime-authored skills, MCP tools,
+tenant collections, and per-user access policies are live.
+
+**How:** `ToolPolicyService`, effective capability profiles, and RBAC intersect agent
+metadata with user/tenant grants before tools, skills, collections, agents, and MCP tools are
+visible.
+
+## Deferred heavy tools
+
+**Why:** large graph, admin, requirements, and MCP surfaces should not crowd every prompt by
+default.
+
+**How:** `discover_tools` and `call_deferred_tool` expose policy-approved deferred tools only
+after an explicit per-turn search, then recheck policy at invocation time.
 
 ## Prebuilt sandbox contract
 

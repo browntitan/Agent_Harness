@@ -1,7 +1,7 @@
 # Session Workspace
 
 The live workspace is a session-scoped host directory used by the data-analyst
-sandbox and upload flows.
+sandbox, upload flows, long-form writing, and user-facing downloadable artifacts.
 
 ## Path model
 
@@ -20,6 +20,7 @@ persists across turns. That lets the runtime:
 - keep generated files across turns
 - let later turns inspect prior outputs
 - publish derived files back to the user without leaving the session scope
+- keep long-form draft/manifest files visible to the same session
 
 Under the current analyst sandbox model, that workspace contract is unchanged. What changed is
 package provisioning: the sandbox image itself must already contain the analyst dependencies, and
@@ -90,10 +91,17 @@ analyst helpers running inside the offline image configured by `SANDBOX_DOCKER_I
 - events
 - job artifacts
 - download metadata itself
+- document source bytes when object storage or upload/source stores own them
+- managed memory records and their embeddings
+- MCP connection profiles or cached tool catalogs
+- capability/access-control rows
+- graph index metadata, graph runs, graph query cache rows, and GraphRAG project state
+- extracted requirement statement records
 - coordinator-owned typed handoff artifacts such as `analysis_summary`, `entity_candidates`,
   `keyword_windows`, `doc_focus`, `evidence_request`, and `evidence_response`
 
-Those live under `data/runtime/...`.
+Those live under `data/runtime/...`, PostgreSQL-backed stores, configured object storage, or
+GraphRAG project directories depending on the subsystem.
 
 Design note:
 

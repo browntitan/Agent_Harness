@@ -55,9 +55,10 @@ Expected loaded live roles:
 - `verifier`
 - `memory_maintainer`
 
-Routable starts come from `list_routable()` rather than the full loaded set.
-That keeps delegated-only roles such as `graph_manager` out of normal requested-agent
-overrides while still letting `general` and `coordinator` launch them as workers.
+Routable starts come from `list_routable()` rather than the full loaded set. Current
+top-level non-`basic` starts include `general`, `coordinator`, `data_analyst`, `rag_worker`,
+and `graph_manager`. `graph_manager` is intentionally both routable and delegable: its
+metadata is `role_kind=top_level_or_worker` with `entry_path=router_fast_path_or_delegated`.
 
 The registry can still load `memory_maintainer`, but the runtime filters it out of the
 requested-agent override surface and blocks launches when `MEMORY_ENABLED=false`.

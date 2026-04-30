@@ -12,11 +12,30 @@ internal runtime contracts.
 
 - `GET /health/live`
 - `GET /health/ready`
+- `GET /v1/admin/runtime/diagnostics`
+- `GET/POST/PATCH/PUT/DELETE /v1/admin/...` control-panel routes for overview, operations,
+  access, capabilities, architecture, config, agents, prompts, graphs, uploads, and collections
 - `GET /v1/models`
+- `GET /v1/agents`
 - `POST /v1/chat/completions`
 - `POST /v1/connector/chat`
+- `POST /v1/sessions/{session_id}/compact`
+- `GET /v1/capabilities/catalog`
+- `GET /v1/users/me/capabilities`
+- `PUT /v1/users/me/capabilities`
+- `GET /v1/tasks`
+- `GET /v1/tasks/{task_id}`
+- `POST /v1/tasks/{task_id}/stop`
 - `GET /v1/jobs/{job_id}`
+- `GET /v1/jobs/{job_id}/mailbox`
+- `POST /v1/jobs/{job_id}/mailbox/{message_id}/respond`
+- `GET /v1/sessions/{session_id}/team-mailbox/channels`
+- `POST /v1/sessions/{session_id}/team-mailbox/channels`
+- `GET /v1/sessions/{session_id}/team-mailbox/messages`
+- `POST /v1/sessions/{session_id}/team-mailbox/channels/{channel_id}/messages`
+- `POST /v1/sessions/{session_id}/team-mailbox/channels/{channel_id}/messages/{message_id}/respond`
 - `GET /v1/files/{download_id}`
+- `GET /v1/documents/{doc_id}/source`
 - `GET /v1/graphs`
 - `GET /v1/graphs/{graph_id}`
 - `POST /v1/graphs/index`
@@ -33,6 +52,14 @@ internal runtime contracts.
 - `POST /v1/skills/{skill_id}/rollback`
 - `POST /v1/skills/{skill_id}/preview-execution`
 - `POST /v1/skills/preview`
+- `GET /v1/mcp/connections`
+- `POST /v1/mcp/connections`
+- `PATCH /v1/mcp/connections/{connection_id}`
+- `DELETE /v1/mcp/connections/{connection_id}`
+- `POST /v1/mcp/connections/{connection_id}/test`
+- `POST /v1/mcp/connections/{connection_id}/refresh-tools`
+- `GET /v1/mcp/connections/{connection_id}/tools`
+- `PATCH /v1/mcp/connections/{connection_id}/tools/{tool_id}`
 
 ## Live runtime binding
 
@@ -69,6 +96,10 @@ For Open WebUI compatibility, the gateway also accepts these forwarded header al
 The skill control plane uses those scope headers to resolve runtime-authored skill
 visibility, precedence, and ownership without requiring a process restart.
 
+Capability profiles, MCP catalogs, graph access, task/job mailboxes, team mailboxes, document
+source downloads, and control-panel admin APIs also use these headers so user/tenant policy is
+resolved consistently across chat-adjacent operations.
+
 For retrieval-aware callers such as the OpenWebUI pipe, `POST /v1/chat/completions`
 also supports these optional metadata keys. The default OpenWebUI deployment runs in
 thin mode: OpenWebUI may transport uploaded bytes, but the backend document repository is
@@ -99,6 +130,8 @@ Current behavior:
 - graph access requires both a graph grant and a grant to the graph's backing collection
 - tool access is the intersection of agent-allowed tools and user-allowed tools
 - skill access is bound to the skill family (`version_parent`), not a single version id
+- capability profiles can further enable or disable tools, tool groups, agents, collections,
+  skills, MCP tools, plugins, permission mode, and fast-path policy
 
 Skill mutation hardening:
 
@@ -141,11 +174,22 @@ Backward compatibility rules:
 When `GATEWAY_SHARED_BEARER_TOKEN` is set, these endpoints require
 `Authorization: Bearer <token>`:
 
+- `GET /v1/admin/runtime/diagnostics`
 - `GET /v1/models`
+- `GET /v1/agents`
 - `POST /v1/chat/completions`
+- `POST /v1/sessions/{session_id}/compact`
 - `POST /v1/upload`
 - `POST /v1/ingest/documents`
 - `GET /v1/files/{download_id}`
+- `GET /v1/documents/{doc_id}/source`
+- `/v1/graphs...`
+- `/v1/mcp...`
+- `/v1/capabilities/catalog`
+- `/v1/users/me/capabilities`
+- `/v1/tasks...`
+- `/v1/jobs...`
+- `/v1/sessions/{session_id}/team-mailbox...`
 
 Browser-safe download handoff uses signed URLs generated when
 `DOWNLOAD_URL_SECRET` is set. Signed links remain valid for
@@ -181,7 +225,8 @@ Current behavior:
 Validation rules:
 
 - values are validated against the current routable non-`basic` registry surface
-- current common values are `general`, `rag_worker`, `data_analyst`, and `coordinator`
+- current common values are `general`, `rag_worker`, `data_analyst`, `coordinator`, and
+  `graph_manager`
 - `memory_maintainer` is filtered out when `MEMORY_ENABLED=false`
 - invalid values return `400` with the allowed value list
 
@@ -235,9 +280,10 @@ Generated workspace files may include:
 2. builds a local request context using `X-Conversation-ID`
 3. converts prior OpenAI-format messages into LangChain history
 4. validates optional `metadata.requested_agent`
-5. creates a `ChatSession`
-6. calls `RuntimeService.process_turn(...)`
-7. wraps the returned assistant text back into OpenAI-compatible JSON or SSE
+5. resolves request scope, authorization, and effective capability profile inputs
+6. creates a `ChatSession`
+7. calls `RuntimeService.process_turn(...)`
+8. wraps the returned assistant text back into OpenAI-compatible JSON or SSE
    chunks
 
 Request length control:
@@ -292,6 +338,26 @@ Common fields now include:
 - `waiting_on`
 
 Current progress event families include:
+
+- `route_decision`
+- `agent_selected`
+- `agent_start`
+- `decision_point`
+- `phase_start`, `phase_update`, `phase_end`
+- `task_plan`
+- `worker_start`, `worker_end`
+- `doc_focus`
+- `tool_intent`
+- `evidence_status`
+- `handoff_prepared`, `handoff_consumed`
+- `summary`
+- `tool_call`, `tool_result`, `tool_error`
+
+Router-derived progress and persisted route metadata may also include
+`requested_agent_override` and `requested_agent_override_applied`.
+
+In Open WebUI or another compatible client, that stream can power an inline reasoning/task
+summary panel rather than a separate sidecar debugger view.
 
 ## Legacy Connector Endpoint
 
@@ -364,26 +430,6 @@ Use the gateway like this in downstream apps:
 That keeps normal OpenAI-compatible access for server-side model calls while v3 keeps
 Open WebUI as the supported chat interface.
 
-- `route_decision`
-- `agent_selected`
-- `agent_start`
-- `decision_point`
-- `phase_start`, `phase_update`, `phase_end`
-- `task_plan`
-- `worker_start`, `worker_end`
-- `doc_focus`
-- `tool_intent`
-- `evidence_status`
-- `handoff_prepared`, `handoff_consumed`
-- `summary`
-- `tool_call`, `tool_result`, `tool_error`
-
-Router-derived progress and persisted route metadata may also include
-`requested_agent_override` and `requested_agent_override_applied`.
-
-In Open WebUI or another compatible client, that stream can power an inline reasoning/task summary panel rather
-than a separate sidecar debugger view.
-
 Artifact objects use the normalized shape from `runtime/artifacts.py`:
 
 ```text
@@ -414,6 +460,28 @@ The top-level `metadata` object on chat responses may now also include:
 - `manifest_filename`
 - `section_count`
 - `background`
+
+## Capability and MCP APIs
+
+`GET /v1/capabilities/catalog` returns the server-visible catalog of agents, tools, tool
+groups, skill-pack selectors, MCP tools, collections, permission modes, and fast-path policies.
+
+`GET /v1/users/me/capabilities` returns the effective profile for the current tenant/user.
+`PUT /v1/users/me/capabilities` updates that profile when allowed. Profile fields include
+enabled/disabled tools, enabled tool groups, skill-pack ids, MCP tool ids, enabled agents,
+enabled collections, plugin preferences, `permission_mode`, and `fast_path_policy`.
+
+The MCP API manages user-owned Streamable HTTP MCP connections and cached tool catalogs:
+
+- connection list/create/update/delete
+- connection test
+- catalog refresh
+- per-connection tool list
+- per-tool enable/visibility metadata updates
+
+The runtime does not bind remote MCP calls directly from the connection profile. It refreshes
+catalog rows into Postgres, exposes those rows as dynamic `mcp__...` tool definitions, and
+invokes the remote `tools/call` endpoint only when an allowed tool is actually called.
 
 ## Runtime skill API
 
@@ -478,6 +546,28 @@ Current behavior:
   explicit graph or a shortlist across a collection
 - graph payloads now include readiness, visibility, query backend, supported query methods, and graph context summary fields so callers can explain why a graph was or was not used
 
+`graph_manager` is the routable graph specialist for chat turns that need graph-backed
+evidence, graph relationships, graph inventory, or source planning. Direct graph API calls are
+still useful for UI panels and operators, while chat turns go through router/policy and the
+agent tool plane.
+
+## Task, Job, and Mailbox APIs
+
+`GET /v1/tasks` and `GET /v1/tasks/{task_id}` expose high-level task/job snapshots. Stop
+requests go through `POST /v1/tasks/{task_id}/stop`.
+
+`GET /v1/jobs/{job_id}` returns the durable job state. Job payloads may include priority,
+queue class, scheduler state, token budget counters, budget block reasons, result summaries,
+artifacts, and long-form metadata.
+
+Worker mailbox APIs let a parent/operator inspect pending worker questions and respond to
+question requests. Approval requests require the operator/admin path; answering a mailbox item
+does not broaden the worker's allowed tools.
+
+Team mailbox endpoints are session-scoped and only useful when `TEAM_MAILBOX_ENABLED=true`.
+They manage channels and typed messages for status updates, handoffs, questions, and responses.
+They are coordination surfaces, not shared permission scopes.
+
 ## Download file flow
 
 `GET /v1/files/{download_id}`:
@@ -493,6 +583,10 @@ handoff path used by `return_file`.
 
 When signed query params are present (`tenant_id`, `user_id`, `conversation_id`,
 `expires`, `sig`), the endpoint allows browser downloads without a bearer token.
+
+`GET /v1/documents/{doc_id}/source` is the protected source-file download path for indexed
+documents. It uses the same request scope and authorization checks as retrieval/graph access
+and is separate from session workspace artifact downloads.
 
 ## Job status flow
 

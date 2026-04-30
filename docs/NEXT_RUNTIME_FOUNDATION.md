@@ -18,7 +18,7 @@ The original purpose of `agentic_chatbot_next` was to stage a cleaner runtime wi
 - filesystem-safe runtime paths
 - markdown-frontmatter agent definitions
 - typed runtime contracts
-- file-backed memory
+- managed memory with file projections
 - a cleaner session-kernel boundary
 
 That cutover is now complete enough that the live entrypoints use the next runtime.
@@ -32,9 +32,10 @@ The runtime has also been hardened beyond the original foundation pass with:
 - provider-level circuit breakers and graceful degradation paths
 - bounded coordinator revision rounds
 - runtime skill CRUD and scoped skill versioning through the gateway
+- capability profiles, RBAC clipping, deferred tool discovery, and MCP tool catalogs
 - coordinator-owned typed handoffs for worker campaigns
 - long-form writing through a workspace-backed multi-call composer
-- feature-flagged graph-augmented retrieval alongside PostgreSQL / pgvector
+- managed GraphRAG catalogs and graph-augmented retrieval alongside PostgreSQL / pgvector
 - an explicit offline analyst sandbox image contract checked by `doctor --strict`
 - `MEMORY_ENABLED` as a runtime-wide feature flag
 
@@ -68,25 +69,23 @@ That applies to:
 - session directories
 - job directories
 - workspace directories
-- memory directories
+- memory projection directories
 
 ### Memory
 
-Live memory is file-backed under `data/memory/...` when `MEMORY_ENABLED=true`.
+Live memory is managed in PostgreSQL when `MEMORY_ENABLED=true`. The current store uses
+`memory_records`, `memory_observations`, and `memory_episodes`, with the older key/value
+`memory` table retained for import and compatibility flows.
 
-Authoritative files:
+`data/memory/...` is now an inspection projection and fallback path. The projector writes:
 
-- `index.json` per scope
-
-Derived files:
-
+- `index.json`
 - `MEMORY.md`
 - `topics/*.md`
+- `groups/*.md`
 
-The PostgreSQL memory table is not the live memory path for `agentic_chatbot_next`.
-
-When `MEMORY_ENABLED=false`, the runtime skips file-backed memory store initialization, hides the
-memory tool surface, disables heuristic post-turn extraction, and refuses
+When `MEMORY_ENABLED=false`, the runtime skips managed memory-store initialization, hides the
+memory tool surface, disables post-turn memory management and projections, and refuses
 `memory_maintainer` worker launches.
 
 ### Analyst sandbox
@@ -109,11 +108,16 @@ primitives, sandbox exceptions, and low-level ingest helpers under `src/agentic_
 That live surface now includes:
 
 - `/v1/skills` runtime CRUD for DB-backed skill versions
+- `/v1/mcp` self-service Streamable HTTP MCP connection and cached tool catalog management
+- `/v1/capabilities/catalog` and `/v1/users/me/capabilities` for effective user capability
+  profiles
 - summarized streaming progress milestones for the UI timeline
 - coordinator-owned typed handoff artifacts for planned worker campaigns
 - optional session/job-scoped team mailbox coordination for typed peer status, handoff, and
   question flows
-- optional Neo4j-backed GraphRAG augmentation guarded by feature flags
+- `graph_manager` as a routable-or-worker graph specialist
+- managed GraphRAG backed by PostgreSQL graph stores, with Neo4j compatibility guarded by
+  backend settings
 
 The import-boundary test now enforces that runtime code, tests, examples, and notebook helpers
 do not import `agentic_chatbot.*`.
@@ -175,7 +179,7 @@ Acceptance evidence is written to:
 - `data/runtime/sessions/<filesystem_key(session_id)>/`
 - `data/runtime/jobs/<filesystem_key(job_id)>/`
 - `data/workspaces/<filesystem_key(session_id)>/`
-- `data/memory/tenants/<tenant>/users/<user>/...`
+- `data/memory/tenants/<tenant>/users/<user>/...` memory projections when enabled
 
 For long-form writing, the expected split is:
 
@@ -191,10 +195,17 @@ Important graph-related operator knobs now include:
 
 - `GRAPH_SEARCH_ENABLED`
 - `GRAPH_INGEST_ENABLED`
+- `GRAPH_BACKEND`
+- `GRAPHRAG_PROJECTS_DIR`
+- `GRAPHRAG_CLI_COMMAND`
+- `GRAPHRAG_CHAT_MODEL`
+- `GRAPHRAG_EMBED_MODEL`
+- `GRAPHRAG_DEFAULT_QUERY_METHOD`
 - `NEO4J_URI`
 - `NEO4J_USERNAME`
 - `NEO4J_PASSWORD`
 - `NEO4J_DATABASE`
 - `NEO4J_TIMEOUT_SECONDS`
 
-Those settings keep graph retrieval optional. The live runtime still works without Neo4j.
+Those settings keep graph retrieval optional. The live runtime defaults to managed Microsoft
+GraphRAG and still works without Neo4j.

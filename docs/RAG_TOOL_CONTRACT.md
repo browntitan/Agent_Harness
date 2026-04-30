@@ -46,7 +46,12 @@ Important boundary:
 
 - `rag_agent_tool` exposes caller-controlled retrieval knobs
 - exact file targeting for named indexed docs is now also available through the read-only
-  `resolve_indexed_docs`, `read_indexed_doc`, and `compare_indexed_docs` tools
+  `resolve_indexed_docs`, `search_indexed_docs`, `read_indexed_doc`, and
+  `compare_indexed_docs` tools
+- adjacent document-research helpers such as `document_extract`, `document_compare`,
+  `template_transform`, `evidence_binder`, `extract_requirement_statements`, and
+  `export_requirement_statements` are separate tools; they do not change the
+  `rag_agent_tool` JSON contract
 - planner/coordinator payloads may add internal structured retrieval hints
 - typed handoffs may add validated downstream context for worker-to-worker campaigns
 - optional GraphRAG augmentation stays internal to the retrieval controller
@@ -125,4 +130,6 @@ runtime story. The live system now prefers coordinator-owned multi-worker planni
 the tool layer, while preserving the same public contract for any direct RAG tool call.
 
 When GraphRAG is enabled, that remains true: graph traversal is an internal retrieval
-augmentation step, not a separate public tool contract layered on top of `rag_agent_tool`.
+augmentation step. End-user graph inventory and graph-backed evidence may also route directly
+to `graph_manager`, but that routing choice does not change the public `rag_agent_tool`
+contract.

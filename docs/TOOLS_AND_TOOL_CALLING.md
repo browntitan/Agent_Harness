@@ -120,23 +120,33 @@ Execution is explicit and auditable:
 - `memory_load`
 - `memory_list`
 
-When `MEMORY_ENABLED=true`, the memory tools are file-backed under `data/memory/...`, with
-`index.json` as the authoritative store and derived `MEMORY.md` / `topics/*.md` files for
-human inspection. When `MEMORY_ENABLED=false`, those memory tools are omitted from the bound
-tool surface.
+When `MEMORY_ENABLED=true`, the memory tools prefer the managed PostgreSQL memory store
+(`memory_records`, observations, and episodes). `data/memory/...` is now a projection for
+human inspection plus a fallback path when the managed store is absent. Explicit tool saves
+call the managed `save_explicit(...)` path and then project the active session view back to
+`index.json`, `MEMORY.md`, `topics/*.md`, and `groups/*.md` when a projector is available.
+When `MEMORY_ENABLED=false`, those memory tools are omitted from the bound tool surface.
 
 ### RAG gateway cluster
 
 - `rag_agent_tool`
 - `resolve_indexed_docs`
+- `search_indexed_docs`
 - `read_indexed_doc`
 - `compare_indexed_docs`
+- `document_extract`
+- `document_compare`
+- `document_consolidation_campaign`
+- `template_transform`
+- `evidence_binder`
+- `extract_requirement_statements`
+- `export_requirement_statements`
 
 This is how prompt-backed agents reach grounded document reasoning without receiving the
 entire internal RAG specialist controller surface directly. `rag_agent_tool` fronts the
-next-runtime `run_rag_contract()` flow and returns the stable JSON RAG contract, while the
-indexed-doc helpers expose exact-document inventory, read, and comparison operations as
-first-class read-only tools.
+next-runtime `run_rag_contract()` flow and returns the stable JSON RAG contract. Indexed-doc,
+document, template, evidence, and requirements helpers expose exact corpus operations as
+first-class tools while preserving the direct RAG controller as the synthesis path.
 
 Caller-facing retrieval controls now include:
 
@@ -147,6 +157,7 @@ Caller-facing retrieval controls now include:
 
 - `list_graph_indexes`
 - `inspect_graph_index`
+- `list_graph_documents`
 - `search_graph_index`
 - `explain_source_plan`
 - `index_graph_corpus`
@@ -280,6 +291,7 @@ remains the owner of durable worker spawning and progress tracking.
 - workspace tools
 - file return
 - skill search
+- parent question/approval tools when running inside a worker job context
 - bounded peer follow-up through `invoke_agent`
 - team mailbox tools when `TEAM_MAILBOX_ENABLED=true`
 
@@ -314,12 +326,16 @@ stack. The runtime no longer installs packages inside the sandbox at turn time.
 - `inspect_graph_index`
 - `search_graph_index`
 - `explain_source_plan`
+- `rag_agent_tool`
+- parent question/approval tools when running inside a worker job context
 - `invoke_agent`
 - team mailbox tools when `TEAM_MAILBOX_ENABLED=true`
 
-`graph_manager` is a worker-only `react` role. It is graph-focused rather than routable from
-normal user entry, and it is typically launched by `general` or `coordinator` when a task
-needs managed-graph inspection or graph-aware source planning.
+`graph_manager` is a `react` role with `metadata.role_kind=top_level_or_worker`. It can be
+selected directly by router fast paths or requested-agent overrides for graph-backed evidence,
+GraphRAG, graph inventory, relationship, and source-planning turns. It can also still be
+launched by `general` or `coordinator` when a broader task needs managed-graph inspection or
+graph-aware source planning.
 
 ### `rag_worker`
 
@@ -414,11 +430,19 @@ Those modules expose operations such as:
   - `graph_search_global`
 
 Most of these remain repository-level helper utilities, but the live runtime now binds a
-small exact-doc subset as first-class read-only tools:
+larger exact-doc/document-research subset as first-class tools:
 
 - `resolve_indexed_docs`
+- `search_indexed_docs`
 - `read_indexed_doc`
 - `compare_indexed_docs`
+- `document_extract`
+- `document_compare`
+- `document_consolidation_campaign`
+- `template_transform`
+- `evidence_binder`
+- `extract_requirement_statements`
+- `export_requirement_statements`
 
 The broader adaptive retrieval path still uses equivalent Python-level operations inside
 `src/agentic_chatbot_next/rag/adaptive.py`, but the managed `microsoft_graphrag` catalog/query
@@ -452,6 +476,10 @@ The current central policy layer is `ToolPolicyService`, which enforces:
 - read-only restrictions for non-effectful modes
 - memory-only access for the memory maintainer
 - executable-skill allow-list clipping while a forked skill is running
+- capability-profile clipping of enabled/disabled tools, tool groups, MCP tools, agents,
+  collections, and skill packs
+- RBAC grants when `AUTHZ_ENABLED=true`, including tool, collection, graph, and skill-family
+  permissions
 
 Deferred discovery is layered on top of that same policy. A deferred target must already be
 in the active agent's `allowed_tools`, must be visible under authz, and must pass all normal

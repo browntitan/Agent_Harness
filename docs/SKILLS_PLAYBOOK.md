@@ -123,6 +123,10 @@ flowchart LR
 Runtime-authored skill CRUD bypasses the file-sync step and writes directly into the same
 DB-backed resolution layer used by the runtime.
 
+Capability profiles and RBAC can further clip what a user can see or run. A skill pack must
+match normal scope/precedence rules and also pass enabled/disabled skill-pack lists,
+skill-family grants, and executable-skill feature flags before it affects a turn.
+
 ## Runtime flow in the current kernel
 
 For a prompt-backed runtime agent that has `skill_scope` set and runs through `QueryLoop`:
@@ -215,6 +219,8 @@ Guardrails:
 - core agent role prompts remain file-authored and are not part of the runtime CRUD surface
 - executable skills never elevate tools; the skill allow-list is intersected with both
   the caller and, for forked skills, the selected worker
+- capability profiles and RBAC can remove skills or MCP/tools from the effective surface even
+  when the skill metadata itself is valid
 - `execute_skill` is denied inside a running executable skill to prevent recursive tool
   execution
 - `context: fork` runs synchronously through the existing worker/job path with an isolated
@@ -283,13 +289,27 @@ manage permission or an admin token because it exposes executable instructions.
 
 Key packs added for corpus-scale document research include:
 
-- `rag/corpus_discovery`
-- `rag/process_flow_identification`
-- `rag/windowed_keyword_followup`
-- `rag/cross_document_inventory`
-- `rag/coverage_sufficiency_audit`
-- `rag/negative_evidence_reporting`
+- `rag/citation_hygiene`
+- `rag/clause_extraction`
+- `rag/collection_scoping`
 - `rag/comparison_campaign`
+- `rag/corpus_discovery`
+- `rag/coverage_sufficiency_audit`
+- `rag/cross_document_inventory`
+- `rag/defense_graph_guidance`
+- `rag/document_resolution`
+- `rag/empty_result_recovery`
+- `rag/graph_drift_followup`
+- `rag/graph_freshness_and_staleness_check`
+- `rag/graph_global_community_discovery`
+- `rag/graph_grounding_and_resolve_back`
+- `rag/graph_local_relationship_tracing`
+- `rag/graph_vs_vector_source_selection`
+- `rag/multi_document_comparison`
+- `rag/negative_evidence_reporting`
+- `rag/process_flow_identification`
+- `rag/retrieval_strategy`
+- `rag/windowed_keyword_followup`
 - `general/document_research_delegation`
 - `planner/document_campaign_planning`
 - `finalizer/document_campaign_synthesis`

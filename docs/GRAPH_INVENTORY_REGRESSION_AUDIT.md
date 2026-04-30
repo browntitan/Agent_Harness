@@ -37,3 +37,21 @@
 - Force plain graph availability questions onto the direct `general -> list_graph_indexes` path.
 - Keep deep-RAG, document search, and worker orchestration off that path.
 - Restore the old interactive runtime envelope and expose active runtime diagnostics so stale processes are visible.
+
+## Current-State Addendum
+
+The current code goes beyond the original recovery path. `graph_manager` is now a
+`top_level_or_worker` graph specialist that can start directly from router fast paths or
+requested-agent overrides for graph-backed evidence, graph relationships, graph inventory, and
+source planning. It can also still be delegated to by broader agents.
+
+Managed graph state now lives through the PostgreSQL-backed graph catalog, graph source/run
+stores, query cache, and GraphRAG project artifacts, with Microsoft GraphRAG as the default
+backend and Neo4j retained as an optional compatibility backend. The control panel owns graph
+build/refresh/research-tune/prompt/skill administration, while chat/API graph queries remain
+scoped by tenant/user access and backing collection grants.
+
+Plain inventory prompts should still avoid deep RAG. Relationship, evidence, and source-planning
+prompts may legitimately route to `graph_manager`, which can use `list_graph_indexes`,
+`inspect_graph_index`, `search_graph_index`, `explain_source_plan`, and `rag_agent_tool` to
+resolve graph candidates back to cited text evidence.

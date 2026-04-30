@@ -44,7 +44,8 @@ The next runtime currently uses these agent modes:
 The runtime splits execution responsibilities across three layers:
 
 - `RuntimeService` handles eager workspace open, upload ingest/upload-summary kickoff,
-  routing, requested-agent override validation, and handoff into the kernel
+  routing, requested-agent override validation, capability-profile scoping, and handoff into
+  the kernel
 - `RuntimeKernel` owns persisted session state, jobs, notifications, and worker orchestration
 - `QueryLoop` dispatches execution by agent mode and injects prompt/skill/memory context
 
@@ -109,9 +110,10 @@ Long-form writing nuance:
 
 - calculator
 - document listing
-- file-backed memory when `MEMORY_ENABLED=true`
+- managed-memory tools when `MEMORY_ENABLED=true`
 - `search_skills`
 - bounded same-session peer follow-up through `invoke_agent`
+- team mailbox tools when `TEAM_MAILBOX_ENABLED=true`
 
 ### `data_analyst`
 
@@ -122,6 +124,8 @@ Long-form writing nuance:
 - scratchpad and workspace tools
 - explicit file publication through `return_file`
 - `search_skills` plus bounded peer follow-up through `invoke_agent`
+- worker parent-question/approval tools when running in a worker job
+- team mailbox tools when `TEAM_MAILBOX_ENABLED=true`
 
 ### `rag_worker`
 
@@ -136,10 +140,11 @@ Long-form writing nuance:
 
 ### `graph_manager`
 
-- worker-only graph retrieval and source-planning specialist
+- graph retrieval and source-planning specialist with `metadata.role_kind=top_level_or_worker`
 - inspects managed graph indexes and their source sets
 - runs graph-backed evidence search across one graph or a shortlist of relevant graphs
 - explains graph/vector/keyword/SQL source planning through `explain_source_plan`
+- can start directly from graph fast-path routing or a valid requested-agent override
 - may open one bounded same-session peer follow-up through `invoke_agent`
 
 ### `planner`
@@ -158,8 +163,8 @@ Long-form writing nuance:
 
 ### `memory_maintainer`
 
-- explicit delegated helper for writing extracted memory entries into file-backed memory
-- separate from the normal post-turn kernel heuristic memory-maintenance path
+- explicit delegated helper for writing extracted memory entries into the managed memory path
+- separate from the normal post-turn kernel memory-management path
 - unavailable when `MEMORY_ENABLED=false`
 
 ## Context control
@@ -169,6 +174,7 @@ The next runtime uses several boundaries to keep context under control:
 - scoped worker prompts
 - bounded skill context
 - bounded memory context
+- capability-profile clipped tools, collections, agents, skills, and MCP tools
 - session/job transcript separation
 - worker mailboxes instead of raw conversation sharing
 - typed handoff artifacts for structured worker-to-worker campaigns owned by `coordinator`

@@ -44,6 +44,11 @@ download links.
 The gateway also now exposes runtime skill CRUD and preview endpoints under `/v1/skills`,
 scoped by `X-Tenant-ID` and `X-User-ID` when supplied.
 
+The same request scope now feeds `/v1/agents`, `/v1/mcp/...`, `/v1/capabilities/catalog`,
+`/v1/users/me/capabilities`, task/job/mailbox endpoints, team mailbox endpoints, document
+source downloads, graph APIs, and control-panel admin routes. Those surfaces use the same
+tenant/user/conversation headers as chat turns.
+
 `POST /v1/chat/completions` also accepts `metadata.requested_agent` for explicit demo/operator
 control of the initial AGENT role. Invalid override values fail fast with `400` before the
 runtime starts the turn.
@@ -68,15 +73,17 @@ executing.
 5. calls the router
 6. emits a router-decision event
 7. validates any requested-agent override against the current routable registry surface
-8. if the judge router path is degraded, falls back to deterministic routing and emits a
+8. resolves effective capability and authorization snapshots that can clip agents,
+   collections, tools, skills, and MCP tools for the turn
+9. if the judge router path is degraded, falls back to deterministic routing and emits a
    router-degradation event
-9. when `metadata.long_output.enabled=true`, selects a long-form branch after routing and
+10. when `metadata.long_output.enabled=true`, selects a long-form branch after routing and
    agent selection
-10. otherwise hands off to `RuntimeKernel.process_basic_turn(...)` or
+11. otherwise hands off to `RuntimeKernel.process_basic_turn(...)` or
     `RuntimeKernel.process_agent_turn(...)`
-11. if an agent chat provider is unavailable, attempts one downgrade to `basic`
-12. if `basic` is also unavailable, persists a degraded-service assistant response
-13. unregisters the live progress sink after the turn completes
+12. if an agent chat provider is unavailable, attempts one downgrade to `basic`
+13. if `basic` is also unavailable, persists a degraded-service assistant response
+14. unregisters the live progress sink after the turn completes
 
 The router decision is still recorded even when a requested-agent override is applied. The
 override only changes the initial AGENT role after routing has already decided the turn belongs
@@ -143,10 +150,12 @@ worker orchestration; it is a top-level resilience path.
 
 1. builds `ToolContext`
 2. resolves the allowed tool set for the selected agent
-3. calls `QueryLoop.run(...)`
-4. writes the returned messages back into session state, including assistant
+3. applies `ToolPolicyService`, effective capability profiles, and RBAC to the bound tool
+   surface, including deferred tools and dynamic MCP tools
+4. calls `QueryLoop.run(...)`
+5. writes the returned messages back into session state, including assistant
    artifact metadata when tools published files
-5. emits completion/failure events
+6. emits completion/failure events
 
 `ToolContext` now also carries:
 
@@ -172,6 +181,9 @@ For `coordinator`, the kernel runs:
 5. bounded finalizer/verifier revision rounds if verification requests changes
 
 Workers run as durable jobs with mailbox continuation and notification reinjection.
+When `WORKER_SCHEDULER_ENABLED=true`, job admission also records priority, queue class,
+scheduler state, tenant token budget counters, and any budget block reason on job/task API
+responses.
 
 For broad document-research asks, this path is now also the owner of long-running research
 campaigns. `planner` can emit multiple `rag_worker` tasks with:
@@ -199,10 +211,13 @@ not rerun inside revision loops.
 dispatches by mode:
 
 - `react`, `planner`, `finalizer`, and `verifier` build prompts from base prompt,
-  optional task/worker context, skill context, and bounded file-memory context
+  optional task/worker context, skill context, and bounded managed-memory context
 - `rag` resolves skill-driven execution hints, then calls `run_rag_contract(...)`
   directly with recent conversation context, uploaded doc ids, optional runtime-bridge
   support, and optional live-progress emission
+- `react` `graph_manager` can start directly from graph fast-path routing or a requested-agent
+  override, then use managed graph tools for graph inventory, graph-backed evidence, and source
+  planning
 - `memory_maintainer` skips prompt/model execution and runs direct heuristic extraction when
   `MEMORY_ENABLED=true`
 
@@ -272,8 +287,12 @@ Current event families include:
 - worker-job lifecycle, mailbox, and notification append events
 - notification append events
 - memory extraction events
+- managed memory manager events
 - provider breaker lifecycle and degraded-service events
 - coordinator handoff lifecycle
+- deferred tool discovery and MCP invocation events
+- team mailbox channel/message/claim/response events
+- worker scheduler admission and budget-related job metadata
 
 When `MEMORY_ENABLED=false`, the runtime does not emit the memory-extraction family because the
 post-turn heuristic maintenance path and `memory_maintainer` worker path are both disabled.
@@ -305,9 +324,10 @@ task summary without exposing raw chain-of-thought.
 Router-derived payloads may also include `requested_agent_override` and
 `requested_agent_override_applied`.
 
-The post-turn memory path is heuristic today, not a dedicated maintenance-agent loop. It writes
-conversation memory from structured entries in the latest user turn and only writes user memory
-when the turn contains explicit memory intent.
+The post-turn memory path is kernel-owned, not a dedicated maintenance-agent loop. In the
+Postgres-backed runtime it first uses the managed memory manager according to
+`MEMORY_MANAGER_MODE`; the legacy heuristic extractor remains a fallback/compatibility path
+for explicit structured memory intent.
 
 Worker failures currently surface as `job_failed`; there is no separate
 `worker_agent_failed` runtime event in the live implementation.

@@ -8,6 +8,8 @@
 - demo seed corpus: `data/kb/`
 - workspace files: `data/workspaces/`
 - runtime session/job state: `data/runtime/`
+- managed memory, skills, access/capability profiles, MCP catalogs, requirements, and graph
+  metadata: PostgreSQL
 
 The next-runtime cutover did not change the KB storage model. It changed how live AGENT
 turns execute around that data.
@@ -55,3 +57,7 @@ python run.py evaluate-defense-corpus --sync-first
 
 Like the rest of the live RAG stack, that benchmark is collection-first and index-first. The
 runtime does not query raw corpus folders directly at answer time.
+
+The control panel and `/v1/collections...` admin routes can inspect, sync, upload, reindex,
+repair, and delete collection documents. Those admin flows still target the same DB-first corpus;
+`data/kb` remains seed content rather than the live answer-time source.

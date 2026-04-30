@@ -28,7 +28,9 @@ Current worktree assumptions:
 - `LLM_ROUTER_ENABLED=true`
 - `LLM_ROUTER_MODE=hybrid`
 - `MEMORY_ENABLED=true`
-- `GRAPH_SEARCH_ENABLED=false`
+- `GRAPH_BACKEND=microsoft_graphrag`
+- graph search may be disabled unless graph indexes have been built/imported
+- MCP, team mailbox, and executable skill checks require their feature flags to be enabled
 
 If `ENABLE_COORDINATOR_MODE=true`, keep the same prompts but expect AGENT turns to begin in
 `coordinator` even when the matrix below lists `general` or `rag_worker` as the likely start.
@@ -38,7 +40,8 @@ If `ENABLE_COORDINATOR_MODE=true`, keep the same prompts but expect AGENT turns 
 - Run the natural-routing prompts as normal chat turns.
 - Run the tool-trace prompts with `metadata.requested_agent="general"` when you want to see
   top-level tool calls such as `list_indexed_docs`, `rag_agent_tool`, `resolve_indexed_docs`,
-  `read_indexed_doc`, and `compare_indexed_docs`.
+  `search_indexed_docs`, `read_indexed_doc`, `compare_indexed_docs`, document tools,
+  requirements tools, and graph tools.
 - For older API examples and trace docs that use assignment-style notation, this is the same
   override as `metadata.requested_agent=general`.
 - Run the analyst prompts only after uploading:
@@ -81,6 +84,10 @@ Minimal API shape for forced `general` starts:
   Expected start: `AGENT -> general`
   Expected path: KB inventory fast-path through `list_indexed_docs(source_type="kb")`.
 
+- `What graph indexes are available, and which collections do they cover?`
+  Expected start: `AGENT -> graph_manager` when graph indexes exist, otherwise `AGENT -> general`
+  inventory with a clear no-graph/no-ready explanation.
+
 ## 2. Direct Grounded Lookup
 
 - `Summarize the main components of the runtime service described in ARCHITECTURE.md. Cite your sources.`
@@ -98,6 +105,11 @@ Minimal API shape for forced `general` starts:
 - `How does the OpenAI-compatible gateway scope requests and support requested-agent overrides? Cite your sources.`
   Expected start: `AGENT -> rag_worker`
   Expected path: grounded retrieval from `OPENAI_GATEWAY.md` and `ROUTER_RUBRIC.md`.
+
+- `How do MCP tools and capability profiles affect the runtime tool surface? Cite your sources.`
+  Expected start: `AGENT -> rag_worker`
+  Expected path: grounded retrieval from `TOOLS_AND_TOOL_CALLING.md`, `OPENAI_GATEWAY.md`,
+  and `ARCHITECTURE.md`.
 
 - `Explain the RAG tool contract and its input/output shape. Cite your sources.`
   Expected start: `AGENT -> rag_worker`
@@ -151,6 +163,12 @@ tool-wrapper path instead of starting directly in `rag_worker` or `coordinator`.
 - `Can you list out all of the documents in the default collection?`
   Expected tools: `list_indexed_docs(source_type="kb", collection_id="default")`.
 
+- `Search the default collection for documents that discuss MCP, capability profiles, and deferred tools.`
+  Expected tools: `search_indexed_docs` and optional `read_indexed_doc`.
+
+- `Extract the endpoint list from OPENAI_GATEWAY.md and group it by chat, skills, MCP, capabilities, jobs, graphs, ingest, and files.`
+  Expected tools: `resolve_indexed_docs` plus `document_extract` or `read_indexed_doc`.
+
 ## 5. Upload And Analyst Tools
 
 Upload both demo analyst files in the same conversation before issuing these prompts.
@@ -192,12 +210,12 @@ Regression prompt:
 - `Remember that when I ask for summaries, I prefer bullet points.`
   Then ask `What preferences do you remember for this conversation?`
   Expected path: memory round-trip through `memory_save` and `memory_load` or `memory_list`.
-  This only applies because `MEMORY_ENABLED=true`.
+  This only applies because `MEMORY_ENABLED=true`; in the Postgres-backed runtime, file memory is
+  a projection/fallback rather than the normal authoritative store.
 
-- Optional only if you later enable graph search:
-  `Identify all documents that describe process flow, typed handoffs, or coordinator execution, then summarize the relationship graph.`
-  Expected path: same corpus as the coordinator campaign above, with graph augmentation available only when
-  `GRAPH_SEARCH_ENABLED=true`.
+- Optional only if a graph index exists:
+  `Use graph-backed evidence to identify relationships among process flow, typed handoffs, and coordinator execution, then resolve those relationships back to source documents.`
+  Expected path: `graph_manager` with graph search/source planning followed by cited text evidence.
 
 ## 7. Deep Research Diagnosis And Query Pack
 
@@ -412,3 +430,33 @@ Expected behavior:
 - the gateway accepts `X-Tenant-ID` and `X-User-ID`
 - skill CRUD becomes effective without restart
 - preview lets you inspect the effect of a skill body or metadata change before activation
+
+### Capability, MCP, And Job API Smoke Checks
+
+Use the gateway and issue:
+
+- `GET /v1/agents`
+- `GET /v1/capabilities/catalog`
+- `GET /v1/users/me/capabilities`
+- `GET /v1/mcp/connections`
+- `GET /v1/tasks`
+- `GET /v1/jobs/<job_id>/mailbox` after launching a worker-backed task
+
+Expected behavior:
+
+- bearer auth is enforced when `GATEWAY_SHARED_BEARER_TOKEN` is set
+- capability responses reflect enabled/disabled tools, groups, agents, collections, skills, and
+  MCP tools
+- MCP connection tools appear only after a successful refresh and policy visibility checks
+- task/job responses include scheduler metadata when `WORKER_SCHEDULER_ENABLED=true`
+
+### RFP Corpus Checks
+
+After `python run.py sync-defense-corpus`, run the focused prompt pack in
+`RFP_CORPUS_TEST_PROMPTS.md` against `rfp-corpus` and `requirements-extraction-pack`.
+Expected behavior:
+
+- direct lookup prompts route to `rag_worker`
+- broad reconciliation prompts route to coordinator or deep RAG
+- requirements prompts use extraction/export tools
+- graph-aware prompts route to `graph_manager` only when graph indexes are available

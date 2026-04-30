@@ -41,8 +41,8 @@ Observed live behavior:
 
 - router hinting now comes from config-backed deterministic patterns plus the LLM router
 - `choose_agent_name(...)` in `router/policy.py` is now registry-aware through
-  `build_router_targets(registry)`, but the live hint surface still centers on
-  `coordinator`, `data_analyst`, and `rag_worker`
+  `build_router_targets(registry)`, and the live hint surface includes `coordinator`,
+  `data_analyst`, `rag_worker`, and `graph_manager`
 
 Why it matters:
 
@@ -64,8 +64,9 @@ Recommended follow-up:
 Observed live behavior:
 
 - the repo already has a centralized `ToolPolicyService`
-- current policy mainly covers allowed tools, read-only gating, workspace requirements, and
-  background-job safety
+- current policy covers allowed tools, read-only gating, workspace requirements,
+  background-job safety, worker-context-only tools, team mailbox gating, executable-skill
+  clipping, capability profiles, RBAC grants, deferred discovery, and MCP tool visibility
 
 Why it matters:
 
@@ -74,8 +75,8 @@ Why it matters:
 
 Decision:
 
-- adopt next when the tool surface grows beyond document, memory, orchestration, and data-analysis
-  tools
+- adopted after the original audit; continue tightening policy as new external-action tools
+  are added
 
 Recommended follow-up:
 
@@ -160,13 +161,13 @@ Why this is good:
 - it matches the external guidance closely
 - it keeps operating guidance separate from side-effecting actions
 
-### 3. Keep file-backed memory, jobs, notifications, and verifier-style orchestration
+### 3. Keep managed memory, jobs, notifications, and verifier-style orchestration
 
 Observed live behavior:
 
 - early persistence is in place
 - worker jobs, mailboxes, notifications, and event logs are durable
-- memory is file-backed when `MEMORY_ENABLED=true`
+- memory is PostgreSQL-backed when `MEMORY_ENABLED=true`, with file projections/fallbacks
 - coordinator mode already separates planning, execution, finalization, and verification
 
 Why this is good:
@@ -174,23 +175,24 @@ Why this is good:
 - these are strong patterns for a general-purpose agent, not only for a coding agent
 - they directly improve debuggability, resumability, and context control
 
-### 4. Keep the narrower extension story for now
+### 4. Extension story is now live but guarded
 
 Observed divergence:
 
 - the external reference includes a larger MCP/plugin/deferred-tool extension plane
-- the live next runtime currently relies on Python-defined tools, markdown agents, and retrieved
-  skill packs
+- the live next runtime now supports deferred tool discovery, executable/hybrid skills,
+  capability profiles, RBAC clipping, and user-owned Streamable HTTP MCP tool catalogs
 
 Why this is acceptable:
 
-- the current product does not yet need that much extension machinery
-- adding it prematurely would increase complexity faster than it improves robustness
+- the extension machinery is feature-gated and policy-clipped rather than always exposed
+- cached MCP catalogs enter the same `ToolDefinition` and `ToolPolicyService` path as in-repo
+  tools
 
 Recommended trigger to revisit:
 
-- revisit only when the product needs third-party capability injection, dynamic tool discovery,
-  or a much broader specialist-agent catalog
+- revisit before adding stdio MCP servers, resource/prompt/sampling support, package
+  installation, or broader third-party action tools
 
 ## Bottom line
 
@@ -200,17 +202,20 @@ general-purpose agent:
 - a persistent session kernel
 - explicit routing
 - durable worker jobs
-- optional file-backed memory behind `MEMORY_ENABLED`
+- optional managed memory behind `MEMORY_ENABLED`, with file projections/fallbacks
 - separate tools and skills
 - verification-aware orchestration
 
 The biggest issues were repository clarity and doc drift, not a fundamentally wrong live
 architecture. The main architectural follow-ups are to keep initial-agent selection
-registry-aware as the specialist set grows and to deepen the permission model only when the
-tool surface expands.
+registry-aware as the specialist set grows and to keep the permission model ahead of any
+broader external-action tool surface.
 
 Recent live runtime additions that the docs now treat as first-class behavior:
 
 - `metadata.requested_agent` for explicit API/demo control of the initial AGENT role
 - `MEMORY_ENABLED` as a real runtime-wide feature flag
 - the offline analyst sandbox image contract built through `python run.py build-sandbox-image`
+- `graph_manager` as a top-level-or-worker graph specialist
+- capability profiles, RBAC, deferred tool discovery, executable skills, team mailboxes, worker
+  scheduler metadata, and MCP tool catalogs as live guarded runtime surfaces

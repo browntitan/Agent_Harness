@@ -83,4 +83,10 @@ podman build \
   "$REPO_ROOT"
 
 echo "Images built:"
-podman images localhost/agentic-chatbot-v3-app localhost/agentic-chatbot-v3-openwebui
+for image in \
+  localhost/agentic-chatbot-v3-app:latest \
+  localhost/agentic-chatbot-v3-openwebui:latest
+do
+  podman image exists "$image"
+  podman images "$image"
+done

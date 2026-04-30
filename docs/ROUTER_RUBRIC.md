@@ -37,6 +37,7 @@ The router may suggest:
 
 - `coordinator`
 - `data_analyst`
+- `graph_manager`
 - `rag_worker`
 - `""`
 
@@ -54,6 +55,8 @@ Important boundaries:
 - the router still records its normal `BASIC` vs `AGENT` decision and reasons
 - `force_agent=true` only forces AGENT; it does not choose the agent
 - `requested_agent` is validated after routing against the routable non-`basic` registry roles
+- common valid values are `general`, `coordinator`, `data_analyst`, `rag_worker`, and
+  `graph_manager`
 - `memory_maintainer` is not a valid override target when `MEMORY_ENABLED=false`
 
 ## Hybrid fallback behavior
@@ -107,6 +110,13 @@ The router is especially likely to suggest `rag_worker` for bounded grounded loo
 - answer a focused question from uploaded docs
 - find the source for one claim
 - perform a single grounded lookup that does not imply corpus-wide coverage
+
+## Typical `graph_manager` hints
+
+The router is especially likely to suggest `graph_manager` when the turn names graph-backed
+evidence, GraphRAG, graph inventories, relationship/entity networks, dependencies,
+source-planning, or named graph queries. These turns use `requested_scope_kind="graph_indexes"`
+and can start directly in the graph specialist instead of first routing through RAG.
 
 ## Typical `coordinator` hints
 

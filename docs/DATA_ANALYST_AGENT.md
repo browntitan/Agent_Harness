@@ -15,7 +15,7 @@ markdown-defined `AgentDefinition(mode="react")` that stays on the guided
 | Prompt file | `data/skills/data_analyst_agent.md` |
 | Runtime mode | `react` |
 | Execution strategy | `plan_execute` |
-| Tools | `14` |
+| Tools | `20` declared in `data/agents/data_analyst.md` |
 | Sandbox | Docker container with bind-mounted workspace at `/workspace` |
 | Primary file source | indexed KB documents plus persistent session workspace |
 | NLP path | bounded provider-backed column task |
@@ -38,15 +38,35 @@ The live data analyst runtime agent receives:
 11. `workspace_read`
 12. `workspace_list`
 13. `search_skills`
-14. `invoke_agent`
+14. `request_parent_question`
+15. `request_parent_approval`
+16. `invoke_agent`
+17. `post_team_message`
+18. `list_team_messages`
+19. `claim_team_messages`
+20. `respond_team_message`
 
 ## Public interfaces
 
 ```text
 load_dataset(doc_id="", sheet_name="")
 inspect_columns(doc_id="", columns="", sheet_name="")
+execute_code(code, doc_ids="")
 run_nlp_column_task(doc_id="", sheet_name="", column="", task="", classification_rules="", allowed_labels_csv="", batch_size=5, output_mode="", target_filename="", label_column="", score_column="")
 return_file(filename="", label="")
+scratchpad_write(key="", value="")
+scratchpad_read(key="")
+scratchpad_list()
+workspace_write(filename="", content="")
+workspace_read(filename="")
+workspace_list()
+request_parent_question(question="", context="")
+request_parent_approval(action="", rationale="", payload={})
+invoke_agent(agent_name="", task="")
+post_team_message(channel_id="", content="", message_type="message", target_agents=[], target_job_ids=[], subject="", payload={})
+list_team_messages(channel_id="", message_type="", status_filter="open", limit=20)
+claim_team_messages(channel_id="", limit=0, message_type="")
+respond_team_message(channel_id="", message_id="", response="", decision="", resolve=true)
 ```
 
 - `load_dataset(doc_id="", sheet_name="")`
@@ -69,10 +89,14 @@ return_file(filename="", label="")
   most recent analyst output when available.
 - scratchpad tools hold short-lived planning state.
 - workspace tools inspect or edit plain workspace files directly.
-- `search_skills` retrieves skill-pack guidance, `calculator` is still
-  available for quick arithmetic, and `invoke_agent` can open one bounded
-  same-session follow-up to an allowed peer such as `utility`, `general`, or
-  `rag_worker`.
+- `search_skills` retrieves skill-pack guidance, `calculator` is still available for quick
+  arithmetic, and `invoke_agent` can open one bounded same-session follow-up to an allowed
+  peer such as `utility`, `general`, or `rag_worker`.
+- `request_parent_question` and `request_parent_approval` are only useful when the analyst is
+  running as a worker job; normal top-level turns cannot use them to pause for parent input.
+- Team mailbox tools are only callable when `TEAM_MAILBOX_ENABLED=true`; they coordinate typed
+  status, handoff, question, and response messages without granting broader file, sandbox, or
+  tool permissions.
 
 ## Invocation paths
 

@@ -39,6 +39,12 @@ endpoints are scoped by `X-Tenant-ID` and `X-User-ID` when present and let opera
 clients create, update, activate, deactivate, preview, inspect, list, and roll back
 runtime-authored skill packs without restarting the service.
 
+The current gateway surface also includes runtime-managed agent inventory, capability
+profiles, MCP connection/tool catalogs, task/job inspection, worker and team mailbox
+continuation, document source downloads, graph catalog/query APIs, and control-panel admin
+diagnostics. These endpoints all share the same request-scope headers and runtime stores as
+chat turns rather than forming a separate sidecar service.
+
 ### Runtime service
 
 `RuntimeService` owns:
@@ -93,6 +99,7 @@ reasons.
 - coordinator planning and worker batching
 - construction of the internal `KernelRagRuntimeBridge`
 - background long-form writing execution through `_run_long_output_job(...)`
+- capability-profile and authorization-aware tool/context construction
 
 `RuntimeKernel` remains the stable public entrypoint, but it is now a thinner facade over
 three helper modules:
@@ -117,6 +124,7 @@ It handles:
 - planner / finalizer / verifier execution
 - direct RAG worker execution via `run_rag_contract(...)`
 - evidence-only RAG worker execution for internal deep-search fan-out jobs
+- graph-manager `react` execution for graph fast-path and delegated graph source planning
 - one bounded async peer delegation from the direct `rag_worker` path when the judge model
   decides a specialist follow-up is a better next step than immediate synthesis
 - direct memory-maintainer execution via heuristic extraction when `MEMORY_ENABLED=true`
@@ -193,8 +201,8 @@ Current breaker behavior:
 
 Two cross-cutting runtime features are now explicitly operator-controlled:
 
-- `MEMORY_ENABLED=false` disables file-backed memory initialization, memory tool exposure,
-  heuristic post-turn extraction, and `memory_maintainer` worker availability
+- `MEMORY_ENABLED=false` disables managed memory-store initialization, memory tool exposure,
+  post-turn memory management, file projections, and `memory_maintainer` worker availability
 - `SANDBOX_DOCKER_IMAGE` defaults to the prebuilt offline analyst image
   `agentic-chatbot-sandbox:py312`
 
@@ -224,21 +232,25 @@ Memory tools are part of this tool plane only when `MEMORY_ENABLED=true`.
 Bound runtime tool groups today are:
 
 - `utility`
+- `discovery`
+- `skills`
 - `memory`
 - `rag_gateway`
 - `graph_gateway`
 - `analyst`
 - `orchestration`
+- dynamic `mcp` tools when `MCP_TOOL_PLANE_ENABLED=true`
 
-The live extension surface is currently internal to the repository:
+The live extension surface now combines repository-owned definitions with guarded runtime
+extension points:
 
 - Python-defined tool registries
 - markdown-defined agents
 - retrieved skill-pack context
 - DB-backed runtime-authored skill packs
-
-Broader plugin or MCP-driven extension loading is not part of the live next-runtime contract
-today.
+- DB-cached Streamable HTTP MCP tool catalogs exposed as `mcp__...` tool definitions
+- per-user capability profiles and RBAC grants that clip visible tools, agents, skills,
+  collections, and MCP tools
 
 Skill packs now exist in two operational forms:
 
@@ -260,13 +272,18 @@ Runtime resolution precedence is now:
 - tenant-shared
 - global default
 
-The worker-only `graph_manager` role sits on top of the `graph_gateway` tool group plus
-bounded peer follow-up through `invoke_agent`. It is registry-loaded, but it is not a normal
-requested-agent entrypoint.
+The `graph_manager` role sits on top of the `graph_gateway` tool group plus bounded peer
+follow-up through `invoke_agent` and `rag_agent_tool`. Its metadata marks it as
+`top_level_or_worker`: the router and requested-agent override surface may start it for
+graph-backed evidence, graph-inventory, or source-planning turns, and other agents may still
+delegate to it as a worker.
 
-The repo also contains helper tool factories under `src/agentic_chatbot_next/rag/`,
-but the live `rag_worker` and `rag_agent_tool` paths still use a direct Python retrieval
-controller rather than binding those helper surfaces as top-level LangChain tools.
+The repo also contains helper tool factories under `src/agentic_chatbot_next/rag/`. A narrow
+subset is now first-class in the registry (`resolve_indexed_docs`, `search_indexed_docs`,
+`read_indexed_doc`, `compare_indexed_docs`, document extract/compare/consolidation,
+template/evidence, and requirements extraction/export), while the live `rag_worker` and
+`rag_agent_tool` paths still use the direct Python retrieval controller for adaptive
+retrieval and synthesis.
 
 RAG-oriented skill packs are now partly machine-readable. In addition to prompt prose,
 indexed skill metadata can drive:
@@ -305,9 +322,11 @@ Internally, the live controller is now adaptive:
 - `deep` mode can perform multi-round retrieval, chunk-window expansion, document-focused
   rereads, pruning, and bounded internal evidence-worker fan-out
 
-The retrieval stack is also now optionally graph-augmented. PostgreSQL full-text and
-pgvector remain the default lexical and semantic base, while a feature-flagged `graph_store`
-can augment retrieval with Neo4j-backed entity and relationship candidates.
+The retrieval stack is also graph-augmented when graph features are enabled. PostgreSQL
+full-text and pgvector remain the default lexical and semantic base. Managed graph catalogs,
+GraphRAG project artifacts, graph query cache rows, and graph source records live in
+PostgreSQL-backed stores; `GRAPH_BACKEND=microsoft_graphrag` is the default, with Neo4j kept
+as an optional compatibility backend.
 
 The deep path uses:
 
@@ -317,9 +336,9 @@ The deep path uses:
   subtasks
 - one final synthesis step after evidence merge
 
-When graph search is enabled, graph traversal yields candidate documents or chunk ids, but
-grounded text chunks remain the citation source of truth. GraphRAG augments the current
-retrieval path; it does not replace the existing vector and keyword path.
+When graph search is enabled, graph traversal yields candidate documents, clauses, or chunk
+ids, but grounded text chunks remain the citation source of truth. GraphRAG augments the
+current retrieval path; it does not replace the existing vector and keyword path.
 
 The direct `rag_worker` path is now also shaped by structured hints resolved from skill
 packs and planner/coordinator payloads.
@@ -351,22 +370,26 @@ The public `RagContract` is preserved even as these internals become more agenti
 
 ### Memory
 
-When `MEMORY_ENABLED=true`, the live runtime uses file-backed memory under `data/memory/...`.
+When `MEMORY_ENABLED=true`, the live runtime initializes a managed PostgreSQL memory store
+(`memory_records`, `memory_observations`, and `memory_episodes`) plus the legacy key/value
+`memory` table used during import and compatibility flows.
 
-Authoritative state is written to `index.json`. Human-readable `MEMORY.md` and
-`topics/*.md` are derived outputs.
+`data/memory/...` is now a projection and fallback layer rather than the normal source of
+truth. `memory_save`, `memory_load`, and `memory_list` prefer the managed store when it is
+available and project session views back to `index.json`, `MEMORY.md`, `topics/*.md`, and
+`groups/*.md` for human inspection. If the managed store is unavailable, the file store can
+still serve as a local fallback.
 
-Post-turn memory maintenance currently uses a heuristic extractor over the latest user turn.
-Conversation-scope entries may be written from structured key/value text, while user-scope
-entries require explicit memory intent such as "remember" or "save".
-
-The delegated `memory_maintainer` role still exists for explicit worker use, but the normal
-post-turn memory path is kernel-owned heuristic extraction rather than an automatic delegated
-agent run. When `MEMORY_ENABLED=false`, neither path runs and the memory tool surface disappears.
+Post-turn memory maintenance first uses the managed memory manager when configured through
+`MEMORY_MANAGER_MODE` (`shadow`, `selector`, or `live`). The older heuristic extractor remains
+as a fallback/compatibility path for explicit structured memory intent. The delegated
+`memory_maintainer` role still exists for explicit worker use, but the normal post-turn memory
+path is kernel-owned rather than an automatic delegated agent run. When `MEMORY_ENABLED=false`,
+neither path runs and the memory tool surface disappears.
 
 ### Persistence
 
-The next runtime persists:
+The next runtime persists file-backed runtime artifacts such as:
 
 - session state
 - transcripts
@@ -384,6 +407,9 @@ The usual split is:
 
 - `data/workspaces/...`: generated Markdown or text drafts, manifests, optional per-section files
 - `data/runtime/jobs/...`: job state, transcripts, events, and worker-owned job artifacts
+- PostgreSQL: documents, chunks, skills, memory, access/capability/MCP data, requirements, and
+  graph metadata
+- object storage when configured: uploaded/source-file bytes and larger persisted artifacts
 
 ## User-facing progress timeline
 
@@ -419,7 +445,7 @@ flowchart TD
     basic["RuntimeKernel.process_basic_turn()"]
     agent["RuntimeKernel.process_agent_turn()"]
     loop["QueryLoop"]
-    tools["Tools / Skills / Memory / RAG"]
+    tools["Tools / Skills / Memory / RAG / MCP"]
     jobs["RuntimeJobManager"]
     runtime["data/runtime"]
 

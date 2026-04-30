@@ -104,8 +104,17 @@ Implementation notes:
 - the live runtime now also exposes a narrow read-only indexed-document tool surface for
   exact file work:
   - `resolve_indexed_docs`
+  - `search_indexed_docs`
   - `read_indexed_doc`
   - `compare_indexed_docs`
+- adjacent document-research tools are also bound for prompt-backed agents:
+  - `document_extract`
+  - `document_compare`
+  - `document_consolidation_campaign`
+  - `template_transform`
+  - `evidence_binder`
+  - `extract_requirement_statements`
+  - `export_requirement_statements`
 - those tools share the same database-backed corpus and collection scoping as the adaptive
   controller; they are not a separate filesystem search path
 - internal fan-out is bounded and non-recursive: evidence-only workers run with
@@ -230,13 +239,27 @@ vector/keyword foundation or the stable RAG answer contract.
 
 The main RAG-oriented packs live under `data/skill_packs/rag/`:
 
-- `corpus_discovery`
-- `process_flow_identification`
-- `windowed_keyword_followup`
-- `cross_document_inventory`
-- `coverage_sufficiency_audit`
-- `negative_evidence_reporting`
+- `citation_hygiene`
+- `clause_extraction`
+- `collection_scoping`
 - `comparison_campaign`
+- `corpus_discovery`
+- `coverage_sufficiency_audit`
+- `cross_document_inventory`
+- `defense_graph_guidance`
+- `document_resolution`
+- `empty_result_recovery`
+- `graph_drift_followup`
+- `graph_freshness_and_staleness_check`
+- `graph_global_community_discovery`
+- `graph_grounding_and_resolve_back`
+- `graph_local_relationship_tracing`
+- `graph_vs_vector_source_selection`
+- `multi_document_comparison`
+- `negative_evidence_reporting`
+- `process_flow_identification`
+- `retrieval_strategy`
+- `windowed_keyword_followup`
 
 ## Retrieval summary
 
@@ -264,7 +287,10 @@ The live corpus remains DB-first:
 When GraphRAG is enabled, the corpus is effectively dual-layer:
 
 - PostgreSQL / pgvector remains the citation and chunk source of truth
-- optional Neo4j stores entity and relationship structure for multi-hop candidate discovery
+- managed GraphRAG project artifacts and graph-index metadata are stored through the
+  PostgreSQL-backed graph catalog
+- optional Neo4j compatibility can store entity and relationship structure for multi-hop
+  candidate discovery when `GRAPH_BACKEND=neo4j`
 
 ## Why the contract still matters
 
