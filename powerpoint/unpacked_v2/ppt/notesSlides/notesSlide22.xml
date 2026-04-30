@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Notes"/>
+          <p:cNvSpPr txBox="1"/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="0" y="0"/>
+            <a:ext cx="10000000" cy="1000000"/>
+          </a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:t>Skills are the system's way of injecting domain-specific guidance into agent behavior at runtime without changing code. Think of a skill as a markdown document with YAML frontmatter that gets loaded into an agent's context when it is relevant to the current task. There are 3 skill kinds: retrievable skills are guidance documents indexed for semantic search, executable skills contain runnable instructions, and hybrid skills combine both. The system has 49 skill packs organized across 7 subdirectories - one per agent type - covering everything from data analysis patterns to RAG strategies. The lifecycle works in four stages. First, SkillPackFile validates the YAML frontmatter and computes a SHA256 checksum for integrity tracking. Second, SkillIndexSync discovers markdown files, chunks them for RAG indexing, and builds an inverted index - incremental sync by checksum means only changed skills get re-indexed. Third, SkillResolver does semantic retrieval using BM25 and embedding search, filtering by agent_scope and tags, with pinned skills getting priority. Fourth, SkillRuntime merges the query, matched skills, and session context within a 4000-character budget with access control filtering. Skills run in two execution contexts: inline runs in the agent's process, fork runs in isolation. Five effort levels - empty string meaning default, low, medium, high, and xhigh - control how much compute a skill execution is allowed. The telemetry module tracks an 80 percent success SLO with a 20-use review window, and the dependency graph module uses DFS cycle detection to validate skill dependencies.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

@@ -38,7 +38,7 @@ def test_deep_rag_policy_prefers_coordinator_for_broad_research_prompt() -> None
     )
 
     assert policy.search_mode == "deep"
-    assert policy.preferred_agent == "coordinator"
+    assert policy.preferred_agent == "research_coordinator"
 
 
 def test_deep_rag_policy_prefers_full_reads_for_doc_focus_followup() -> None:

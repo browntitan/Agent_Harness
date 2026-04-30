@@ -360,7 +360,7 @@ class PolicyAwareToolNode(ToolNode):
                     "reason": (
                         "Independent tool calls were scheduled in the same executor wave."
                         if execution_mode == "parallel"
-                        else "This tool call ran alone because of wave size, budget, or concurrency constraints."
+                        else "One tool call was scheduled; details are shown on the tool row."
                     ),
                     "started_at": started_at,
                     "completed_at": completed_at,

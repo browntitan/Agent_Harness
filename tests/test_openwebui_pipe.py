@@ -1033,6 +1033,24 @@ def test_pipe_forwards_backend_tool_call_status_cards(monkeypatch) -> None:
             "why": "A runtime agent invoked a tool.",
             "waiting_on": "",
             "timestamp": 1713139200000 + (120 if done else 0),
+            "agentic_audit_item": {
+                "version": 1,
+                "item_id": "tool-call-1",
+                "kind": "tool",
+                "status": "completed" if done else "running",
+                "title": f"search_indexed_docs {'ran' if done else 'running'}",
+                "subtitle": '{"hits":1}' if done else '{"query":"agent trace"}',
+                "actor": "general",
+                "target": "search_indexed_docs",
+                "parent_id": "",
+                "group_id": "",
+                "chips": ["general", "search_indexed_docs"],
+                "started_at": "2026-04-23T10:00:00Z",
+                "completed_at": "2026-04-23T10:00:01Z" if done else "",
+                "duration_ms": 120 if done else None,
+                "input": {"query": "agent trace"},
+                "output": output,
+            },
             "agentic_tool_call": {
                 "version": 1,
                 "tool_call_id": "call-1",
@@ -1122,9 +1140,12 @@ def test_pipe_forwards_backend_tool_call_status_cards(monkeypatch) -> None:
     )
 
     tool_events = [item["data"] for item in emitted if item["data"].get("agentic_tool_call")]
+    audit_events = [item["data"] for item in emitted if item["data"].get("agentic_audit_item")]
 
     assert result == "Tool-backed answer."
     assert len(tool_events) == 2
+    assert len(audit_events) == 2
+    assert {item["agentic_audit_item"]["item_id"] for item in audit_events} == {"tool-call-1"}
     assert {item["status_id"] for item in tool_events} == {"tool-call-1"}
     assert tool_events[0]["agentic_tool_call"]["status"] == "running"
     assert tool_events[0]["agentic_tool_call"]["input"] == {"query": "agent trace"}
@@ -1162,8 +1183,24 @@ def test_pipe_forwards_backend_agent_and_parallel_audit_status_cards(monkeypatch
         "task_id": "T2",
         "why": "",
         "waiting_on": "",
-        "timestamp": 1713139200000,
-        "agentic_status": {"version": 1, "state": "active", "kind": "agent", "title": "RAG Worker", "subtitle": ""},
+            "timestamp": 1713139200000,
+            "agentic_audit_item": {
+                "version": 1,
+                "item_id": "agent-worker-T2",
+                "kind": "handoff",
+                "status": "running",
+                "title": "coordinator handed off T2 to rag_worker",
+                "subtitle": "Searching evidence for task T2.",
+                "actor": "coordinator",
+                "target": "rag_worker",
+                "parent_id": "coordinator",
+                "group_id": "worker-batch-T1-T2",
+                "chips": ["worker", "rag_worker", "task T2"],
+                "started_at": "2026-04-23T10:00:00Z",
+                "completed_at": "",
+                "duration_ms": None,
+            },
+            "agentic_status": {"version": 1, "state": "active", "kind": "agent", "title": "RAG Worker", "subtitle": ""},
         "agentic_agent_activity": {
             "version": 1,
             "activity_id": "agent-worker-rag_worker-T2-job-2",
@@ -1204,6 +1241,23 @@ def test_pipe_forwards_backend_agent_and_parallel_audit_status_cards(monkeypatch
         "why": "",
         "waiting_on": "",
         "timestamp": 1713139200001,
+        "agentic_audit_item": {
+            "version": 1,
+            "item_id": "group-worker-batch-T1-T2",
+            "kind": "parallel",
+            "status": "running",
+            "title": "Coordinator handed off 2 task(s) to worker agents",
+            "subtitle": "Coordinator dispatched this worker batch in parallel.",
+            "actor": "coordinator",
+            "target": "worker agents",
+            "parent_id": "",
+            "group_id": "worker-batch-T1-T2",
+            "chips": ["parallel", "worker batch"],
+            "members": [
+                {"agent_name": "rag_worker", "task_id": "T1", "job_id": "job-1"},
+                {"agent_name": "table_worker", "task_id": "T2", "job_id": "job-2"},
+            ],
+        },
         "agentic_status": {
             "version": 1,
             "state": "active",
@@ -1286,8 +1340,11 @@ def test_pipe_forwards_backend_agent_and_parallel_audit_status_cards(monkeypatch
 
     agent_events = [item["data"] for item in emitted if item["data"].get("agentic_agent_activity")]
     parallel_events = [item["data"] for item in emitted if item["data"].get("agentic_parallel_group")]
+    audit_events = [item["data"] for item in emitted if item["data"].get("agentic_audit_item")]
 
     assert result == "Auditable answer."
+    assert len(audit_events) == 2
+    assert {item["agentic_audit_item"]["kind"] for item in audit_events} == {"parallel", "handoff"}
     assert len(parallel_events) == 1
     assert parallel_events[0]["agentic_parallel_group"]["execution_mode"] == "parallel"
     assert len(agent_events) == 1

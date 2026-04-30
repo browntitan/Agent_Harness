@@ -142,7 +142,7 @@ extract all requirements/ shall statements from the uploaded document
     assert "requirements_inventory_intent" in decision.reasons
 
 
-def test_route_turn_suggests_coordinator_for_corpus_discovery_campaign() -> None:
+def test_route_turn_suggests_research_coordinator_for_corpus_discovery_campaign() -> None:
     settings = SimpleNamespace(
         llm_router_enabled=False,
         enable_coordinator_mode=False,
@@ -156,8 +156,26 @@ def test_route_turn_suggests_coordinator_for_corpus_discovery_campaign() -> None
     )
 
     assert decision.route == "AGENT"
-    assert decision.suggested_agent == "coordinator"
-    assert choose_agent_name(settings, decision) == "coordinator"
+    assert decision.suggested_agent == "research_coordinator"
+    assert choose_agent_name(settings, decision) == "research_coordinator"
+
+
+def test_route_turn_suggests_research_coordinator_for_deep_repository_research() -> None:
+    settings = SimpleNamespace(
+        llm_router_enabled=False,
+        enable_coordinator_mode=False,
+    )
+    decision = route_turn(
+        settings,
+        providers=SimpleNamespace(judge=None),
+        user_text="Organize this repository of documents and synthesize across all files with citations.",
+        has_attachments=False,
+        force_agent=False,
+    )
+
+    assert decision.route == "AGENT"
+    assert decision.suggested_agent == "research_coordinator"
+    assert "deep_research_campaign" in decision.reasons
 
 
 def test_route_turn_uses_coordinator_for_active_doc_focus_followup() -> None:
@@ -183,7 +201,7 @@ def test_route_turn_uses_coordinator_for_active_doc_focus_followup() -> None:
     )
 
     assert decision.route == "AGENT"
-    assert decision.suggested_agent == "coordinator"
+    assert decision.suggested_agent == "research_coordinator"
     assert "active_doc_focus_followup" in decision.reasons
 
 
@@ -334,10 +352,10 @@ def test_route_turn_suggests_graph_manager_for_graph_relationship_query() -> Non
 @pytest.mark.parametrize(
     ("query", "expected_agent"),
     [
-        ("which documents contain onboarding workflows?", "coordinator"),
-        ("identify all documents that mention onboarding", "coordinator"),
+        ("which documents contain onboarding workflows?", "research_coordinator"),
+        ("identify all documents that mention onboarding", "research_coordinator"),
         ("what docs are available about onboarding", "rag_worker"),
-        ("which documents in the default collection mention onboarding?", "coordinator"),
+        ("which documents in the default collection mention onboarding?", "research_coordinator"),
     ],
 )
 def test_route_turn_keeps_filtered_document_discovery_off_inventory_path(query: str, expected_agent: str) -> None:
@@ -618,7 +636,7 @@ def test_route_turn_hybrid_defers_structured_research_prompt_to_llm_router() -> 
 
     assert decision.router_method == "llm"
     assert decision.route == "AGENT"
-    assert decision.suggested_agent == "coordinator"
+    assert decision.suggested_agent == "research_coordinator"
 
 
 def test_route_turn_hybrid_skips_judge_for_high_confidence_graph_inventory() -> None:

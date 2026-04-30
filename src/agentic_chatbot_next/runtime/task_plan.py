@@ -825,12 +825,40 @@ def _build_multi_step_research_inventory_plan(
         ),
         TaskSpec(
             id="task_5",
-            title="Expand document review",
+            title="Expand shallow document triage",
             executor="general",
             mode="sequential",
             depends_on=["task_4"],
-            input="Build a ranked shortlist from title candidates, seed evidence, and facet matches, then expand parallel per-document review tasks.",
+            input=(
+                "Build a ranked shortlist from title candidates, seed evidence, and facet matches, then expand parallel shallow document triage tasks. "
+                "Each triage task should produce a compact research_triage_note before any expensive full-document review."
+            ),
             consumes_artifacts=["title_candidates", "doc_focus", "research_facets", "facet_matches"],
+            handoff_schema="research_inventory",
+            controller_hints={
+                **_research_inventory_controller_hints(
+                    analysis_query,
+                    workflow_phase="doc_triage_fanout",
+                    requested_collection_id=requested_collection_id,
+                    final_output_mode=final_output_mode,
+                ),
+                "dynamic_triage_fanout": True,
+                "max_parallel_triage": 6,
+                "max_optional_triage": 2,
+                "prefer_structured_final_answer": True,
+            },
+        ),
+        TaskSpec(
+            id="task_6",
+            title="Expand document review",
+            executor="general",
+            mode="sequential",
+            depends_on=["task_5"],
+            input=(
+                "Use the shallow research_triage_note handoffs to select only relevant or partially relevant documents for full review. "
+                "Do not deeply review documents triaged as irrelevant unless they are the only available evidence for a unique facet."
+            ),
+            consumes_artifacts=["title_candidates", "doc_focus", "research_facets", "facet_matches", "research_triage_note"],
             handoff_schema="research_inventory",
             controller_hints={
                 **_research_inventory_controller_hints(
@@ -846,13 +874,13 @@ def _build_multi_step_research_inventory_plan(
             },
         ),
         TaskSpec(
-            id="task_6",
+            id="task_7",
             title="Consolidate subsystem inventory",
             executor="general",
             mode="sequential",
-            depends_on=["task_5"],
+            depends_on=["task_6"],
             input=(
-                "Use the structured title_candidates, research_facets, facet_matches, and doc_digest handoffs to build a reviewed shortlist and a subsystem inventory. "
+                "Use the structured title_candidates, research_facets, facet_matches, research_triage_note, and doc_digest handoffs to build a reviewed shortlist and a subsystem inventory. "
                 "Rank documents by reviewed relevance first, then facet breadth, then evidence strength, then title/path score. "
                 "Exclude documents marked `irrelevant`. Keep `partial` documents only when they add a unique facet or subsystem. "
                 "Return JSON only with this schema:\n"
@@ -866,7 +894,7 @@ def _build_multi_step_research_inventory_plan(
                 "}\n"
                 "Do not include prose outside JSON."
             ),
-            consumes_artifacts=["title_candidates", "research_facets", "facet_matches", "doc_digest"],
+            consumes_artifacts=["title_candidates", "research_facets", "facet_matches", "research_triage_note", "doc_digest"],
             produces_artifacts=["subsystem_inventory"],
             handoff_schema="research_inventory",
             controller_hints={
@@ -880,11 +908,11 @@ def _build_multi_step_research_inventory_plan(
             },
         ),
         TaskSpec(
-            id="task_7",
+            id="task_8",
             title="Expand subsystem evidence backfill",
             executor="general",
             mode="sequential",
-            depends_on=["task_6"],
+            depends_on=["task_7"],
             input="Expand thin subsystem coverage into targeted KB evidence backfill tasks.",
             consumes_artifacts=["subsystem_inventory"],
             handoff_schema="research_inventory",

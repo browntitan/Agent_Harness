@@ -195,6 +195,8 @@ function createFetchMock(options: {
     graphs: {} as Record<string, GraphState>,
     graphRuns: {} as Record<string, Array<Record<string, unknown>>>,
     graphTuneRuns: {} as Record<string, Record<string, Record<string, unknown>>>,
+    registeredSources: {} as Record<string, Record<string, unknown>>,
+    sourceRuns: [] as Array<Record<string, unknown>>,
     accessPrincipals: [
       {
         principal_id: 'principal-user-alex',
@@ -1385,6 +1387,14 @@ function createFetchMock(options: {
       return jsonResponse(collectionsPayload())
     }
 
+    if (path === '/v1/admin/sources' && method === 'GET') {
+      return jsonResponse({
+        sources: Object.values(state.registeredSources),
+        runs: state.sourceRuns,
+        allowed_roots: ['/tmp', '/workspace'],
+      })
+    }
+
     if (path === '/v1/admin/uploads' && method === 'GET') {
       return jsonResponse(uploadedFilesPayload())
     }
@@ -1595,17 +1605,18 @@ function createFetchMock(options: {
       const form = init?.body as FormData
       const files = form ? form.getAll('files') as File[] : []
       const relativePaths = form ? form.getAll('relative_paths').map(value => String(value)) : []
+      const sourceType = form ? String(form.get('source_type') ?? 'collection_upload') : 'collection_upload'
       const operationFiles = files.map((file, index) => {
         const displayPath = relativePaths[index] || file.name
         const doc = upsertCollectionDoc(collectionId, file.name, `uploaded content for ${file.name}`, {
           sourcePath: `/uploads/${displayPath}`,
           sourceDisplayPath: displayPath,
-          sourceType: 'upload',
+          sourceType,
         })
         return {
           displayPath,
           sourcePath: `/uploads/${displayPath}`,
-          sourceType: 'upload',
+          sourceType,
           docIds: [doc.doc_id],
         }
       })
@@ -1722,6 +1733,39 @@ function createFetchMock(options: {
       return jsonResponse(payload)
     }
 
+    const graphAssistantPreflightMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/assistant\/preflight$/)
+    if (graphAssistantPreflightMatch && method === 'POST') {
+      const [, graphId] = graphAssistantPreflightMatch
+      const graph = state.graphs[graphId]
+      if (!graph) return jsonResponse({ detail: 'Graph not found.' }, 404)
+      const validation = {
+        graph_id: graphId,
+        status: 'ready',
+        ok: true,
+        runtime: { ok: true, cli_available: true, provider: 'openai' },
+        connectivity: { ok: true, status: 'ready', models: ['nemotron-cascade-2:30b', 'nomic-embed-text:latest'] },
+        extraction_preflight: { ok: true, status: 'ready', detail: 'Extraction sample succeeded.' },
+        community_report_preflight: { ok: true, status: 'ready', detail: 'Community report prompt is available.' },
+        resolved_source_count: graph.source_doc_ids.length,
+      }
+      return jsonResponse({
+        graph_id: graphId,
+        validation,
+        friendly: {
+          ready: true,
+          status: 'ready',
+          headline: 'Ready to build',
+          source_count: graph.source_doc_ids.length,
+          runtime_ok: true,
+          model_endpoint_status: 'ready',
+          extraction_status: 'ready',
+          community_report_status: 'ready',
+          blockers: [],
+          warnings: [],
+        },
+      })
+    }
+
     const graphBuildMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/(build|refresh)$/)
     if (graphBuildMatch && method === 'POST') {
       const [, graphId, action] = graphBuildMatch
@@ -1757,6 +1801,30 @@ function createFetchMock(options: {
         status: 'ready',
         detail: `${action} completed successfully.`,
         logs: graph.logs,
+      })
+    }
+
+    const graphSmokeMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/assistant\/smoke-test$/)
+    if (graphSmokeMatch && method === 'POST') {
+      const [, graphId] = graphSmokeMatch
+      const graph = state.graphs[graphId]
+      if (!graph) return jsonResponse({ detail: 'Graph not found.' }, 404)
+      return jsonResponse({
+        graph_id: graphId,
+        query: 'What are the main entities and relationships in this graph?',
+        friendly: {
+          status: graph.query_ready ? 'grounded' : 'source_candidates_only',
+          query_ready: graph.query_ready,
+          result_count: 1,
+          citation_count: graph.query_ready ? 1 : 0,
+          message: graph.query_ready ? 'Graph returned cited evidence.' : 'Graph returned source candidates only; use RAG grounding before answering.',
+        },
+        result: {
+          query_ready: graph.query_ready,
+          evidence_status: graph.query_ready ? 'grounded_graph_evidence' : 'source_candidates_only',
+          results: [{ text: 'Vendor Risk Graph evidence' }],
+          citations: graph.query_ready ? [{ citation_id: 'C1', doc_id: graph.source_doc_ids[0] ?? 'doc-1' }] : [],
+        },
       })
     }
 
@@ -2379,19 +2447,18 @@ describe('App', () => {
     fireEvent.click(within(inspector).getByRole('button', { name: 'Expand' }))
     expect(await within(inspector).findAllByText('text-embedding-3-large')).toHaveLength(2)
 
-    fireEvent.change(screen.getByLabelText('Host Paths'), {
-      target: { value: '/tmp/regional_spend.csv' },
+    fireEvent.change(screen.getByLabelText('Collection Upload Files Input'), {
+      target: { files: [new File(['regional spend'], 'regional_spend.csv', { type: 'text/csv' })] },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Ingest Host Paths' }))
 
     await waitFor(() => expect(within(getSection('Documents')).getByRole('button', { name: /^regional_spend\.csv\b/ })).toBeInTheDocument())
     fireEvent.click(within(getSection('Documents')).getByRole('button', { name: /^regional_spend\.csv\b/ }))
-    await waitFor(() => expect(within(getSection('Document Viewer')).getAllByText(/ingested content for regional_spend.csv/).length).toBeGreaterThan(0))
+    await waitFor(() => expect(within(getSection('Document Viewer')).getAllByText(/uploaded content for regional_spend.csv/).length).toBeGreaterThan(0))
 
     fireEvent.click(screen.getByRole('button', { name: 'Reindex' }))
     await waitFor(() => expect(within(getSection('Document Viewer')).getAllByText(/reindexed/).length).toBeGreaterThan(0))
     fireEvent.click(within(getSection('Document Viewer')).getByRole('tab', { name: 'Raw' }))
-    expect(within(getSection('Document Viewer')).getAllByText(/ingested content for regional_spend.csv/).length).toBeGreaterThan(0)
+    expect(within(getSection('Document Viewer')).getAllByText(/uploaded content for regional_spend.csv/).length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delete this document?' })).getByRole('button', { name: 'Delete' }))
@@ -2415,19 +2482,20 @@ describe('App', () => {
 
     openSection('Collections')
 
-    expect(await screen.findByRole('heading', { name: 'Add Documents', level: 3 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Knowledge Builder', level: 3 })).toBeInTheDocument()
     expect(screen.getByLabelText('Supported document types')).toHaveTextContent('.docx')
     expect(screen.getByLabelText('Supported document types')).toHaveTextContent('.xlsx')
-    expect(await screen.findByLabelText('Host Paths')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Upload Files' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Upload Folder' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Upload Files' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Upload Folder' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Local Paths')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Sync Configured Sources' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Configured Sync' }))
     expect(await screen.findByRole('button', { name: 'Sync Configured Sources' })).toBeInTheDocument()
-    expect(screen.queryByLabelText('Host Paths')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Local Paths')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Ingest Host Path' }))
-    expect(await screen.findByLabelText('Host Paths')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Local Path' }))
+    expect(await screen.findByLabelText('Local Paths')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Preview Scan' })).toBeInTheDocument()
   })
 
   it('manages uploaded files in their own workspace', async () => {
@@ -2595,7 +2663,7 @@ describe('App', () => {
     expect(uploadForm.getAll('relative_paths')).toEqual(['alpha/same.txt', 'beta/same.txt'])
   })
 
-  it('keeps uploaded files out of graph collection document selection', async () => {
+  it('includes collection uploads in graph collection document selection', async () => {
     const { fetchMock } = createFetchMock()
     vi.stubGlobal('fetch', fetchMock)
     const legacyUpload = new FormData()
@@ -2617,7 +2685,7 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: 'Upload Files' })).not.toBeInTheDocument()
     fireEvent.click(within(graphSection).getByRole('tab', { name: 'Choose Documents' }))
     expect(await within(graphSection).findByText('knowledge_base/default-notes.md')).toBeInTheDocument()
-    expect(within(graphSection).queryByText('legacy-upload.txt')).not.toBeInTheDocument()
+    expect((await within(graphSection).findAllByText('legacy-upload.txt')).length).toBeGreaterThan(0)
   })
 
   it('keeps brand new empty collections available in the graph workspace dropdown', async () => {
@@ -2729,6 +2797,7 @@ describe('App', () => {
     const graphWorkspace = getSection('Graph Workspace')
     expect(within(graphWorkspace).getByRole('tab', { name: 'Use Entire Collection' })).toHaveAttribute('aria-selected', 'true')
     await waitFor(() => expect(within(graphWorkspace).getByText('Build graph from 1 indexed documents')).toBeInTheDocument())
+    fireEvent.click(within(graphWorkspace).getByRole('button', { name: 'Show Advanced GraphRAG JSON' }))
 
     fireEvent.change(screen.getByLabelText('Graph Prompt Overrides'), {
       target: { value: '{"extract_graph.txt":"Use vendor-centric extraction."}' },
@@ -2763,8 +2832,8 @@ describe('App', () => {
     expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/graphs/vendor-risk/research-tune')).toBe(true)
     expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/graphs/vendor-risk/research-tune/vendor-risk-tune-1/apply')).toBe(true)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }))
-    await waitFor(() => expect(within(getSection('Graph Inspector')).getByText('Not Query Ready')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Run Preflight' }))
+    await waitFor(() => expect(within(graphWorkspace).getByText('Ready to build')).toBeInTheDocument())
 
     fireEvent.click(screen.getByRole('button', { name: 'Build' }))
     await waitFor(() => expect(within(getSection('Graph Inspector')).getByText('Query Ready')).toBeInTheDocument())

@@ -308,9 +308,10 @@ def decide_task_decomposition(
             original_agent=original_agent,
         )
     if _BROAD_OR_STAGED_RE.search(normalized) or len(slices) > 3:
+        orchestration_agent = "research_coordinator" if original_agent == "research_coordinator" else "coordinator"
         return TaskDecompositionDecision(
             is_mixed_intent=True,
-            selected_agent="coordinator",
+            selected_agent=orchestration_agent,
             route_kind="coordinator",
             reason="mixed_intent_requires_orchestration",
             slices=slices,

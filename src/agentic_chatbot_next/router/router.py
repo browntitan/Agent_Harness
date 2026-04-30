@@ -46,6 +46,21 @@ _GRAPH_ADMIN_RE = re.compile(
     r"|\bgraph\s+(?:build|index|import|refresh|rebuild|delete|remove)\b",
     re.IGNORECASE,
 )
+_DEEP_RESEARCH_RE = re.compile(
+    r"\b("
+    r"deep\s+research|deep\s+rag|long[-\s]?running\s+research|multi[-\s]?hop|"
+    r"identify\s+all\s+(?:documents|docs|files)|"
+    r"which\s+(?:documents|docs|files)\s+.*\b(?:mention|contain|discuss|describe|cover)\b|"
+    r"(?:documents|docs|files)\s+that\s+(?:mention|contain|discuss|describe|cover)|"
+    r"organize\s+(?:this\s+|the\s+)?(?:repository|corpus|documents|docs|files)|"
+    r"synthesi[sz]e\s+(?:across|over)\s+(?:all\s+|the\s+)?(?:documents|docs|files|corpus|repository)|"
+    r"across\s+(?:all\s+|the\s+whole\s+|the\s+entire\s+)?(?:documents|docs|files|corpus|repository)|"
+    r"whole\s+(?:repository|corpus|knowledge\s*base)|entire\s+(?:repository|corpus|knowledge\s*base)|"
+    r"defense\s+(?:program|repository|corpus)|large\s+repository\s+of\s+(?:documents|files)|"
+    r"major\s+subsystems?|corpus[-\s]?scale"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -65,10 +80,11 @@ class RouterTargets:
     default_agent: str = "general"
     basic_agent: str = "basic"
     coordinator_agent: str = "coordinator"
+    research_agent: str = "research_coordinator"
     data_analyst_agent: str = "data_analyst"
     rag_agent: str = "rag_worker"
     graph_agent: str = "graph_manager"
-    suggested_agents: tuple[str, ...] = ("coordinator", "data_analyst", "rag_worker", "graph_manager")
+    suggested_agents: tuple[str, ...] = ("coordinator", "research_coordinator", "data_analyst", "rag_worker", "graph_manager")
     descriptions: dict[str, str] = field(default_factory=dict)
 
 
@@ -81,6 +97,7 @@ def build_router_targets(registry: Any | None = None) -> RouterTargets:
         return RouterTargets(
             descriptions={
                 "coordinator": "Manager-only role for explicit worker orchestration.",
+                "research_coordinator": "Manager role for long-running deep research over indexed corpora.",
                 "data_analyst": "Tabular data analysis specialist using sandboxed Python tools.",
                 "rag_worker": "Grounded document worker that returns the stable RAG contract.",
                 "graph_manager": "Managed graph retrieval and source-planning specialist.",
@@ -90,6 +107,7 @@ def build_router_targets(registry: Any | None = None) -> RouterTargets:
     default_agent = getattr(registry, "get_default_agent_name", lambda: "general")()
     basic_agent = getattr(registry, "get_basic_agent_name", lambda: "basic")()
     coordinator_agent = getattr(registry, "get_manager_agent_name", lambda: "coordinator")()
+    research_agent = getattr(registry, "get_research_agent_name", lambda: "research_coordinator")()
     data_analyst_agent = getattr(registry, "get_data_analyst_agent_name", lambda: "data_analyst")()
     rag_agent = getattr(registry, "get_rag_agent_name", lambda: "rag_worker")()
     graph_agent = getattr(registry, "get_graph_agent_name", lambda: "graph_manager")()
@@ -103,13 +121,14 @@ def build_router_targets(registry: Any | None = None) -> RouterTargets:
         descriptions[agent.name] = agent.description
         if agent.name not in suggested:
             suggested.append(agent.name)
-    for name in (coordinator_agent, data_analyst_agent, rag_agent, graph_agent, default_agent):
+    for name in (coordinator_agent, research_agent, data_analyst_agent, rag_agent, graph_agent, default_agent):
         if name and name != basic_agent and name not in suggested:
             suggested.append(name)
     return RouterTargets(
         default_agent=default_agent or "general",
         basic_agent=basic_agent or "basic",
         coordinator_agent=coordinator_agent or "coordinator",
+        research_agent=research_agent or "research_coordinator",
         data_analyst_agent=data_analyst_agent or "data_analyst",
         rag_agent=rag_agent or "rag_worker",
         graph_agent=graph_agent or "graph_manager",
@@ -124,6 +143,13 @@ def is_graph_retrieval_request(user_text: str) -> bool:
     if classify_inventory_query(user_text) != INVENTORY_QUERY_NONE:
         return False
     return bool(_GRAPH_RETRIEVAL_RE.search(str(user_text or "")))
+
+
+def is_deep_research_request(user_text: str) -> bool:
+    text = str(user_text or "")
+    if not text.strip():
+        return False
+    return bool(_DEEP_RESEARCH_RE.search(text))
 
 def route_message(
     user_text: str,
@@ -165,6 +191,8 @@ def route_message(
             suggested = targets.data_analyst_agent
         elif inventory_query_type != INVENTORY_QUERY_NONE:
             suggested = targets.default_agent
+        elif is_deep_research_request(routing_text):
+            suggested = targets.research_agent
         elif compiled.coordinator_campaign_intent.matches(routing_text, normalized):
             suggested = targets.coordinator_agent
         elif compiled.rag_grounding_intent.matches(routing_text, normalized):
@@ -271,22 +299,26 @@ def route_message(
 
     if is_active_doc_focus_followup(routing_text, session_metadata):
         reasons.append("active_doc_focus_followup")
+        suggested_agent = targets.research_agent if is_deep_research_request(routing_text) else targets.coordinator_agent
         return RouterDecision(
             route="AGENT",
             confidence=0.95,
             reasons=reasons,
-            suggested_agent=targets.coordinator_agent,
+            suggested_agent=suggested_agent,
             semantic_contract=build_deterministic_semantic_contract(
                 user_text=routing_text,
                 route="AGENT",
-                suggested_agent=targets.coordinator_agent,
+                suggested_agent=suggested_agent,
                 confidence=0.95,
                 reasoning="active_doc_focus_followup",
                 session_metadata=metadata,
             ),
         )
 
-    if compiled.coordinator_campaign_intent.matches(routing_text, normalized):
+    if is_deep_research_request(routing_text):
+        reasons.append("deep_research_campaign")
+        suggested_agent = targets.research_agent
+    elif compiled.coordinator_campaign_intent.matches(routing_text, normalized):
         reasons.append("document_research_campaign")
         suggested_agent = targets.coordinator_agent
     elif compiled.rag_grounding_intent.matches(routing_text, normalized):

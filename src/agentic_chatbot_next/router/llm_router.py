@@ -37,6 +37,7 @@ from agentic_chatbot_next.utils.json_utils import extract_json
 from agentic_chatbot_next.router.router import (
     RouterDecision,
     build_router_targets,
+    is_deep_research_request,
     is_graph_retrieval_request,
     is_requirements_inventory_request,
     route_message,
@@ -81,6 +82,7 @@ Agent suggestion guidance:
 - Suggest `general` for requirements extraction, shall-statement inventories, FAR/DFARS clause obligations, and mandatory-language harvesting from prose documents
 - Suggest `graph_manager` for graph-backed evidence, GraphRAG, graph relationship, entity network, dependency, source-planning, and named graph query requests
 - Suggest `rag_worker` for direct grounded questions answered from a specific document or focused KB lookup
+- Suggest `research_coordinator` for deep research, multi-hop, repository organization, corpus-wide synthesis, or long-running document research campaigns
 - Suggest `coordinator` for broad research campaigns, corpus-wide document discovery, multi-step investigation, or structured `Goal/Context/Deliverable` prompts that ask for a list of relevant documents
 - Suggest `coordinator` for follow-up requests that ask to summarize or explain the candidate documents already identified earlier in the conversation
 - Suggest `data_analyst` for spreadsheet, CSV, workbook, or tabular-analysis requests
@@ -352,6 +354,8 @@ def _deterministic_fast_path(
                 suggested = targets.data_analyst_agent
             elif inventory_query_type != INVENTORY_QUERY_NONE:
                 suggested = targets.default_agent
+            elif is_deep_research_request(user_text):
+                suggested = targets.research_agent
             elif patterns.coordinator_campaign_intent.matches(user_text, normalized):
                 suggested = targets.coordinator_agent
             elif patterns.rag_grounding_intent.matches(user_text, normalized):
@@ -793,6 +797,10 @@ def _call_llm_router(
     if route == "AGENT":
         if is_requirements_inventory_request(user_text):
             suggested_agent = "general"
+        elif is_deep_research_request(user_text):
+            valid_agents = {str(item).strip().lower() for item in valid_suggested_agents if str(item).strip()}
+            if "research_coordinator" in valid_agents:
+                suggested_agent = "research_coordinator"
         suggested_agent = suggested_agent or default_agent_for_semantic_contract(
             contract,
             fallback_suggested_agent=deterministic.suggested_agent,

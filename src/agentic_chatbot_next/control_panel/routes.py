@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import fnmatch
+import hashlib
 import json
 import re
 import shutil
+import subprocess
+from threading import Thread
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
@@ -86,7 +90,14 @@ UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024
 MAX_COLLECTION_UPLOAD_FILES = 2_000
 MAX_COLLECTION_UPLOAD_BYTES = 512 * 1024 * 1024
 UPLOAD_SOURCE_TYPE = "upload"
+COLLECTION_UPLOAD_SOURCE_TYPE = "collection_upload"
+LOCAL_FOLDER_SOURCE_TYPE = "local_folder"
+LOCAL_REPO_SOURCE_TYPE = "local_repo"
 CONTROL_PANEL_UPLOAD_COLLECTION_ID = "control-panel-uploads"
+SOURCE_REGISTRY_FILENAME = "source_registry.json"
+SOURCE_REFRESH_RUNS_FILENAME = "source_refresh_runs.json"
+MAX_SOURCE_SCAN_FILES = 10_000
+MAX_SOURCE_SCAN_HASH_BYTES = 1024 * 1024 * 1024
 CONTROL_PANEL_REQUIRED_ROUTES: Dict[str, List[str]] = {
     "dashboard": ["/v1/admin/overview"],
     "architecture": ["/v1/admin/architecture", "/v1/admin/architecture/activity"],
@@ -102,6 +113,19 @@ CONTROL_PANEL_REQUIRED_ROUTES: Dict[str, List[str]] = {
     "operations": ["/v1/admin/operations"],
 }
 COLLECTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _dedupe(items: List[str] | tuple[str, ...]) -> List[str]:
+    seen: set[str] = set()
+    result: List[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 class ConfigChangeRequest(BaseModel):
@@ -142,6 +166,43 @@ class PathIngestRequest(BaseModel):
 
 class CollectionCreateRequest(BaseModel):
     collection_id: str = Field(..., min_length=1)
+    actor: str = "control-panel"
+
+
+class SourceScanRequest(BaseModel):
+    paths: List[str] = Field(default_factory=list)
+    source_kind: str = LOCAL_FOLDER_SOURCE_TYPE
+    collection_id: Optional[str] = None
+    include_globs: List[str] = Field(default_factory=list)
+    exclude_globs: List[str] = Field(default_factory=list)
+    metadata_profile: str = "auto"
+    actor: str = "control-panel"
+
+
+class SourceRegisterRequest(SourceScanRequest):
+    source_id: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+class SourceRefreshRequest(BaseModel):
+    metadata_profile: str = "auto"
+    metadata_enrichment: str = "deterministic"
+    index_preview: bool = False
+    background: bool = False
+    actor: str = "control-panel"
+
+
+class GraphAssistantSuggestRequest(BaseModel):
+    collection_id: str = ""
+    intent: str = "general"
+    source_doc_ids: List[str] = Field(default_factory=list)
+    actor: str = "control-panel"
+
+
+class GraphSmokeTestRequest(BaseModel):
+    query: str = ""
+    methods: List[str] = Field(default_factory=list)
+    limit: int = 6
     actor: str = "control-panel"
 
 
@@ -815,6 +876,440 @@ def _normalize_collection_id(value: str) -> str:
             detail="Collection IDs may contain letters, numbers, dots, underscores, and hyphens only.",
         )
     return collection_id
+
+
+def _normalize_source_kind(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if normalized in {"repo", "repository", "local_repository"}:
+        return LOCAL_REPO_SOURCE_TYPE
+    if normalized in {"folder", "directory", "local_directory"}:
+        return LOCAL_FOLDER_SOURCE_TYPE
+    if normalized in {LOCAL_FOLDER_SOURCE_TYPE, LOCAL_REPO_SOURCE_TYPE}:
+        return normalized
+    raise HTTPException(status_code=400, detail="Source kind must be local_folder or local_repo.")
+
+
+def _normalize_source_id(value: str, *, fallback: str = "") -> str:
+    normalized = str(value or fallback or "").strip()
+    if not normalized:
+        normalized = f"src_{uuid.uuid4().hex[:12]}"
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized).strip(".-_") or f"src_{uuid.uuid4().hex[:12]}"
+    if not SOURCE_ID_RE.match(normalized):
+        raise HTTPException(
+            status_code=400,
+            detail="Source ID must start with a letter or number and contain only letters, numbers, '.', '_' or '-'.",
+        )
+    return normalized[:128]
+
+
+def _allowed_source_roots(settings: Any) -> List[Path]:
+    configured = list(getattr(settings, "control_panel_source_allowed_roots", ()) or [])
+    if not configured:
+        configured = [
+            getattr(settings, "kb_dir", None),
+            *list(getattr(settings, "kb_extra_dirs", ()) or ()),
+            getattr(settings, "project_root", None),
+            getattr(settings, "data_dir", None),
+        ]
+    roots: List[Path] = []
+    seen: set[str] = set()
+    for raw in configured:
+        if raw is None:
+            continue
+        try:
+            root = Path(raw).expanduser().resolve()
+        except Exception:
+            continue
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(root)
+    return roots
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _require_allowed_source_path(settings: Any, path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    allowed_roots = _allowed_source_roots(settings)
+    if not allowed_roots or not any(_path_is_within(resolved, root) for root in allowed_roots):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Local source path is outside the configured allowed roots. "
+                "Set CONTROL_PANEL_SOURCE_ALLOWED_ROOTS to approve this folder."
+            ),
+        )
+    return resolved
+
+
+def _matches_globs(relative_path: str, include_globs: List[str], exclude_globs: List[str]) -> bool:
+    normalized = str(relative_path or "").replace("\\", "/")
+    includes = [str(item).strip() for item in include_globs if str(item).strip()]
+    excludes = [str(item).strip() for item in exclude_globs if str(item).strip()]
+    if includes and not any(fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(Path(normalized).name, pattern) for pattern in includes):
+        return False
+    if excludes and any(fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(Path(normalized).name, pattern) for pattern in excludes):
+        return False
+    return True
+
+
+def _file_fingerprint(path: Path) -> Dict[str, Any]:
+    stat = path.stat()
+    size = int(stat.st_size)
+    sha256 = ""
+    if size <= MAX_SOURCE_SCAN_HASH_BYTES:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        sha256 = digest.hexdigest()
+    return {
+        "size_bytes": size,
+        "mtime_ns": int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+        "sha256": sha256,
+    }
+
+
+def _git_source_info(path: Path) -> Dict[str, Any]:
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return {"available": False}
+    if root.returncode != 0:
+        return {"available": False}
+    repo_root = Path(root.stdout.strip() or path).resolve()
+    info: Dict[str, Any] = {"available": True, "root_path": str(repo_root)}
+    for key, args in {
+        "branch": ["rev-parse", "--abbrev-ref", "HEAD"],
+        "commit": ["rev-parse", "HEAD"],
+    }.items():
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repo_root), *args],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            continue
+        if result.returncode == 0:
+            info[key] = result.stdout.strip()
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if status.returncode == 0:
+            info["dirty"] = bool(status.stdout.strip())
+    except Exception:
+        pass
+    return info
+
+
+def _scan_source_paths(
+    settings: Any,
+    *,
+    paths: List[str],
+    source_kind: str,
+    collection_id: str = "",
+    include_globs: List[str] | None = None,
+    exclude_globs: List[str] | None = None,
+    metadata_profile: str = "auto",
+) -> Dict[str, Any]:
+    normalized_kind = _normalize_source_kind(source_kind)
+    include = [str(item).strip() for item in (include_globs or []) if str(item).strip()]
+    exclude = [str(item).strip() for item in (exclude_globs or []) if str(item).strip()]
+    requested_paths = [str(item).strip() for item in paths if str(item).strip()]
+    files: List[Dict[str, Any]] = []
+    missing_paths: List[str] = []
+    blocked_paths: List[str] = []
+    warnings: List[str] = []
+    duplicate_paths: List[str] = []
+    seen_display_paths: set[str] = set()
+    root_infos: List[Dict[str, Any]] = []
+    scanned_file_count = 0
+
+    for raw_path in requested_paths:
+        try:
+            root_path = _require_allowed_source_path(settings, Path(raw_path))
+        except HTTPException:
+            blocked_paths.append(str(Path(raw_path).expanduser()))
+            continue
+        if not root_path.exists():
+            missing_paths.append(str(root_path))
+            continue
+        git_info = _git_source_info(root_path) if normalized_kind == LOCAL_REPO_SOURCE_TYPE else {}
+        if normalized_kind == LOCAL_REPO_SOURCE_TYPE and not git_info.get("available"):
+            warnings.append(f"{root_path} is not a Git repository; scanning it as a local folder.")
+        root_infos.append({"path": str(root_path), "kind": normalized_kind, "git": git_info})
+        scan_root = Path(str(git_info.get("root_path") or root_path)) if git_info.get("available") else root_path
+        candidates = [root_path] if root_path.is_file() else sorted(item for item in root_path.rglob("*") if item.is_file())
+        for candidate in candidates:
+            scanned_file_count += 1
+            if scanned_file_count > MAX_SOURCE_SCAN_FILES:
+                warnings.append(f"Scan stopped after {MAX_SOURCE_SCAN_FILES} files. Narrow the path or add include/exclude globs.")
+                break
+            try:
+                resolved = candidate.resolve()
+                display_path = (
+                    resolved.relative_to(scan_root).as_posix()
+                    if resolved != scan_root and _path_is_within(resolved, scan_root)
+                    else resolved.name
+                )
+            except Exception:
+                display_path = candidate.name
+            if not _matches_globs(display_path, include, exclude):
+                continue
+            skip_reason = _collection_candidate_skip_reason(candidate)
+            fingerprint: Dict[str, Any] = {}
+            size_bytes = 0
+            try:
+                fingerprint = _file_fingerprint(candidate)
+                size_bytes = int(fingerprint.get("size_bytes") or 0)
+            except Exception as exc:
+                skip_reason = skip_reason or f"Could not read file: {exc}"
+            duplicate = display_path in seen_display_paths
+            if duplicate:
+                duplicate_paths.append(display_path)
+            seen_display_paths.add(display_path)
+            files.append(
+                {
+                    "display_path": display_path,
+                    "filename": candidate.name,
+                    "source_path": str(candidate),
+                    "source_type": normalized_kind,
+                    "supported": not bool(skip_reason),
+                    "outcome": "previewed" if not skip_reason else "skipped",
+                    "error": skip_reason,
+                    "duplicate_display_path": duplicate,
+                    "size_bytes": size_bytes,
+                    "fingerprint": fingerprint,
+                }
+            )
+        if scanned_file_count > MAX_SOURCE_SCAN_FILES:
+            break
+
+    supported_files = [item for item in files if bool(item.get("supported"))]
+    skipped_files = [item for item in files if not bool(item.get("supported"))]
+    filename_counts = Counter(str(item.get("filename") or "") for item in files if str(item.get("filename") or "").strip())
+    duplicate_filenames = sorted(filename for filename, count in filename_counts.items() if count > 1)
+    total_size = sum(int(item.get("size_bytes") or 0) for item in supported_files)
+    chunk_size = max(1, int(getattr(settings, "chunk_size", 900) or 900))
+    estimated_chunks = sum(max(1, int((int(item.get("size_bytes") or 0) + chunk_size - 1) / chunk_size)) for item in supported_files)
+    status = "ready" if supported_files and not blocked_paths and not missing_paths else "partial" if supported_files else "failed"
+    return {
+        "object": "source.scan",
+        "status": status,
+        "source_kind": normalized_kind,
+        "collection_id": collection_id,
+        "metadata_profile": str(metadata_profile or "auto"),
+        "requested_paths": requested_paths,
+        "allowed_roots": [str(root) for root in _allowed_source_roots(settings)],
+        "roots": root_infos,
+        "summary": {
+            "supported_count": len(supported_files),
+            "skipped_count": len(skipped_files),
+            "missing_count": len(missing_paths),
+            "blocked_count": len(blocked_paths),
+            "duplicate_display_path_count": len(set(duplicate_paths)),
+            "duplicate_filename_count": len(duplicate_filenames),
+            "total_size_bytes": total_size,
+            "estimated_chunks": estimated_chunks,
+        },
+        "files": files,
+        "supported_files": supported_files[:500],
+        "skipped_files": skipped_files[:200],
+        "missing_paths": missing_paths,
+        "blocked_paths": blocked_paths,
+        "duplicate_display_paths": sorted(set(duplicate_paths)),
+        "duplicate_filenames": duplicate_filenames,
+        "warnings": _dedupe(warnings),
+    }
+
+
+def _source_registry_path(overlay_store: OverlayStore) -> Path:
+    return overlay_store.root_dir / SOURCE_REGISTRY_FILENAME
+
+
+def _source_runs_path(overlay_store: OverlayStore) -> Path:
+    return overlay_store.root_dir / SOURCE_REFRESH_RUNS_FILENAME
+
+
+def _read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
+    if not path.exists():
+        return dict(default)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return dict(default)
+    return dict(payload) if isinstance(payload, dict) else dict(default)
+
+
+def _write_json_file(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _load_source_registry(overlay_store: OverlayStore) -> Dict[str, Any]:
+    payload = _read_json_file(_source_registry_path(overlay_store), {"schema_version": 1, "sources": []})
+    payload.setdefault("schema_version", 1)
+    payload.setdefault("sources", [])
+    if not isinstance(payload["sources"], list):
+        payload["sources"] = []
+    return payload
+
+
+def _save_source_registry(overlay_store: OverlayStore, payload: Dict[str, Any]) -> None:
+    payload["sources"] = list(payload.get("sources") or [])
+    _write_json_file(_source_registry_path(overlay_store), payload)
+
+
+def _load_source_runs(overlay_store: OverlayStore) -> Dict[str, Any]:
+    payload = _read_json_file(_source_runs_path(overlay_store), {"schema_version": 1, "runs": []})
+    payload.setdefault("schema_version", 1)
+    payload.setdefault("runs", [])
+    if not isinstance(payload["runs"], list):
+        payload["runs"] = []
+    return payload
+
+
+def _upsert_source_run(overlay_store: OverlayStore, run: Dict[str, Any]) -> None:
+    payload = _load_source_runs(overlay_store)
+    runs = [dict(item) for item in list(payload.get("runs") or []) if str(item.get("run_id") or "") != str(run.get("run_id") or "")]
+    runs.insert(0, dict(run))
+    payload["runs"] = runs[:100]
+    _write_json_file(_source_runs_path(overlay_store), payload)
+
+
+def _source_record_by_id(overlay_store: OverlayStore, source_id: str) -> Dict[str, Any] | None:
+    registry = _load_source_registry(overlay_store)
+    for record in list(registry.get("sources") or []):
+        if str(record.get("source_id") or "") == str(source_id or ""):
+            return dict(record)
+    return None
+
+
+def _source_fingerprint_map(scan: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(item.get("display_path") or ""): dict(item.get("fingerprint") or {})
+        for item in list(scan.get("files") or [])
+        if bool(item.get("supported")) and str(item.get("display_path") or "").strip()
+    }
+
+
+def _source_scan_diff(previous: Dict[str, Any] | None, current: Dict[str, Any]) -> Dict[str, Any]:
+    prior = _source_fingerprint_map(previous or {})
+    now = _source_fingerprint_map(current)
+    added = sorted(path for path in now if path not in prior)
+    deleted = sorted(path for path in prior if path not in now)
+    changed = sorted(path for path in now if path in prior and now[path] != prior[path])
+    unchanged = sorted(path for path in now if path in prior and now[path] == prior[path])
+    return {
+        "added": added,
+        "changed": changed,
+        "deleted": deleted,
+        "unchanged": unchanged,
+        "added_count": len(added),
+        "changed_count": len(changed),
+        "deleted_count": len(deleted),
+        "unchanged_count": len(unchanged),
+    }
+
+
+def _candidate_identity(source_kind: str, source_id: str, display_path: str) -> str:
+    return f"{_normalize_source_kind(source_kind)}:{source_id}:{display_path}"
+
+
+def _candidates_from_source_scan(
+    scan: Dict[str, Any],
+    *,
+    source_id: str,
+    collection_id: str,
+    only_display_paths: set[str] | None = None,
+) -> List[CollectionIngestCandidate]:
+    source_kind = _normalize_source_kind(str(scan.get("source_kind") or ""))
+    candidates: List[CollectionIngestCandidate] = []
+    for item in list(scan.get("files") or []):
+        if not bool(item.get("supported")):
+            continue
+        display_path = str(item.get("display_path") or "").strip()
+        if only_display_paths is not None and display_path not in only_display_paths:
+            continue
+        source_path = str(item.get("source_path") or "").strip()
+        if not source_path:
+            continue
+        candidates.append(
+            CollectionIngestCandidate(
+                absolute_path=Path(source_path),
+                source_display_path=display_path,
+                source_type=source_kind,
+                collection_id=collection_id,
+                source_identity=_candidate_identity(source_kind, source_id, display_path),
+                source_metadata={
+                    "registered_source_id": source_id,
+                    "source_kind": source_kind,
+                    "source_display_path": display_path,
+                    "source_fingerprint": dict(item.get("fingerprint") or {}),
+                },
+            )
+        )
+    return candidates
+
+
+def _delete_removed_source_docs(
+    runtime: Any,
+    *,
+    tenant_id: str,
+    collection_id: str,
+    source_id: str,
+    source_kind: str,
+    deleted_display_paths: List[str],
+) -> List[str]:
+    doc_store = runtime.bot.ctx.stores.doc_store
+    deleted_identities = {
+        _candidate_identity(source_kind, source_id, display_path)
+        for display_path in deleted_display_paths
+    }
+    if not deleted_identities:
+        return []
+    deleted_doc_ids: List[str] = []
+    try:
+        records = doc_store.list_documents(
+            source_type=_normalize_source_kind(source_kind),
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+        )
+    except TypeError:
+        records = doc_store.list_documents(tenant_id=tenant_id, collection_id=collection_id)
+    for record in records:
+        if str(getattr(record, "source_identity", "") or "") not in deleted_identities:
+            continue
+        doc_id = str(getattr(record, "doc_id", "") or "")
+        if not doc_id:
+            continue
+        doc_store.delete_document(doc_id, tenant_id=tenant_id)
+        deleted_doc_ids.append(doc_id)
+    return deleted_doc_ids
 
 
 def _embedding_model_for_settings(settings: Any) -> str:
@@ -1665,6 +2160,166 @@ def _preview_collection_candidates(
     result["status"] = "preview" if not result.get("failed_count") else "partial"
     result["preview"] = True
     return result
+
+
+def _refresh_registered_source(
+    runtime: Any,
+    overlay_store: OverlayStore,
+    *,
+    source_id: str,
+    tenant_id: str,
+    user_id: str,
+    request: SourceRefreshRequest,
+    run_id: str = "",
+) -> Dict[str, Any]:
+    record = _source_record_by_id(overlay_store, source_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Registered source not found.")
+    collection_id = _normalize_collection_id(str(record.get("collection_id") or ""))
+    source_kind = _normalize_source_kind(str(record.get("source_kind") or LOCAL_FOLDER_SOURCE_TYPE))
+    scan = _scan_source_paths(
+        runtime.settings,
+        paths=[str(item) for item in list(record.get("paths") or [])],
+        source_kind=source_kind,
+        collection_id=collection_id,
+        include_globs=[str(item) for item in list(record.get("include_globs") or [])],
+        exclude_globs=[str(item) for item in list(record.get("exclude_globs") or [])],
+        metadata_profile=request.metadata_profile,
+    )
+    changes = _source_scan_diff(dict(record.get("last_scan") or {}), scan)
+    changed_paths = set(changes["added"]) | set(changes["changed"])
+    has_prior_refresh = bool(record.get("last_refresh"))
+    candidates = _candidates_from_source_scan(
+        scan,
+        source_id=source_id,
+        collection_id=collection_id,
+        only_display_paths=changed_paths if has_prior_refresh else None,
+    )
+    deleted_doc_ids: List[str] = []
+    if not request.index_preview:
+        deleted_doc_ids = _delete_removed_source_docs(
+            runtime,
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+            source_id=source_id,
+            source_kind=source_kind,
+            deleted_display_paths=list(changes["deleted"]),
+        )
+        result = _ingest_collection_candidates(
+            runtime,
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+            candidates=candidates,
+            user_id=user_id,
+            conversation_id=f"source-refresh-{source_id}",
+            metadata_profile=request.metadata_profile,
+            metadata_enrichment=request.metadata_enrichment,
+        )
+    else:
+        result = _preview_collection_candidates(
+            runtime,
+            collection_id=collection_id,
+            candidates=candidates,
+            metadata_profile=request.metadata_profile,
+            metadata_enrichment=request.metadata_enrichment,
+        )
+    result = {
+        **result,
+        "object": "source.refresh",
+        "source_id": source_id,
+        "source_kind": source_kind,
+        "scan": scan,
+        "changes": changes,
+        "deleted_doc_ids": deleted_doc_ids,
+        "run_id": run_id,
+    }
+    if not request.index_preview:
+        registry = _load_source_registry(overlay_store)
+        next_sources: List[Dict[str, Any]] = []
+        for source_record in list(registry.get("sources") or []):
+            if str(source_record.get("source_id") or "") == source_id:
+                source_record = {
+                    **dict(source_record),
+                    "last_scan": scan,
+                    "last_refresh": {
+                        "run_id": run_id,
+                        "status": result.get("status"),
+                        "summary": dict(result.get("summary") or {}),
+                        "changes": changes,
+                        "deleted_doc_ids": deleted_doc_ids,
+                        "updated_at": utc_now_iso(),
+                    },
+                    "updated_at": utc_now_iso(),
+                }
+            next_sources.append(dict(source_record))
+        registry["sources"] = next_sources
+        _save_source_registry(overlay_store, registry)
+    return result
+
+
+def _run_source_refresh_background(
+    runtime: Any,
+    overlay_store: OverlayStore,
+    *,
+    source_id: str,
+    tenant_id: str,
+    user_id: str,
+    request: SourceRefreshRequest,
+    run_id: str,
+) -> None:
+    started = utc_now_iso()
+    _upsert_source_run(
+        overlay_store,
+        {
+            "run_id": run_id,
+            "source_id": source_id,
+            "operation": "refresh",
+            "status": "running",
+            "started_at": started,
+            "updated_at": started,
+            "detail": "Refreshing registered source.",
+        },
+    )
+    try:
+        result = _refresh_registered_source(
+            runtime,
+            overlay_store,
+            source_id=source_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            request=request,
+            run_id=run_id,
+        )
+        completed = utc_now_iso()
+        _upsert_source_run(
+            overlay_store,
+            {
+                "run_id": run_id,
+                "source_id": source_id,
+                "operation": "refresh",
+                "status": str(result.get("status") or "completed"),
+                "started_at": started,
+                "completed_at": completed,
+                "updated_at": completed,
+                "detail": "Registered source refresh completed.",
+                "result": result,
+            },
+        )
+    except Exception as exc:
+        completed = utc_now_iso()
+        _upsert_source_run(
+            overlay_store,
+            {
+                "run_id": run_id,
+                "source_id": source_id,
+                "operation": "refresh",
+                "status": "failed",
+                "started_at": started,
+                "completed_at": completed,
+                "updated_at": completed,
+                "detail": str(exc),
+            },
+        )
 
 
 def _render_agent_overlay_markdown(existing: Any, request: AgentUpdateRequest) -> str:
@@ -3239,6 +3894,317 @@ def reset_prompt(prompt_file: str, manager: RuntimeManager = Depends(_admin_mana
     return {"removed": removed}
 
 
+@router.get("/sources")
+def list_registered_sources(
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    del x_tenant_id
+    overlay_store = manager.get_overlay_store()
+    registry = _load_source_registry(overlay_store)
+    return {
+        "sources": list(registry.get("sources") or []),
+        "runs": list(_load_source_runs(overlay_store).get("runs") or [])[:20],
+        "allowed_roots": [str(root) for root in _allowed_source_roots(runtime.settings)],
+    }
+
+
+@router.post("/sources/scan")
+def scan_source(
+    request: SourceScanRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    collection_id = _normalize_collection_id(str(request.collection_id or getattr(runtime.settings, "default_collection_id", "default")))
+    return _scan_source_paths(
+        runtime.settings,
+        paths=list(request.paths or []),
+        source_kind=request.source_kind,
+        collection_id=collection_id,
+        include_globs=list(request.include_globs or []),
+        exclude_globs=list(request.exclude_globs or []),
+        metadata_profile=request.metadata_profile,
+    )
+
+
+@router.post("/sources/register")
+def register_source(
+    request: SourceRegisterRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    collection_id = _normalize_collection_id(str(request.collection_id or getattr(runtime.settings, "default_collection_id", "default")))
+    source_kind = _normalize_source_kind(request.source_kind)
+    scan = _scan_source_paths(
+        runtime.settings,
+        paths=list(request.paths or []),
+        source_kind=source_kind,
+        collection_id=collection_id,
+        include_globs=list(request.include_globs or []),
+        exclude_globs=list(request.exclude_globs or []),
+        metadata_profile=request.metadata_profile,
+    )
+    display_name = str(request.display_name or "").strip() or (
+        Path(str(request.paths[0])).name if request.paths else f"{collection_id} source"
+    )
+    source_id = _normalize_source_id(str(request.source_id or ""), fallback=display_name)
+    overlay_store = manager.get_overlay_store()
+    registry = _load_source_registry(overlay_store)
+    sources = [
+        dict(item)
+        for item in list(registry.get("sources") or [])
+        if str(item.get("source_id") or "") != source_id
+    ]
+    record = {
+        "source_id": source_id,
+        "tenant_id": tenant_id,
+        "collection_id": collection_id,
+        "display_name": display_name,
+        "source_kind": source_kind,
+        "paths": [str(item).strip() for item in list(request.paths or []) if str(item).strip()],
+        "include_globs": [str(item).strip() for item in list(request.include_globs or []) if str(item).strip()],
+        "exclude_globs": [str(item).strip() for item in list(request.exclude_globs or []) if str(item).strip()],
+        "last_scan": scan,
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+    sources.append(record)
+    registry["sources"] = sorted(sources, key=lambda item: str(item.get("display_name") or item.get("source_id") or ""))
+    _save_source_registry(overlay_store, registry)
+    manager.get_overlay_store().append_audit_event(
+        action="source_register",
+        actor=request.actor,
+        details={"source_id": source_id, "collection_id": collection_id, "source_kind": source_kind},
+    )
+    return {"created": True, "source": record, "scan": scan}
+
+
+@router.post("/sources/{source_id}/refresh")
+def refresh_source(
+    source_id: str,
+    request: SourceRefreshRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    overlay_store = manager.get_overlay_store()
+    if _source_record_by_id(overlay_store, source_id) is None:
+        raise HTTPException(status_code=404, detail="Registered source not found.")
+    run_id = f"srcrun_{uuid.uuid4().hex[:16]}"
+    if request.background:
+        queued = {
+            "run_id": run_id,
+            "source_id": source_id,
+            "operation": "refresh",
+            "status": "queued",
+            "started_at": "",
+            "updated_at": utc_now_iso(),
+            "detail": "Registered source refresh queued.",
+        }
+        _upsert_source_run(overlay_store, queued)
+        Thread(
+            target=_run_source_refresh_background,
+            kwargs={
+                "runtime": runtime,
+                "overlay_store": overlay_store,
+                "source_id": source_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "request": request,
+                "run_id": run_id,
+            },
+            daemon=True,
+        ).start()
+        return {"object": "source.refresh.run", "run": queued}
+    result = _refresh_registered_source(
+        runtime,
+        overlay_store,
+        source_id=source_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        request=request,
+        run_id=run_id,
+    )
+    manager.get_overlay_store().append_audit_event(
+        action="source_refresh",
+        actor=request.actor,
+        details={"source_id": source_id, "status": result.get("status"), "run_id": run_id},
+    )
+    return result
+
+
+@router.get("/sources/runs/{run_id}")
+def get_source_refresh_run(
+    run_id: str,
+    manager: RuntimeManager = Depends(_admin_manager),
+) -> Dict[str, Any]:
+    runs = list(_load_source_runs(manager.get_overlay_store()).get("runs") or [])
+    for run in runs:
+        if str(run.get("run_id") or "") == run_id:
+            return {"run": run}
+    raise HTTPException(status_code=404, detail="Source refresh run not found.")
+
+
+@router.post("/graphs/assistant/suggest")
+def suggest_graph_defaults(
+    request: GraphAssistantSuggestRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    collection_id = _normalize_collection_id(request.collection_id or getattr(runtime.settings, "default_collection_id", "default"))
+    docs = [
+        record
+        for record in runtime.bot.ctx.stores.doc_store.list_documents(
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+        )
+        if not _is_upload_record(record)
+    ]
+    selected_docs = [record for record in docs if not request.source_doc_ids or str(getattr(record, "doc_id", "") or "") in set(request.source_doc_ids)]
+    intent = str(request.intent or "general").strip().lower() or "general"
+    entity_types_by_intent = {
+        "vendor_risk": ["vendor", "risk", "control", "owner", "system", "obligation"],
+        "requirements": ["requirement", "system", "interface", "actor", "constraint"],
+        "policy": ["policy", "control", "owner", "exception", "approval", "system"],
+        "research": ["organization", "person", "topic", "event", "source"],
+    }
+    entity_types = entity_types_by_intent.get(intent, ["organization", "person", "geo", "event"])
+    source_count = len(selected_docs)
+    display_name = f"{collection_id.replace('-', ' ').replace('_', ' ').title()} Graph"
+    graph_id = _normalize_source_id(f"{collection_id}-{intent}-graph")
+    return {
+        "display_name": display_name,
+        "graph_id": graph_id,
+        "collection_id": collection_id,
+        "intent": intent,
+        "source_count": source_count,
+        "source_doc_ids": [str(getattr(record, "doc_id", "") or "") for record in selected_docs],
+        "config_overrides": {"extract_graph": {"entity_types": entity_types}},
+        "prompt_overrides": {},
+        "guidance": (
+            f"Build a {intent.replace('_', ' ')} knowledge graph from {source_count} indexed source document(s). "
+            "Use the default prompts unless validation warns that extraction quality is weak."
+        ),
+    }
+
+
+def _friendly_graph_preflight(payload: Dict[str, Any]) -> Dict[str, Any]:
+    runtime_status = str((payload.get("runtime") or {}).get("ok", False))
+    connectivity = dict(payload.get("connectivity") or {})
+    extraction = dict(payload.get("extraction_preflight") or {})
+    report = dict(payload.get("community_report_preflight") or {})
+    source_count = int(payload.get("resolved_source_count") or 0)
+    blockers: List[str] = []
+    warnings: List[str] = []
+    if not bool((payload.get("runtime") or {}).get("ok", False)):
+        blockers.append("GraphRAG runtime is not fully configured.")
+    if str(connectivity.get("status") or "") == "error":
+        blockers.append(str(connectivity.get("detail") or "GraphRAG model endpoint is not reachable."))
+    elif str(connectivity.get("status") or "") == "warning":
+        warnings.append(str(connectivity.get("detail") or "GraphRAG model endpoint returned warnings."))
+    if str(extraction.get("status") or "") == "error":
+        blockers.append(str(extraction.get("detail") or "Graph extraction preflight failed."))
+    elif str(extraction.get("status") or "") == "warning":
+        warnings.append(str(extraction.get("detail") or "Graph extraction preflight returned a warning."))
+    if source_count <= 0:
+        blockers.append("No indexed source documents were resolved for this graph.")
+    if str(report.get("status") or "") == "warning":
+        warnings.append(str(report.get("detail") or "Community report preflight returned a warning."))
+    ready = bool(payload.get("ok")) and not blockers
+    return {
+        "ready": ready,
+        "status": "ready" if ready and not warnings else "warning" if ready else "blocked",
+        "headline": "Ready to build" if ready else "Needs attention before build",
+        "source_count": source_count,
+        "runtime_ok": str(runtime_status).lower() == "true",
+        "model_endpoint_status": str(connectivity.get("status") or "unknown"),
+        "extraction_status": str(extraction.get("status") or "unknown"),
+        "community_report_status": str(report.get("status") or "unknown"),
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+@router.post("/graphs/{graph_id}/assistant/preflight")
+def graph_assistant_preflight(
+    graph_id: str,
+    request: GraphLifecycleRequest | None = None,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    validation = service.validate_admin_graph(graph_id)
+    if validation.get("error"):
+        raise HTTPException(status_code=404, detail=str(validation["error"]))
+    friendly = _friendly_graph_preflight(validation)
+    manager.get_overlay_store().append_audit_event(
+        action="graph_assistant_preflight",
+        actor=(request.actor if request is not None else "control-panel"),
+        details={"graph_id": graph_id, "status": friendly.get("status")},
+    )
+    return {"graph_id": graph_id, "friendly": friendly, "validation": validation}
+
+
+@router.post("/graphs/{graph_id}/assistant/smoke-test")
+def graph_assistant_smoke_test(
+    graph_id: str,
+    request: GraphSmokeTestRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    query = str(request.query or "").strip() or "What are the main entities and relationships in this graph?"
+    result = service.query_index(
+        graph_id,
+        query=query,
+        methods=list(request.methods or []),
+        limit=max(1, min(int(request.limit or 6), 12)),
+        use_cache=False,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=str(result["error"]))
+    evidence_status = str(result.get("evidence_status") or "unknown")
+    friendly_status = (
+        "grounded" if evidence_status == "grounded_graph_evidence"
+        else "source_candidates_only" if evidence_status == "source_candidates_only"
+        else "no_results"
+    )
+    return {
+        "graph_id": graph_id,
+        "query": query,
+        "friendly": {
+            "status": friendly_status,
+            "query_ready": bool(result.get("query_ready")),
+            "result_count": len(list(result.get("results") or [])),
+            "citation_count": len(list(result.get("citations") or [])),
+            "message": (
+                "Graph returned cited evidence."
+                if friendly_status == "grounded"
+                else "Graph returned source candidates only; use RAG grounding before answering."
+                if friendly_status == "source_candidates_only"
+                else "Graph did not return results for the smoke-test query."
+            ),
+        },
+        "result": result,
+    }
+
+
 @router.get("/graphs")
 def list_graphs(
     manager: RuntimeManager = Depends(_admin_manager),
@@ -4058,7 +5024,7 @@ async def upload_collection_files(
     collection_id: str,
     files: List[UploadFile] = File(...),
     relative_paths: List[str] = Form([]),
-    source_type: str = Form("upload"),
+    source_type: str = Form(COLLECTION_UPLOAD_SOURCE_TYPE),
     conversation_id: str = Form("control-panel-upload"),
     metadata_profile: str = Form("auto"),
     metadata_enrichment: str = Form("deterministic"),

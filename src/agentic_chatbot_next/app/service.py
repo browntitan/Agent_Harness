@@ -55,7 +55,7 @@ from agentic_chatbot_next.rag.engine import render_rag_contract, run_rag_contrac
 from agentic_chatbot_next.router.llm_router import route_turn
 from agentic_chatbot_next.router.patterns import load_router_patterns, patterns_path_from_settings
 from agentic_chatbot_next.router.policy import choose_agent_name
-from agentic_chatbot_next.router.router import RouterDecision
+from agentic_chatbot_next.router.router import RouterDecision, is_deep_research_request
 from agentic_chatbot_next.router.semantic import (
     SemanticRoutingContract,
     build_deterministic_semantic_contract,
@@ -282,6 +282,18 @@ def _should_default_to_coordinator_for_capability_workflow(
     per_item_policy = bool(_PER_ITEM_WORKFLOW_HINTS.search(text)) and bool(_POLICY_LOOKUP_WORKFLOW_HINTS.search(text))
     buyer_response = bool(re.search(r"\b(buyer|supplier|write\s+back|recommended\s+action|recommendation)\b", text, re.I))
     return bool((has_upload_context or "uploaded" in text.lower()) and mixed_clause_policy and (per_item_policy or buyer_response))
+
+
+def _preferred_research_agent(registry: Any, effective_capabilities: Any) -> str:
+    candidate = "research_coordinator"
+    try:
+        if registry.get(candidate) is None:
+            candidate = "coordinator"
+    except Exception:
+        candidate = "coordinator"
+    if candidate == "research_coordinator" and not effective_capabilities.allows_agent(candidate):
+        return "coordinator"
+    return candidate
 
 
 @dataclass
@@ -1248,6 +1260,7 @@ class RuntimeService:
                 "retrieval",
                 "ambiguous",
             }
+            preferred_research_agent = _preferred_research_agent(self.kernel.registry, effective_capabilities)
             inventory_query_type = classify_inventory_query(routing_user_text)
             is_graph_inventory = (
                 scope_kind == "graph_indexes"
@@ -1263,8 +1276,13 @@ class RuntimeService:
                     routing_user_text,
                     session_metadata={**preflight_metadata, **dict(getattr(session, "metadata", {}) or {})},
                 ):
-                    if selected_agent != "coordinator":
-                        selected_agent = "coordinator"
+                    target_agent = (
+                        preferred_research_agent
+                        if is_deep_research_request(routing_user_text)
+                        else "coordinator"
+                    )
+                    if selected_agent != target_agent:
+                        selected_agent = target_agent
                         coordinator_default_applied = True
                 elif _should_default_to_coordinator_for_capability_workflow(
                     routing_user_text,

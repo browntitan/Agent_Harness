@@ -41,14 +41,16 @@ _HANDOFF_ALLOWED_CONSUMERS = {
     "analysis_summary": {"general", "rag_worker", "finalizer", "coordinator"},
     "entity_candidates": {"rag_worker", "general", "coordinator"},
     "keyword_windows": {"rag_worker", "general", "coordinator"},
-    "title_candidates": {"rag_worker", "general", "finalizer", "coordinator"},
-    "doc_focus": {"rag_worker", "general", "finalizer", "coordinator", "data_analyst"},
-    "research_facets": {"rag_worker", "general", "finalizer", "coordinator"},
-    "facet_matches": {"general", "finalizer", "coordinator"},
-    "doc_digest": {"general", "finalizer", "coordinator"},
-    "subsystem_inventory": {"rag_worker", "general", "finalizer", "coordinator"},
-    "subsystem_evidence": {"general", "finalizer", "coordinator"},
-    "research_coverage_ledger": {"general", "finalizer", "verifier", "coordinator"},
+    "title_candidates": {"rag_worker", "general", "finalizer", "coordinator", "research_coordinator"},
+    "doc_focus": {"rag_worker", "general", "finalizer", "coordinator", "research_coordinator", "data_analyst"},
+    "research_facets": {"rag_worker", "general", "finalizer", "coordinator", "research_coordinator"},
+    "facet_matches": {"general", "finalizer", "coordinator", "research_coordinator"},
+    "research_triage_note": {"general", "rag_worker", "finalizer", "verifier", "coordinator", "research_coordinator"},
+    "doc_digest": {"general", "finalizer", "coordinator", "research_coordinator"},
+    "research_notebook": {"general", "rag_worker", "finalizer", "verifier", "coordinator", "research_coordinator"},
+    "subsystem_inventory": {"rag_worker", "general", "finalizer", "coordinator", "research_coordinator"},
+    "subsystem_evidence": {"general", "finalizer", "coordinator", "research_coordinator"},
+    "research_coverage_ledger": {"general", "finalizer", "verifier", "coordinator", "research_coordinator"},
     "evidence_request": {"rag_worker", "general", "coordinator"},
     "evidence_response": {"finalizer", "general", "coordinator"},
     "clause_redline_inventory": {"rag_worker", "general", "verifier", "finalizer", "coordinator"},
@@ -65,7 +67,25 @@ _HANDOFF_SCHEMA_KEYS = {
     "doc_focus": {"documents"},
     "research_facets": {"facets", "seed_documents", "scope_collection_id"},
     "facet_matches": {"facet", "documents", "rationale", "supporting_citation_ids"},
+    "research_triage_note": {
+        "document",
+        "summary",
+        "relevance",
+        "relevance_rationale",
+        "key_topics",
+        "potential_queries",
+        "recommended_next_action",
+        "used_citation_ids",
+    },
     "doc_digest": {"document", "document_summary", "subsystems"},
+    "research_notebook": {
+        "triage_notes",
+        "facet_matches",
+        "doc_digests",
+        "unresolved_questions",
+        "negative_evidence",
+        "coverage_status",
+    },
     "subsystem_inventory": {"subsystems", "source_documents", "scope_collection_id"},
     "subsystem_evidence": {"subsystem", "documents", "supporting_citation_ids"},
     "research_coverage_ledger": {
@@ -210,11 +230,16 @@ class KernelCoordinatorController:
                     "seed_hits": 0,
                     "strong_evidence_count": 0,
                     "review_preferred": False,
+                    "triaged": False,
+                    "triage_relevance": "",
+                    "triage_summary": "",
+                    "triage_recommended_next_action": "",
                     "reviewed": False,
                     "reviewed_relevance": "",
                     "relevance_rationale": "",
                     "coverage": "",
                     "matched_facets": set(),
+                    "potential_queries": set(),
                     "used_citation_ids": set(),
                 }
                 rows[key] = existing
@@ -299,6 +324,38 @@ class KernelCoordinatorController:
                     if facet_name:
                         row["matched_facets"].add(facet_name)
                     row["strong_evidence_count"] += evidence_count
+            elif artifact_type == "research_triage_note":
+                document = payload.get("document")
+                if not isinstance(document, dict):
+                    continue
+                row = _ensure_row(document)
+                if row is None:
+                    continue
+                relevance = str(payload.get("relevance") or "").strip().lower()
+                if relevance and (
+                    not str(row.get("triage_relevance") or "").strip()
+                    or self._reviewed_relevance_rank(relevance)
+                    >= self._reviewed_relevance_rank(str(row.get("triage_relevance") or ""))
+                ):
+                    row["triage_relevance"] = relevance
+                row["triaged"] = True
+                summary = str(payload.get("summary") or "").strip()
+                if summary and not row.get("triage_summary"):
+                    row["triage_summary"] = summary
+                rationale = str(payload.get("relevance_rationale") or "").strip()
+                if rationale and not row.get("relevance_rationale"):
+                    row["relevance_rationale"] = rationale
+                action = str(payload.get("recommended_next_action") or "").strip().lower()
+                if action and not row.get("triage_recommended_next_action"):
+                    row["triage_recommended_next_action"] = action
+                row["matched_facets"].update(self._normalize_string_list(payload.get("key_topics") or []))
+                row["potential_queries"].update(self._normalize_string_list(payload.get("potential_queries") or []))
+                row["used_citation_ids"].update(
+                    self._normalize_string_list(payload.get("used_citation_ids") or [])
+                )
+                row["strong_evidence_count"] += len(
+                    self._normalize_string_list(payload.get("used_citation_ids") or [])
+                )
             elif artifact_type == "doc_digest":
                 document = payload.get("document")
                 if not isinstance(document, dict):
@@ -334,7 +391,12 @@ class KernelCoordinatorController:
                 {
                     **row,
                     "is_meta_document": bool(row.get("is_meta_document")),
+                    "triaged": bool(row.get("triaged")),
+                    "triage_relevance": str(row.get("triage_relevance") or "").strip(),
+                    "triage_summary": str(row.get("triage_summary") or "").strip(),
+                    "triage_recommended_next_action": str(row.get("triage_recommended_next_action") or "").strip(),
                     "matched_facets": sorted(str(item) for item in row.get("matched_facets") or [] if str(item).strip()),
+                    "potential_queries": sorted(str(item) for item in row.get("potential_queries") or [] if str(item).strip()),
                     "used_citation_ids": sorted(
                         str(item) for item in row.get("used_citation_ids") or [] if str(item).strip()
                     ),
@@ -344,6 +406,7 @@ class KernelCoordinatorController:
             key=lambda row: (
                 0 if bool(row.get("is_meta_document")) else 1,
                 self._reviewed_relevance_rank(str(row.get("reviewed_relevance") or "")),
+                self._reviewed_relevance_rank(str(row.get("triage_relevance") or "")),
                 len(row.get("matched_facets") or []),
                 int(row.get("strong_evidence_count") or 0),
                 float(row.get("title_path_score") or 0.0),
@@ -405,7 +468,10 @@ class KernelCoordinatorController:
             if has_primary_documents and bool(row.get("is_meta_document")):
                 continue
             relevance = str(row.get("reviewed_relevance") or "").strip().lower()
+            triage_relevance = str(row.get("triage_relevance") or "").strip().lower()
             if relevance == "irrelevant":
+                continue
+            if not relevance and triage_relevance == "irrelevant":
                 continue
             row_facets = {
                 str(item).strip()
@@ -572,6 +638,8 @@ class KernelCoordinatorController:
         return {
             **doc,
             "is_meta_document": bool(row.get("is_meta_document")),
+            "triaged": bool(row.get("triaged")),
+            "triage_relevance": str(row.get("triage_relevance") or "").strip(),
             "reviewed": bool(row.get("reviewed")),
             "reviewed_relevance": str(row.get("reviewed_relevance") or "").strip(),
             "matched_facets": [
@@ -601,6 +669,7 @@ class KernelCoordinatorController:
                 "doc_focus",
                 "research_facets",
                 "facet_matches",
+                "research_triage_note",
                 "doc_digest",
                 "subsystem_inventory",
                 "subsystem_evidence",
@@ -612,6 +681,7 @@ class KernelCoordinatorController:
             for row in rows
             if bool(row.get("reviewed"))
             or str(row.get("reviewed_relevance") or "").strip()
+            or str(row.get("triage_relevance") or "").strip()
             or [item for item in (row.get("used_citation_ids") or []) if str(item).strip()]
         ]
         source_rows = reviewed_rows or rows
@@ -620,12 +690,20 @@ class KernelCoordinatorController:
             for row in source_rows
             if not bool(row.get("is_meta_document"))
             and str(row.get("reviewed_relevance") or "").strip().lower() != "irrelevant"
+            and (
+                str(row.get("reviewed_relevance") or "").strip()
+                or str(row.get("triage_relevance") or "").strip().lower() != "irrelevant"
+            )
         ]
         meta_documents = [
             self._coverage_doc_payload(row)
             for row in source_rows
             if bool(row.get("is_meta_document"))
             and str(row.get("reviewed_relevance") or "").strip().lower() != "irrelevant"
+            and (
+                str(row.get("reviewed_relevance") or "").strip()
+                or str(row.get("triage_relevance") or "").strip().lower() != "irrelevant"
+            )
         ]
 
         facets: List[Dict[str, Any]] = []
@@ -767,6 +845,7 @@ class KernelCoordinatorController:
         *,
         session_state: SessionState,
         execution_state: TaskExecutionState,
+        producer_agent: str = "coordinator",
     ) -> Dict[str, Any]:
         ledger = self._build_research_coverage_ledger(
             session_state=session_state,
@@ -783,7 +862,7 @@ class KernelCoordinatorController:
                 artifact_type="research_coverage_ledger",
                 handoff_schema="research_coverage_ledger",
                 producer_task_id=producer_task_id,
-                producer_agent="coordinator",
+                producer_agent=producer_agent,
                 data=ledger,
                 summary=f"Coverage {ledger.get('coverage_state')}",
                 allowed_consumers=sorted(_HANDOFF_ALLOWED_CONSUMERS["research_coverage_ledger"]),
@@ -792,7 +871,7 @@ class KernelCoordinatorController:
         self.kernel._emit(
             "research_coverage_ledger_updated",
             session_state.session_id,
-            agent_name="coordinator",
+            agent_name=producer_agent,
             payload={
                 "conversation_id": session_state.conversation_id,
                 "coverage_state": ledger.get("coverage_state"),
@@ -810,7 +889,7 @@ class KernelCoordinatorController:
             self.kernel._emit(
                 "meta_document_demoted",
                 session_state.session_id,
-                agent_name="coordinator",
+                agent_name=producer_agent,
                 payload={
                     "conversation_id": session_state.conversation_id,
                     "documents": [
@@ -824,6 +903,140 @@ class KernelCoordinatorController:
                 },
             )
         return ledger
+
+    def _build_research_notebook(
+        self,
+        *,
+        session_state: SessionState,
+        execution_state: TaskExecutionState,
+        coverage_ledger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        artifacts = self._current_workflow_handoff_artifacts(
+            session_state=session_state,
+            execution_state=execution_state,
+            artifact_types=[
+                "research_facets",
+                "facet_matches",
+                "research_triage_note",
+                "doc_digest",
+                "subsystem_inventory",
+                "subsystem_evidence",
+            ],
+        )
+        triage_notes: List[Dict[str, Any]] = []
+        facet_matches: List[Dict[str, Any]] = []
+        doc_digests: List[Dict[str, Any]] = []
+        unresolved_questions: List[str] = []
+        negative_evidence: List[Dict[str, Any]] = []
+        subsystem_inventory: Dict[str, Any] = {}
+        subsystem_evidence: List[Dict[str, Any]] = []
+
+        for artifact in artifacts:
+            artifact_type = str(artifact.get("artifact_type") or "")
+            payload = dict(artifact.get("data") or {})
+            if artifact_type == "research_triage_note":
+                triage_notes.append(payload)
+                if str(payload.get("relevance") or "").strip().lower() == "irrelevant":
+                    negative_evidence.append(
+                        {
+                            "kind": "irrelevant_triage",
+                            "document": dict(payload.get("document") or {}),
+                            "reason": str(payload.get("relevance_rationale") or "").strip(),
+                        }
+                    )
+            elif artifact_type == "facet_matches":
+                facet_matches.append(payload)
+                if not payload.get("documents"):
+                    negative_evidence.append(
+                        {
+                            "kind": "empty_facet",
+                            "facet": str(payload.get("facet") or "").strip(),
+                            "reason": "No documents were returned for this facet search.",
+                        }
+                    )
+            elif artifact_type == "doc_digest":
+                doc_digests.append(payload)
+            elif artifact_type == "research_facets":
+                unresolved_questions.extend(
+                    str(item).strip()
+                    for item in (payload.get("unresolved_questions") or [])
+                    if str(item).strip()
+                )
+            elif artifact_type == "subsystem_inventory":
+                subsystem_inventory = payload
+            elif artifact_type == "subsystem_evidence":
+                subsystem_evidence.append(payload)
+
+        for warning in coverage_ledger.get("warnings") or []:
+            text = str(warning).strip()
+            if text:
+                negative_evidence.append({"kind": "coverage_warning", "reason": text})
+
+        coverage_status = {
+            "coverage_state": str(coverage_ledger.get("coverage_state") or "").strip(),
+            "primary_source_count": int(coverage_ledger.get("primary_source_count") or 0),
+            "meta_source_count": int(coverage_ledger.get("meta_source_count") or 0),
+            "facet_count": len(coverage_ledger.get("facets") or []),
+            "coverage_ledger_artifact_id": str(coverage_ledger.get("artifact_id") or "").strip(),
+        }
+        return {
+            "triage_notes": triage_notes,
+            "facet_matches": facet_matches,
+            "doc_digests": doc_digests,
+            "unresolved_questions": self._normalize_string_list(unresolved_questions),
+            "negative_evidence": negative_evidence,
+            "coverage_status": coverage_status,
+            "subsystem_inventory": subsystem_inventory,
+            "subsystem_evidence": subsystem_evidence,
+        }
+
+    def _register_research_notebook(
+        self,
+        *,
+        session_state: SessionState,
+        execution_state: TaskExecutionState,
+        coverage_ledger: Dict[str, Any],
+        producer_agent: str = "coordinator",
+    ) -> Dict[str, Any]:
+        notebook = self._build_research_notebook(
+            session_state=session_state,
+            execution_state=execution_state,
+            coverage_ledger=coverage_ledger,
+        )
+        producer_task_id = ""
+        for task in reversed(execution_state.task_plan):
+            producer_task_id = str(task.get("id") or "").strip()
+            if producer_task_id:
+                break
+        if producer_task_id:
+            artifact = register_handoff_artifact(
+                session_state,
+                artifact_type="research_notebook",
+                handoff_schema="research_notebook",
+                producer_task_id=producer_task_id,
+                producer_agent=producer_agent,
+                data=notebook,
+                summary=(
+                    f"Research notebook with {len(notebook.get('triage_notes') or [])} triage notes, "
+                    f"{len(notebook.get('doc_digests') or [])} document digests, "
+                    f"coverage {dict(notebook.get('coverage_status') or {}).get('coverage_state') or 'unknown'}"
+                ),
+                allowed_consumers=sorted(_HANDOFF_ALLOWED_CONSUMERS["research_notebook"]),
+            )
+            notebook["artifact_id"] = str(artifact.get("artifact_id") or "")
+        self.kernel._emit(
+            "research_notebook_updated",
+            session_state.session_id,
+            agent_name=producer_agent,
+            payload={
+                "conversation_id": session_state.conversation_id,
+                "artifact_id": notebook.get("artifact_id"),
+                "triage_note_count": len(notebook.get("triage_notes") or []),
+                "doc_digest_count": len(notebook.get("doc_digests") or []),
+                "coverage_state": dict(notebook.get("coverage_status") or {}).get("coverage_state"),
+            },
+        )
+        return notebook
 
     def _needs_detailed_summary_repair(
         self,
@@ -1076,6 +1289,28 @@ class KernelCoordinatorController:
                 "documents": documents,
                 "summary": output[:1200],
             }
+        if artifact_type == "research_triage_note":
+            payload = extract_json(output or "") or {}
+            document = dict(payload.get("document") or {})
+            if not document and doc_scope:
+                first_scope = str(doc_scope[0] or "").strip()
+                document = {"doc_id": first_scope, "title": first_scope}
+            relevance = str(payload.get("relevance") or "").strip().lower()
+            recommended_next_action = str(payload.get("recommended_next_action") or "").strip().lower()
+            return {
+                "document": self._normalize_document_brief(document),
+                "summary": str(payload.get("summary") or "").strip(),
+                "relevance": relevance,
+                "relevance_rationale": str(payload.get("relevance_rationale") or "").strip(),
+                "key_topics": self._normalize_string_list(payload.get("key_topics") or []),
+                "potential_queries": self._normalize_string_list(payload.get("potential_queries") or []),
+                "recommended_next_action": recommended_next_action,
+                "used_citation_ids": [
+                    str(item).strip()
+                    for item in (payload.get("used_citation_ids") or [])
+                    if str(item).strip()
+                ],
+            }
         if artifact_type == "doc_digest":
             payload = extract_json(output or "") or {}
             document = dict(payload.get("document") or {})
@@ -1297,7 +1532,29 @@ class KernelCoordinatorController:
 
     def _is_valid_handoff_payload(self, artifact_type: str, payload: Dict[str, Any]) -> bool:
         required = set(_HANDOFF_SCHEMA_KEYS.get(artifact_type) or set())
-        return isinstance(payload, dict) and required.issubset({str(key) for key in payload})
+        if not isinstance(payload, dict) or not required.issubset({str(key) for key in payload}):
+            return False
+        if artifact_type == "research_triage_note":
+            document = payload.get("document")
+            if not isinstance(document, dict):
+                return False
+            if self._document_identity_key(document) == ("", ""):
+                return False
+            if not str(payload.get("summary") or "").strip():
+                return False
+            if str(payload.get("relevance") or "").strip().lower() not in {"relevant", "partial", "irrelevant"}:
+                return False
+            if str(payload.get("recommended_next_action") or "").strip().lower() not in {
+                "deep_review",
+                "facet_search",
+                "backfill",
+                "skip",
+            }:
+                return False
+            for key in ("key_topics", "potential_queries", "used_citation_ids"):
+                if not isinstance(payload.get(key), list):
+                    return False
+        return True
 
     def _prepare_handoff_artifacts(
         self,
@@ -1496,6 +1753,10 @@ class KernelCoordinatorController:
     @staticmethod
     def _is_dynamic_doc_review_fanout_task(task: Dict[str, Any]) -> bool:
         return bool(dict(task.get("controller_hints") or {}).get("dynamic_doc_review_fanout"))
+
+    @staticmethod
+    def _is_dynamic_triage_fanout_task(task: Dict[str, Any]) -> bool:
+        return bool(dict(task.get("controller_hints") or {}).get("dynamic_triage_fanout"))
 
     @staticmethod
     def _is_dynamic_subsystem_backfill_task(task: Dict[str, Any]) -> bool:
@@ -1723,6 +1984,109 @@ class KernelCoordinatorController:
                 break
         return tasks
 
+    def _build_doc_triage_tasks(
+        self,
+        *,
+        session_state: SessionState,
+        placeholder_task: Dict[str, Any],
+        execution_state: TaskExecutionState,
+        handoff_artifacts: List[Dict[str, Any]],
+    ) -> List[TaskSpec]:
+        controller_hints = dict(placeholder_task.get("controller_hints") or {})
+        max_parallel = max(1, min(8, int(controller_hints.get("max_parallel_triage") or 6)))
+        max_optional = max(0, min(3, int(controller_hints.get("max_optional_triage") or 2)))
+        existing_ids = {str(task.get("id") or "") for task in execution_state.task_plan}
+        ranked_rows = [
+            row
+            for row in self._ranked_document_rows(handoff_artifacts)
+            if not bool(row.get("triaged"))
+            and str(row.get("reviewed_relevance") or "").strip().lower() != "irrelevant"
+        ]
+        selected_rows = self._select_ranked_review_rows(
+            ranked_rows,
+            primary_limit=max_parallel,
+            optional_limit=max_optional,
+        )
+        if not selected_rows:
+            return []
+
+        collection_id = ""
+        for artifact in reversed(handoff_artifacts):
+            payload = dict(artifact.get("data") or {})
+            collection_id = str(payload.get("scope_collection_id") or "").strip()
+            if collection_id:
+                break
+        if not collection_id:
+            collection_id = self._collection_scope_for_worker(
+                session_state=session_state,
+                controller_hints=controller_hints,
+            )
+
+        tasks: List[TaskSpec] = []
+        for row in selected_rows:
+            doc_id = str(row.get("doc_id") or "").strip()
+            title = str(row.get("title") or doc_id or "candidate_document").strip()
+            task_id = f"{placeholder_task.get('id', 'task')}_triage_{self._safe_task_slug(doc_id or title)}"
+            if task_id in existing_ids:
+                continue
+            existing_ids.add(task_id)
+            matched_facets = [str(item).strip() for item in (row.get("matched_facets") or []) if str(item).strip()]
+            task_brief = [
+                f"Do a shallow triage of the indexed document '{title}' for the overall research request.",
+                "Use search_indexed_docs/read_indexed_doc only enough to decide whether this document deserves a deeper full review. Prefer overview or targeted section reads; do not paginate the whole document unless the document is very short.",
+                "Return JSON only for coordinator handoff.",
+                f"OVERALL_REQUEST:\n{execution_state.user_request}",
+            ]
+            if matched_facets:
+                task_brief.append("FACET_SIGNALS:\n- " + "\n- ".join(matched_facets[:8]))
+            if str(row.get("match_reason") or "").strip():
+                task_brief.append(
+                    f"TITLE_PATH_SIGNAL:\n- reason: {row.get('match_reason')}\n- score: {float(row.get('title_path_score') or 0.0):.4f}"
+                )
+            task_brief.append(
+                "Return JSON only with this schema:\n"
+                "{"
+                '"document":{"doc_id":"...", "title":"...", "source_path":"...", "source_type":"..."}, '
+                '"summary":"1-3 sentence shallow summary of why this document may or may not matter", '
+                '"relevance":"relevant|partial|irrelevant", '
+                '"relevance_rationale":"...", '
+                '"key_topics":["..."], '
+                '"potential_queries":["..."], '
+                '"recommended_next_action":"deep_review|facet_search|backfill|skip", '
+                '"used_citation_ids":["..."]'
+                "}\n"
+                "Use `deep_review` for documents worth full inspection, `facet_search` for documents that suggest a better query, `backfill` for thin but useful evidence, and `skip` for irrelevant documents."
+            )
+            tasks.append(
+                TaskSpec(
+                    id=task_id,
+                    title=f"Triage {title}",
+                    executor="general",
+                    mode="parallel",
+                    depends_on=[str(placeholder_task.get("id") or "")],
+                    input="\n\n".join(task_brief),
+                    doc_scope=[doc_id] if doc_id else [title],
+                    consumes_artifacts=["title_candidates", "doc_focus", "research_facets", "facet_matches"],
+                    produces_artifacts=["research_triage_note"],
+                    handoff_schema=str(placeholder_task.get("handoff_schema") or "research_inventory"),
+                    controller_hints={
+                        **controller_hints,
+                        "workflow_phase": "doc_triage",
+                        "dynamic_triage_fanout": False,
+                        "strict_doc_focus": True,
+                        "doc_read_depth": "triage",
+                        "requested_kb_collection_id": collection_id,
+                        "kb_collection_id": collection_id,
+                        "search_collection_ids": [collection_id],
+                        "reviewed_doc_id": doc_id,
+                        "reviewed_doc_title": title,
+                        "matched_facets": matched_facets,
+                        "title_path_score": float(row.get("title_path_score") or 0.0),
+                    },
+                )
+            )
+        return tasks
+
     def _build_doc_review_tasks(
         self,
         *,
@@ -1740,6 +2104,15 @@ class KernelCoordinatorController:
             for row in self._ranked_document_rows(handoff_artifacts)
             if str(row.get("reviewed_relevance") or "").strip().lower() != "irrelevant"
         ]
+        has_triage = any(bool(row.get("triaged")) for row in ranked_rows)
+        if has_triage:
+            ranked_rows = [
+                row
+                for row in ranked_rows
+                if bool(row.get("triaged"))
+                and str(row.get("triage_relevance") or "").strip().lower() in {"relevant", "partial"}
+                and str(row.get("triage_recommended_next_action") or "").strip().lower() != "skip"
+            ]
         selected_rows = self._select_ranked_review_rows(
             ranked_rows,
             primary_limit=max_parallel,
@@ -1778,6 +2151,16 @@ class KernelCoordinatorController:
             ]
             if matched_facets:
                 task_brief.append("PRIORITIZED_FACETS:\n- " + "\n- ".join(matched_facets[:8]))
+            if str(row.get("triage_summary") or "").strip():
+                task_brief.append(
+                    "TRIAGE_NOTE:\n"
+                    f"- relevance: {str(row.get('triage_relevance') or '').strip() or 'unknown'}\n"
+                    f"- recommended_next_action: {str(row.get('triage_recommended_next_action') or '').strip() or 'deep_review'}\n"
+                    f"- summary: {str(row.get('triage_summary') or '').strip()}"
+                )
+            potential_queries = [str(item).strip() for item in (row.get("potential_queries") or []) if str(item).strip()]
+            if potential_queries:
+                task_brief.append("TRIAGE_POTENTIAL_QUERIES:\n- " + "\n- ".join(potential_queries[:6]))
             if str(row.get("match_reason") or "").strip():
                 task_brief.append(
                     f"TITLE_PATH_SIGNAL:\n- reason: {row.get('match_reason')}\n- score: {float(row.get('title_path_score') or 0.0):.4f}"
@@ -1827,6 +2210,9 @@ class KernelCoordinatorController:
                         "reviewed_doc_id": doc_id,
                         "reviewed_doc_title": title,
                         "matched_facets": matched_facets,
+                        "triage_relevance": str(row.get("triage_relevance") or "").strip(),
+                        "triage_recommended_next_action": str(row.get("triage_recommended_next_action") or "").strip(),
+                        "triage_potential_queries": potential_queries,
                         "title_path_score": float(row.get("title_path_score") or 0.0),
                     },
                 )
@@ -2008,6 +2394,7 @@ class KernelCoordinatorController:
                     "doc_focus",
                     "research_facets",
                     "facet_matches",
+                    "research_triage_note",
                     "doc_digest",
                     "subsystem_inventory",
                     "subsystem_evidence",
@@ -2080,6 +2467,59 @@ class KernelCoordinatorController:
                 "dynamic_fanout": {
                     "generated_task_ids": [item.id for item in generated_tasks],
                     "facet_count": len(latest_payload.get("facets") or []),
+                }
+            },
+        )
+
+    def _expand_doc_triage_fanout(
+        self,
+        *,
+        execution_state: TaskExecutionState,
+        session_state: SessionState,
+        task: Dict[str, Any],
+    ) -> TaskResult:
+        handoff_artifacts = self._resolve_task_handoffs(
+            task=task,
+            session_state=session_state,
+            consumer_agent="coordinator",
+        )
+        generated_tasks = self._build_doc_triage_tasks(
+            session_state=session_state,
+            placeholder_task=task,
+            execution_state=execution_state,
+            handoff_artifacts=handoff_artifacts,
+        )
+        if generated_tasks:
+            insertion_index = next(
+                (index for index, item in enumerate(execution_state.task_plan) if str(item.get("id") or "") == str(task.get("id") or "")),
+                len(execution_state.task_plan),
+            )
+            execution_state.task_plan[insertion_index + 1:insertion_index + 1] = [item.to_dict() for item in generated_tasks]
+            self.kernel._emit(
+                "coordinator_dynamic_triage_prepared",
+                session_state.session_id,
+                agent_name="coordinator",
+                payload={
+                    "conversation_id": session_state.conversation_id,
+                    "placeholder_task_id": str(task.get("id") or ""),
+                    "generated_task_ids": [item.id for item in generated_tasks],
+                },
+            )
+            output = "Expanded shallow document triage: " + ", ".join(item.title for item in generated_tasks)
+        else:
+            output = "No candidate documents met the threshold for shallow triage."
+        return TaskResult(
+            task_id=str(task.get("id") or ""),
+            title=str(task.get("title") or "Expand shallow document triage"),
+            executor="coordinator",
+            status="completed",
+            output=output,
+            artifact_ref=f"task:{task.get('id', '')}",
+            warnings=[] if generated_tasks else ["No document triage tasks were generated."],
+            metadata={
+                "dynamic_triage": {
+                    "generated_task_ids": [item.id for item in generated_tasks],
+                    "candidate_count": len(self._ranked_document_rows(handoff_artifacts)),
                 }
             },
         )
@@ -2287,6 +2727,8 @@ class KernelCoordinatorController:
             payload={
                 "conversation_id": session_state.conversation_id,
                 "task_count": len(planner_payload.get("tasks") or []),
+                "summary": str(planner_payload.get("summary") or ""),
+                "tasks": self._planner_task_audit_summaries(planner_payload.get("tasks") or []),
                 "planner_agent": planner.name,
                 "planner_context": planner_context_summary,
                 **dict(session_state.metadata.get("route_context") or {}),
@@ -2383,6 +2825,14 @@ class KernelCoordinatorController:
                     )
                     task_results.append(expansion_result.to_dict())
                     continue
+                if len(batch) == 1 and self._is_dynamic_triage_fanout_task(batch[0]):
+                    expansion_result = self._expand_doc_triage_fanout(
+                        execution_state=execution_state,
+                        session_state=session_state,
+                        task=batch[0],
+                    )
+                    task_results.append(expansion_result.to_dict())
+                    continue
                 if len(batch) == 1 and self._is_dynamic_doc_review_fanout_task(batch[0]):
                     expansion_result = self._expand_doc_review_fanout(
                         execution_state=execution_state,
@@ -2442,6 +2892,13 @@ class KernelCoordinatorController:
         coverage_ledger = self._register_research_coverage_ledger(
             session_state=session_state,
             execution_state=execution_state,
+            producer_agent=agent.name,
+        )
+        research_notebook = self._register_research_notebook(
+            session_state=session_state,
+            execution_state=execution_state,
+            coverage_ledger=coverage_ledger,
+            producer_agent=agent.name,
         )
         coverage_issues = self._coverage_gate_issues(
             session_state=session_state,
@@ -2485,12 +2942,20 @@ class KernelCoordinatorController:
                 coverage_ledger = self._register_research_coverage_ledger(
                     session_state=session_state,
                     execution_state=execution_state,
+                    producer_agent=agent.name,
+                )
+                research_notebook = self._register_research_notebook(
+                    session_state=session_state,
+                    execution_state=execution_state,
+                    coverage_ledger=coverage_ledger,
+                    producer_agent=agent.name,
                 )
 
         execution_state.task_results = task_results
         execution_state.partial_answer = self.build_partial_answer(task_results)
         execution_payload = execution_state.to_dict()
         execution_payload["research_coverage_ledger"] = dict(coverage_ledger or {})
+        execution_payload["research_notebook"] = dict(research_notebook or {})
         execution_payload["skill_queries"] = self.coordinator_skill_queries(execution_state.task_plan)
         final_output_mode = self._determine_final_output_mode(execution_state.task_plan)
         if final_output_mode:
@@ -2527,9 +2992,11 @@ class KernelCoordinatorController:
                         execution_state=execution_state,
                     ),
                     revision_feedback=str(execution_payload.get("revision_feedback") or ""),
-                )
+                ).to_dict()
+                if execution_payload.get("research_notebook"):
+                    execution_digest["research_notebook"] = dict(execution_payload.get("research_notebook") or {})
                 finalizer_payload = {
-                    "execution_digest": execution_digest.to_dict(),
+                    "execution_digest": execution_digest,
                     "verification": dict(execution_payload.get("verification") or {}),
                     "revision_feedback": str(execution_payload.get("revision_feedback") or ""),
                 }
@@ -2629,15 +3096,22 @@ class KernelCoordinatorController:
                 user_text=user_text,
                 callbacks=callbacks,
                 task_payload={
-                    "execution_digest": build_execution_digest(
-                        execution_payload,
-                        metadata=dict(session_state.metadata or {}),
-                        artifacts=self._current_workflow_handoff_artifacts(
-                            session_state=session_state,
-                            execution_state=execution_state,
+                    "execution_digest": {
+                        **build_execution_digest(
+                            execution_payload,
+                            metadata=dict(session_state.metadata or {}),
+                            artifacts=self._current_workflow_handoff_artifacts(
+                                session_state=session_state,
+                                execution_state=execution_state,
+                            ),
+                            revision_feedback=str(execution_payload.get("revision_feedback") or ""),
+                        ).to_dict(),
+                        **(
+                            {"research_notebook": dict(execution_payload.get("research_notebook") or {})}
+                            if execution_payload.get("research_notebook")
+                            else {}
                         ),
-                        revision_feedback=str(execution_payload.get("revision_feedback") or ""),
-                    ).to_dict(),
+                    },
                     "verification": dict(execution_payload.get("verification") or {}),
                     "revision_feedback": str(execution_payload.get("revision_feedback") or ""),
                 },
@@ -2778,6 +3252,7 @@ class KernelCoordinatorController:
             "max_revision_rounds": max_revision_rounds,
             "configured_max_revision_rounds": configured_max_revision_rounds,
             "research_coverage_ledger": dict(coverage_ledger or {}),
+            "research_notebook": dict(research_notebook or {}),
         }
         if revision_stop_reason:
             assistant_metadata["revision_stop_reason"] = revision_stop_reason
@@ -2834,6 +3309,7 @@ class KernelCoordinatorController:
                 "doc_focus",
                 "research_facets",
                 "facet_matches",
+                "research_triage_note",
                 "doc_digest",
                 "subsystem_inventory",
                 "subsystem_evidence",
@@ -3290,6 +3766,27 @@ class KernelCoordinatorController:
             artifact_refs.append(result.artifact_ref)
             results.append(result.to_dict())
         return results
+
+    @staticmethod
+    def _planner_task_audit_summaries(raw_tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        summaries: List[Dict[str, Any]] = []
+        for raw in list(raw_tasks or [])[:12]:
+            if not isinstance(raw, dict):
+                continue
+            dependencies = raw.get("depends_on") or raw.get("dependencies") or []
+            if isinstance(dependencies, str):
+                dependencies = [dependencies] if dependencies else []
+            summaries.append(
+                {
+                    "id": str(raw.get("id") or raw.get("task_id") or "").strip(),
+                    "title": str(raw.get("title") or raw.get("description") or "").strip()[:240],
+                    "executor": str(raw.get("executor") or raw.get("agent_name") or "").strip(),
+                    "mode": str(raw.get("mode") or "sequential").strip(),
+                    "dependencies": [str(item).strip() for item in list(dependencies or []) if str(item).strip()][:8],
+                    "handoff_schema": str(raw.get("handoff_schema") or "").strip(),
+                }
+            )
+        return summaries
 
     def _worker_batch_group_id(self, batch: List[Dict[str, Any]]) -> str:
         task_ids = [str(task.get("id") or task.get("task_id") or "").strip() for task in batch]

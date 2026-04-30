@@ -61,12 +61,16 @@ import type {
   ConfigValidationResult,
   ControlPanelCapabilities,
   EffectiveAccessPayload,
+  GraphAssistantPayload,
   GraphDetailPayload,
   GraphIndexRecord,
   GraphIndexRunRecord,
   GraphResearchTunePayload,
   LangGraphExport,
   McpConnectionRecord,
+  RegisteredSource,
+  SourceRefreshRun,
+  SourceScanPayload,
   UploadedFileSummary,
 } from './types'
 
@@ -117,13 +121,15 @@ type ArchitectureTab = 'map' | 'agent-graph' | 'paths' | 'traffic'
 type AgentsTab = 'workspace' | 'catalog'
 type PromptsTab = 'edit' | 'compare'
 type CollectionsTab = 'workspace'
-type CollectionActionMode = 'host' | 'sync'
+type CollectionActionMode = 'upload' | 'local' | 'registered' | 'sync'
 type GraphsTab = 'workspace' | 'runs'
 type GraphSourceMode = 'collection' | 'manual'
+type KnowledgeSourceKind = 'local_folder' | 'local_repo'
 type SkillsTab = 'editor' | 'preview'
 type AccessResourceType = 'collection' | 'graph' | 'tool' | 'skill_family'
 type OperationsTab = 'reloads' | 'jobs' | 'audit'
 
+const COLLECTION_ACTION_MODES: CollectionActionMode[] = ['upload', 'local', 'registered', 'sync']
 const SUPPORTED_DOCUMENT_TYPES = ['.txt', '.md', '.csv', '.pdf', '.docx', '.xls', '.xlsx', 'OCR images'] as const
 const GRAPH_RESEARCH_TUNE_TARGETS = [
   'extract_graph.txt',
@@ -277,6 +283,10 @@ function uniqueList(items: string[]): string[] {
   return Array.from(new Set(items.filter(Boolean)))
 }
 
+function multilineList(value: string): string[] {
+  return uniqueList(value.split('\n').map(item => item.trim()))
+}
+
 function accessResourceLabel(resourceType: string): string {
   const labels: Record<string, string> = {
     collection: 'Collection',
@@ -400,6 +410,38 @@ function collectionStatusSummary(collection: CollectionSummary | null | undefine
     ready: Boolean(status?.ready),
     reason: asString(status?.reason, 'unknown'),
   }
+}
+
+function graphQualityIssues(detail: GraphDetailPayload | null): string[] {
+  if (!detail?.graph) return []
+  const graphRecord = detail.graph as unknown as Record<string, unknown>
+  const health = asRecord((detail as unknown as Record<string, unknown>).health) ?? asRecord(graphRecord.health) ?? {}
+  const issues: string[] = []
+  const sourceCount = asArray<string>(graphRecord.source_doc_ids).length
+  if (sourceCount > 0 && sourceCount < 3) {
+    issues.push('Very small source set can produce sparse communities and weak relationships.')
+  }
+  if (!Boolean(graphRecord.query_ready)) {
+    issues.push('Query-ready artifacts are not available yet.')
+  }
+  const entityCount = asNumber(health.entity_count ?? graphRecord.entity_count)
+  const relationshipCount = asNumber(health.relationship_count ?? graphRecord.relationship_count)
+  if (entityCount !== null && entityCount === 0) {
+    issues.push('No entities were detected in the latest graph artifacts.')
+  }
+  if (relationshipCount !== null && relationshipCount === 0) {
+    issues.push('No relationships were detected in the latest graph artifacts.')
+  }
+  if (Boolean(health.community_report_fallback ?? graphRecord.community_report_fallback)) {
+    issues.push('Community reports used a fallback path, so summaries may be shallow.')
+  }
+  if (Boolean(health.stale_sources ?? graphRecord.stale_sources)) {
+    issues.push('The graph may be stale relative to the source collection.')
+  }
+  for (const warning of asArray<string>(health.warnings ?? graphRecord.warnings).slice(0, 4)) {
+    if (warning) issues.push(warning)
+  }
+  return uniqueList(issues)
 }
 
 function buildCompatibilityBanner(
@@ -587,6 +629,14 @@ export default function App() {
   const [docDetail, setDocDetail] = useState<Record<string, unknown> | null>(null)
   const [collectionHealth, setCollectionHealth] = useState<CollectionHealthReport | null>(null)
   const [pathDraft, setPathDraft] = useState('')
+  const [knowledgeSourceKind, setKnowledgeSourceKind] = useSessionStringState<KnowledgeSourceKind>('control-panel-ui-knowledge-source-kind', 'local_folder')
+  const [sourceIncludeGlobs, setSourceIncludeGlobs] = useState('')
+  const [sourceExcludeGlobs, setSourceExcludeGlobs] = useState('node_modules/**\n.git/**\ndist/**\nbuild/**')
+  const [sourceScan, setSourceScan] = useState<SourceScanPayload | null>(null)
+  const [registeredSources, setRegisteredSources] = useState<RegisteredSource[]>([])
+  const [sourceRuns, setSourceRuns] = useState<SourceRefreshRun[]>([])
+  const [allowedSourceRoots, setAllowedSourceRoots] = useState<string[]>([])
+  const [selectedSourceId, setSelectedSourceId] = useState('')
   const [metadataProfile, setMetadataProfile] = useSessionStringState<string>('control-panel-ui-metadata-profile', 'auto')
   const [indexPreview, setIndexPreview] = useSessionBooleanState('control-panel-ui-index-preview', false)
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFileSummary[]>([])
@@ -609,6 +659,11 @@ export default function App() {
   const [graphConfigDraft, setGraphConfigDraft] = useState('{}')
   const [graphSkillIdsDraft, setGraphSkillIdsDraft] = useState('')
   const [graphSkillOverlayDraft, setGraphSkillOverlayDraft] = useState('')
+  const [graphIntent, setGraphIntent] = useSessionStringState<string>('control-panel-ui-graph-intent', 'general')
+  const [graphAssistantPreflight, setGraphAssistantPreflight] = useState<GraphAssistantPayload | null>(null)
+  const [graphSmokeQuery, setGraphSmokeQuery] = useState('What are the main entities and relationships in this graph?')
+  const [graphSmokeResult, setGraphSmokeResult] = useState<GraphAssistantPayload | null>(null)
+  const [graphAdvancedOpen, setGraphAdvancedOpen] = useSessionBooleanState('control-panel-ui-graph-advanced-open', false)
   const [graphTuneGuidance, setGraphTuneGuidance] = useState('')
   const [graphTuneTargets, setGraphTuneTargets] = useState<string[]>(['extract_graph.txt'])
   const [graphTuneResult, setGraphTuneResult] = useState<GraphResearchTunePayload | null>(null)
@@ -654,7 +709,7 @@ export default function App() {
   const [agentsTab, setAgentsTab] = useSessionStringState<AgentsTab>('control-panel-ui-agents-tab', 'workspace')
   const [promptsTab, setPromptsTab] = useSessionStringState<PromptsTab>('control-panel-ui-prompts-tab', 'edit')
   const [collectionsTab, setCollectionsTab] = useSessionStringState<CollectionsTab>('control-panel-ui-collections-tab', 'workspace')
-  const [collectionAction, setCollectionAction] = useSessionStringState<CollectionActionMode>('control-panel-ui-collection-action', 'host')
+  const [collectionAction, setCollectionAction] = useSessionStringState<CollectionActionMode>('control-panel-ui-collection-action', 'upload')
   const [graphsTab, setGraphsTab] = useSessionStringState<GraphsTab>('control-panel-ui-graphs-tab', 'workspace')
   const [graphSourceMode, setGraphSourceMode] = useSessionStringState<GraphSourceMode>('control-panel-ui-graph-source-mode', 'collection')
   const [skillsTab, setSkillsTab] = useSessionStringState<SkillsTab>('control-panel-ui-skills-tab', 'editor')
@@ -671,6 +726,8 @@ export default function App() {
   const [uploadViewerOpen, setUploadViewerOpen] = useSessionBooleanState('control-panel-ui-upload-viewer-open', !isCompactViewport())
   const [graphInspectorOpen, setGraphInspectorOpen] = useSessionBooleanState('control-panel-ui-graph-inspector-open', !isCompactViewport())
   const [skillSummaryOpen, setSkillSummaryOpen] = useSessionBooleanState('control-panel-ui-skill-summary-open', !isCompactViewport())
+  const collectionFilesInputRef = useRef<HTMLInputElement | null>(null)
+  const collectionFolderInputRef = useRef<HTMLInputElement | null>(null)
   const uploadFilesInputRef = useRef<HTMLInputElement | null>(null)
   const uploadFolderInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -861,6 +918,25 @@ export default function App() {
   const collectionActivityFiles = asArray<Record<string, unknown>>(collectionActivityRecord?.files)
   const collectionActivityExceptions = collectionActivityFiles.filter(item => asString(item.outcome) !== 'ingested')
   const collectionActivityStatus = asString(collectionActivityRecord?.status)
+  const activeCollectionAction = COLLECTION_ACTION_MODES.includes(collectionAction) ? collectionAction : 'local'
+  const sourceScanSummary = sourceScan?.summary
+  const filteredRegisteredSources = useMemo(() => {
+    const collectionId = normalizeCollectionId(selectedCollection || collectionDraft)
+    return registeredSources.filter(source => !collectionId || source.collection_id === collectionId)
+  }, [registeredSources, selectedCollection, collectionDraft])
+  const visibleRegisteredSource = filteredRegisteredSources.find(source => source.source_id === selectedSourceId)
+    ?? filteredRegisteredSources[0]
+    ?? null
+  const selectedCollectionCanBuildGraph = (
+    Boolean(normalizeCollectionId(selectedCollection || collectionDraft))
+    && (
+      Number(selectedCollectionMeta?.document_count ?? 0) > 0
+      || collectionDocs.length > 0
+      || Number(collectionActivitySummary?.ingested_count ?? collectionActivityRecord?.ingested_count ?? 0) > 0
+      || Number(collectionActivitySummary?.already_indexed_count ?? collectionActivityRecord?.already_indexed_count ?? 0) > 0
+    )
+  )
+  const selectedSourceRuns = sourceRuns.filter(run => run.source_id === (selectedSourceId || visibleRegisteredSource?.source_id))
   const uploadActivityRecord = asRecord(uploadActivity)
   const uploadActivitySummary = asRecord(uploadActivityRecord?.summary)
   const uploadMetadataSummary = asRecord(uploadActivityRecord?.metadata_summary) ?? {}
@@ -868,6 +944,10 @@ export default function App() {
   const uploadActivityExceptions = uploadActivityFiles.filter(item => asString(item.outcome) !== 'ingested')
   const uploadActivityStatus = asString(uploadActivityRecord?.status)
   const graphBuildDocCount = graphSourceMode === 'collection' ? graphCollectionDocs.length : graphSelectedDocIds.length
+  const graphAssistantFriendly = asRecord(graphAssistantPreflight?.friendly)
+  const graphSmokeFriendly = asRecord(graphSmokeResult?.friendly)
+  const graphQualityWarnings = useMemo(() => graphQualityIssues(graphDetail), [graphDetail])
+  const graphQualityHealth = asRecord(graphDetail?.graph.health)
   const graphTuneCoverage = asRecord(graphTuneResult?.coverage)
   const graphTuneCorpusProfile = asRecord(graphTuneResult?.corpus_profile)
   const graphTunePromptDraftEntries = Object.entries(graphTuneResult?.prompt_drafts ?? {})
@@ -996,6 +1076,19 @@ export default function App() {
     return applyUploadedFiles(payload.uploads, preferredDocId)
   }
 
+  async function refreshSources(preferredSourceId = ''): Promise<string> {
+    const payload = await api.listSources(token)
+    setRegisteredSources(payload.sources)
+    setSourceRuns(payload.runs)
+    setAllowedSourceRoots(payload.allowed_roots)
+    const candidate = preferredSourceId || selectedSourceId
+    const nextSourceId = payload.sources.some(source => source.source_id === candidate)
+      ? candidate
+      : payload.sources[0]?.source_id ?? ''
+    setSelectedSourceId(nextSourceId)
+    return nextSourceId
+  }
+
   async function refreshCollectionDetail(collectionId: string): Promise<CollectionSummary | null> {
     if (!collectionId) {
       setCollectionDetail(null)
@@ -1022,6 +1115,7 @@ export default function App() {
       refreshCollections(collectionId),
       refreshCollectionDetail(collectionId),
       refreshCollectionDocuments(collectionId, preferredDocId),
+      refreshSources(),
     ])
     await refreshCollectionHealth(collectionId)
     return nextDocId
@@ -1261,9 +1355,14 @@ export default function App() {
       }).catch(err => setError(getMessage(err)))
     }
     if (active === 'collections') {
-      void api.listCollections(token).then(payload => {
-        applyCollections(payload.collections)
-      }).catch(err => setError(getMessage(err)))
+      void Promise.all([api.listCollections(token), api.listSources(token)])
+        .then(([collectionsPayload, sourcesPayload]) => {
+          applyCollections(collectionsPayload.collections)
+          setRegisteredSources(sourcesPayload.sources)
+          setSourceRuns(sourcesPayload.runs)
+          setAllowedSourceRoots(sourcesPayload.allowed_roots)
+        })
+        .catch(err => setError(getMessage(err)))
     }
     if (active === 'uploads') {
       void api.listUploadedFiles(token).then(payload => {
@@ -1271,11 +1370,14 @@ export default function App() {
       }).catch(err => setError(getMessage(err)))
     }
     if (active === 'graphs') {
-      void Promise.all([api.listCollections(token), api.listGraphs(token), api.listSkills(token)])
-        .then(([collectionsPayload, graphsPayload, skillsPayload]) => {
+      void Promise.all([api.listCollections(token), api.listGraphs(token), api.listSkills(token), api.listSources(token)])
+        .then(([collectionsPayload, graphsPayload, skillsPayload, sourcesPayload]) => {
           applyCollections(collectionsPayload.collections)
           setGraphs(graphsPayload.graphs)
           setSkills(skillsPayload.data)
+          setRegisteredSources(sourcesPayload.sources)
+          setSourceRuns(sourcesPayload.runs)
+          setAllowedSourceRoots(sourcesPayload.allowed_roots)
           const keepSelected = graphsPayload.graphs.some(graph => graph.graph_id === selectedGraph)
           const first = graphsPayload.graphs[0]?.graph_id ?? ''
           setSelectedGraph(keepSelected ? selectedGraph : first)
@@ -1608,6 +1710,7 @@ export default function App() {
         pathDraft.split('\n').map(item => item.trim()).filter(Boolean),
         metadataProfile,
         indexPreview,
+        knowledgeSourceKind,
       )
       applyCollectionSelection(collectionId)
       await refreshCollectionWorkspace(collectionId)
@@ -1615,6 +1718,220 @@ export default function App() {
       setError('')
     } catch (err) {
       setError(getMessage(err))
+    }
+  }
+
+  async function handleCollectionFilesUpload(files: FileList | File[] | null) {
+    const collectionId = normalizeCollectionId(selectedCollection || collectionDraft)
+    if (!collectionId) {
+      setError('Choose a collection ID first.')
+      return
+    }
+    if (!files || files.length === 0) return
+    const fileArray = Array.isArray(files) ? files : Array.from(files)
+    const relativePaths = fileArray.map(file => {
+      const relativePath = asString((file as File & { webkitRelativePath?: string }).webkitRelativePath)
+      return relativePath || file.name
+    })
+    try {
+      const result = await api.uploadFiles(token, collectionId, fileArray, relativePaths, metadataProfile, indexPreview, 'collection_upload')
+      applyCollectionSelection(collectionId)
+      const preferredDocId = asString(asArray<string>(result.doc_ids)[0])
+      await refreshCollectionWorkspace(collectionId, preferredDocId)
+      setCollectionActivity(result)
+      setError('')
+      notifyOk(indexPreview ? 'Upload preview ready' : 'Documents indexed', collectionId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Collection upload failed', err)
+    }
+  }
+
+  function sourceGlobs(value: string): string[] {
+    return multilineList(value)
+  }
+
+  async function handleSourceScan() {
+    const collectionId = normalizeCollectionId(selectedCollection || collectionDraft)
+    if (!collectionId) {
+      setError('Choose a collection ID first.')
+      return
+    }
+    const paths = multilineList(pathDraft)
+    if (paths.length === 0) {
+      setError('Add at least one local folder or repository path first.')
+      return
+    }
+    try {
+      const scan = await api.scanSource(token, {
+        paths,
+        source_kind: knowledgeSourceKind,
+        collection_id: collectionId,
+        include_globs: sourceGlobs(sourceIncludeGlobs),
+        exclude_globs: sourceGlobs(sourceExcludeGlobs),
+        metadata_profile: metadataProfile,
+      })
+      setSourceScan(scan)
+      setError('')
+      notifyOk('Source preview ready', `${scan.summary.supported_count} supported`)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Source preview failed', err)
+    }
+  }
+
+  async function handleIndexLocalSource() {
+    const collectionId = normalizeCollectionId(selectedCollection || collectionDraft)
+    if (!collectionId) {
+      setError('Choose a collection ID first.')
+      return
+    }
+    const paths = multilineList(pathDraft)
+    if (paths.length === 0) {
+      setError('Add at least one local folder or repository path first.')
+      return
+    }
+    try {
+      const registered = await api.registerSource(token, {
+        paths,
+        source_kind: knowledgeSourceKind,
+        collection_id: collectionId,
+        include_globs: sourceGlobs(sourceIncludeGlobs),
+        exclude_globs: sourceGlobs(sourceExcludeGlobs),
+        metadata_profile: metadataProfile,
+      })
+      setSourceScan(registered.scan)
+      setSelectedSourceId(registered.source.source_id)
+      await refreshSources(registered.source.source_id)
+      const result = await api.refreshSource(token, registered.source.source_id, {
+        metadata_profile: metadataProfile,
+        index_preview: indexPreview,
+        background: false,
+      })
+      const scan = asRecord(result.scan) as SourceScanPayload | null
+      if (scan) setSourceScan(scan)
+      applyCollectionSelection(collectionId)
+      await refreshCollectionWorkspace(collectionId)
+      await refreshSources(registered.source.source_id)
+      setCollectionActivity(result)
+      setError('')
+      notifyOk(indexPreview ? 'Source index preview ready' : 'Source indexed', registered.source.display_name)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Source index failed', err)
+    }
+  }
+
+  async function handleRegisterSource() {
+    const collectionId = normalizeCollectionId(selectedCollection || collectionDraft)
+    if (!collectionId) {
+      setError('Choose a collection ID first.')
+      return
+    }
+    const paths = multilineList(pathDraft)
+    if (paths.length === 0) {
+      setError('Add at least one local folder or repository path first.')
+      return
+    }
+    try {
+      const result = await api.registerSource(token, {
+        paths,
+        source_kind: knowledgeSourceKind,
+        collection_id: collectionId,
+        include_globs: sourceGlobs(sourceIncludeGlobs),
+        exclude_globs: sourceGlobs(sourceExcludeGlobs),
+        metadata_profile: metadataProfile,
+      })
+      setSourceScan(result.scan)
+      await refreshSources(result.source.source_id)
+      setSelectedSourceId(result.source.source_id)
+      setError('')
+      notifyOk('Source registered', result.source.display_name)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Source registration failed', err)
+    }
+  }
+
+  async function handleRefreshSource(previewOnly = false, background = false) {
+    const sourceId = selectedSourceId || filteredRegisteredSources[0]?.source_id
+    if (!sourceId) {
+      setError('Choose a registered source first.')
+      return
+    }
+    try {
+      const result = await api.refreshSource(token, sourceId, {
+        metadata_profile: metadataProfile,
+        index_preview: previewOnly || indexPreview,
+        background,
+      })
+      const run = asRecord(result.run)
+      if (run) {
+        await refreshSources(sourceId)
+        setCollectionActivity(result)
+        setError('')
+        notifyOk('Source refresh queued', sourceId)
+        return
+      }
+      const scan = asRecord(result.scan) as SourceScanPayload | null
+      if (scan) setSourceScan(scan)
+      const collectionId = asString(result.collection_id, selectedCollection || collectionDraft)
+      if (collectionId) {
+        applyCollectionSelection(collectionId)
+        await refreshCollectionWorkspace(collectionId)
+      }
+      await refreshSources(sourceId)
+      setCollectionActivity(result)
+      setError('')
+      notifyOk(previewOnly || indexPreview ? 'Source refresh preview ready' : 'Registered source refreshed', sourceId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Source refresh failed', err)
+    }
+  }
+
+  function openGraphBuilderForCollection(collectionId: string) {
+    const normalized = normalizeCollectionId(collectionId)
+    if (!normalized) return
+    setGraphCollectionId(normalized)
+    setGraphSourceMode('collection')
+    setGraphSelectedDocIds([])
+    setGraphDraftId('')
+    setGraphDisplayNameDraft('')
+    setGraphPromptDraft('{}')
+    setGraphConfigDraft('{}')
+    setGraphAssistantPreflight(null)
+    setGraphSmokeResult(null)
+    setActive('graphs')
+  }
+
+  async function handleGraphSuggest() {
+    const collectionId = normalizeCollectionId(graphCollectionId || selectedCollection || collectionDraft)
+    if (!collectionId) {
+      setError('Choose a collection before generating graph defaults.')
+      return
+    }
+    try {
+      const payload = await api.suggestGraph(token, {
+        collection_id: collectionId,
+        intent: graphIntent,
+        source_doc_ids: graphSourceMode === 'manual' ? graphSelectedDocIds : [],
+      })
+      setGraphCollectionId(collectionId)
+      setGraphDraftId(asString(payload.graph_id, graphDraftId))
+      setGraphDisplayNameDraft(asString(payload.display_name, graphDisplayNameDraft))
+      setGraphConfigDraft(JSON.stringify(payload.config_overrides ?? {}, null, 2))
+      setGraphPromptDraft(JSON.stringify(payload.prompt_overrides ?? {}, null, 2))
+      if (graphSourceMode === 'manual') {
+        setGraphSelectedDocIds(asArray<string>(payload.source_doc_ids))
+      }
+      setGraphAssistantPreflight(null)
+      setGraphSmokeResult(null)
+      setError('')
+      notifyOk('Graph defaults suggested', `${formatWholeNumber(payload.source_count)} source documents`)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Graph suggestion failed', err)
     }
   }
 
@@ -1790,6 +2107,8 @@ export default function App() {
         setSelectedGraph(createdGraphId)
         setGraphTuneResult(null)
         setGraphTuneSelectedPrompts([])
+        setGraphAssistantPreflight(null)
+        setGraphSmokeResult(null)
         await refreshGraphs(createdGraphId)
         const detail = await api.getGraph(token, createdGraphId)
         setGraphDetail(detail)
@@ -1809,11 +2128,14 @@ export default function App() {
       return
     }
     try {
-      const payload = await api.validateGraph(token, selectedGraph)
-      setGraphValidation(payload)
+      const payload = await api.graphAssistantPreflight(token, selectedGraph)
+      setGraphAssistantPreflight(payload)
+      setGraphValidation(payload.validation ?? (payload as unknown as Record<string, unknown>))
       setError('')
+      notifyOk('Graph preflight complete', asString(asRecord(payload.friendly)?.headline, selectedGraph))
     } catch (err) {
       setError(getMessage(err))
+      notifyError('Graph preflight failed', err)
     }
   }
 
@@ -1833,11 +2155,51 @@ export default function App() {
       const runsPayload = await api.getGraphRuns(token, selectedGraph)
       setGraphRuns(runsPayload.runs)
       setGraphValidation(response)
+      try {
+        const smoke = await api.graphSmokeTest(token, selectedGraph, {
+          query: graphSmokeQuery,
+          methods: [],
+          limit: 6,
+        })
+        setGraphSmokeResult(smoke)
+      } catch (smokeErr) {
+        setGraphSmokeResult({
+          graph_id: selectedGraph,
+          query: graphSmokeQuery,
+          friendly: {
+            status: 'no_results',
+            query_ready: false,
+            result_count: 0,
+            citation_count: 0,
+            message: getMessage(smokeErr),
+          },
+        })
+      }
       setError('')
       notifyOk(refresh ? 'Graph refreshed' : 'Graph built', selectedGraph)
     } catch (err) {
       setError(getMessage(err))
       notifyError(refresh ? 'Graph refresh failed' : 'Graph build failed', err)
+    }
+  }
+
+  async function handleGraphSmokeTest() {
+    if (!selectedGraph) {
+      setError('Create or select a graph first.')
+      return
+    }
+    try {
+      const payload = await api.graphSmokeTest(token, selectedGraph, {
+        query: graphSmokeQuery,
+        methods: [],
+        limit: 6,
+      })
+      setGraphSmokeResult(payload)
+      setError('')
+      notifyOk('Smoke test complete', asString(asRecord(payload.friendly)?.message, selectedGraph))
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Smoke test failed', err)
     }
   }
 
@@ -4027,9 +4389,40 @@ export default function App() {
           <div className="content-stack collection-main-stack">
             <SurfaceCard
               className="collection-workspace-card"
-              title="Add Documents"
-              subtitle="Ingest host paths or sync configured sources into the selected knowledge collection."
+              title="Knowledge Builder"
+              subtitle="Bring files, folders, or approved local repositories into a collection, then hand the corpus directly to GraphRAG."
             >
+              <input
+                ref={collectionFilesInputRef}
+                aria-label="Collection Upload Files Input"
+                type="file"
+                multiple
+                className="visually-hidden"
+                tabIndex={-1}
+                onChange={event => {
+                  void handleCollectionFilesUpload(event.target.files)
+                  event.currentTarget.value = ''
+                }}
+              />
+              <input
+                ref={node => {
+                  collectionFolderInputRef.current = node
+                  if (node) {
+                    node.setAttribute('webkitdirectory', '')
+                    node.setAttribute('directory', '')
+                  }
+                }}
+                aria-label="Collection Upload Folder Input"
+                type="file"
+                multiple
+                className="visually-hidden"
+                tabIndex={-1}
+                onChange={event => {
+                  void handleCollectionFilesUpload(event.target.files)
+                  event.currentTarget.value = ''
+                }}
+              />
+
               <div className="badge-cluster">
                 <StatusBadge tone={selectedCollectionMeta ? 'accent' : 'neutral'}>
                   {selectedCollectionMeta?.collection_id || normalizeCollectionId(collectionDraft) || 'No collection selected'}
@@ -4078,27 +4471,23 @@ export default function App() {
 
               <SectionTabs
                 tabs={[
-                  { id: 'host', label: 'Ingest Host Path' },
-                  { id: 'sync', label: 'Sync Configured Sources' },
+                  { id: 'upload', label: 'Upload' },
+                  { id: 'local', label: 'Local Path' },
+                  { id: 'registered', label: 'Registered Sources' },
+                  { id: 'sync', label: 'Configured Sync' },
                 ]}
-                active={collectionAction === 'sync' ? 'sync' : 'host'}
+                active={activeCollectionAction}
                 onChange={value => setCollectionAction(value as CollectionActionMode)}
                 ariaLabel="Collection actions"
                 className="collection-action-tabs"
               />
 
-              {(collectionAction !== 'sync') && (
+              {activeCollectionAction === 'upload' && (
                 <div className="collection-action-panel">
-                  <label className="field">
-                    <span>Host Paths</span>
-                    <textarea
-                      aria-label="Host Paths"
-                      rows={5}
-                      value={pathDraft}
-                      onChange={event => setPathDraft(event.target.value)}
-                      placeholder={'/absolute/path/to/file.csv\n/absolute/path/to/folder'}
-                    />
-                  </label>
+                  <div className="collection-action-copy">
+                    <strong>Upload files or a folder</strong>
+                    <p>Folder uploads preserve relative paths and index into this knowledge collection instead of upload-only evidence scope.</p>
+                  </div>
                   <div className="form-grid form-grid-compact">
                     <label className="field">
                       <span>Indexing Profile</span>
@@ -4121,20 +4510,226 @@ export default function App() {
                       </span>
                     </label>
                   </div>
-                  <div className="collection-action-copy">
-                    <p>Use this for deterministic local ingest when you want the workspace to preserve folder-relative display paths.</p>
-                    <ActionButton tone="primary" onClick={() => void handlePathIngest()}>Ingest Host Paths</ActionButton>
+                  <div className="inline-action-pair">
+                    <ActionButton tone="primary" onClick={() => collectionFilesInputRef.current?.click()}>Upload Files</ActionButton>
+                    <ActionButton tone="secondary" onClick={() => collectionFolderInputRef.current?.click()}>Upload Folder</ActionButton>
                   </div>
                 </div>
               )}
 
-              {collectionAction === 'sync' && (
+              {activeCollectionAction === 'local' && (
+                <div className="collection-action-panel">
+                  <div className="collection-action-copy">
+                    <strong>{knowledgeSourceKind === 'local_repo' ? 'Local repository' : 'Local folder'} source</strong>
+                    <p>Local paths are scanned against server-side allowed roots before any files are indexed.</p>
+                  </div>
+                  <SegmentedControl<KnowledgeSourceKind>
+                    ariaLabel="Local source type"
+                    value={knowledgeSourceKind}
+                    onChange={setKnowledgeSourceKind}
+                    options={[
+                      { value: 'local_folder', label: 'Folder' },
+                      { value: 'local_repo', label: 'Repository' },
+                    ]}
+                  />
+                  <label className="field">
+                    <span>Local Paths</span>
+                    <textarea
+                      aria-label="Local Paths"
+                      rows={5}
+                      value={pathDraft}
+                      onChange={event => setPathDraft(event.target.value)}
+                      placeholder={'/absolute/path/to/folder\n/absolute/path/to/repository'}
+                    />
+                  </label>
+                  <div className="form-grid form-grid-compact">
+                    <label className="field">
+                      <span>Include Globs</span>
+                      <textarea
+                        aria-label="Include Globs"
+                        rows={4}
+                        value={sourceIncludeGlobs}
+                        onChange={event => setSourceIncludeGlobs(event.target.value)}
+                        placeholder={'docs/**\n*.md'}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Exclude Globs</span>
+                      <textarea
+                        aria-label="Exclude Globs"
+                        rows={4}
+                        value={sourceExcludeGlobs}
+                        onChange={event => setSourceExcludeGlobs(event.target.value)}
+                        placeholder={'node_modules/**\n.git/**'}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Indexing Profile</span>
+                      <select value={metadataProfile} onChange={event => setMetadataProfile(event.target.value)}>
+                        <option value="auto">Auto</option>
+                        <option value="deterministic">Deterministic</option>
+                        <option value="basic">Basic</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </label>
+                    <label className="checkbox-card">
+                      <input
+                        type="checkbox"
+                        checked={indexPreview}
+                        onChange={event => setIndexPreview(event.target.checked)}
+                      />
+                      <span className="checkbox-copy">
+                        <strong>Preview only</strong>
+                        <span>Inspect metadata before writing documents.</span>
+                      </span>
+                    </label>
+                  </div>
+                  <div className="collection-action-copy">
+                    <span className="field-label">Allowed Roots</span>
+                    <div className="badge-cluster">
+                      {allowedSourceRoots.length > 0 ? allowedSourceRoots.slice(0, 4).map(root => (
+                        <StatusBadge key={root} tone="neutral">{root}</StatusBadge>
+                      )) : (
+                        <StatusBadge tone="warning">No allowed roots reported</StatusBadge>
+                      )}
+                      {allowedSourceRoots.length > 4 && <StatusBadge tone="neutral">+{allowedSourceRoots.length - 4} more</StatusBadge>}
+                    </div>
+                  </div>
+                  <ActionBar>
+                    <ActionButton tone="secondary" onClick={() => void handleSourceScan()}>Preview Scan</ActionButton>
+                    <ActionButton tone="ghost" onClick={() => void handleRegisterSource()}>Register Source</ActionButton>
+                    <ActionButton tone="primary" onClick={() => void handleIndexLocalSource()}>Index Source</ActionButton>
+                  </ActionBar>
+                </div>
+              )}
+
+              {activeCollectionAction === 'registered' && (
+                <div className="collection-action-panel">
+                  <div className="collection-action-copy">
+                    <strong>Refresh a registered source</strong>
+                    <p>Registered folders and repositories remember their include/exclude rules and show changed, added, and deleted files before writing.</p>
+                  </div>
+                  {filteredRegisteredSources.length > 0 ? (
+                    <EntityList
+                      items={filteredRegisteredSources}
+                      selectedKey={visibleRegisteredSource?.source_id ?? selectedSourceId}
+                      getKey={source => source.source_id}
+                      getLabel={source => source.display_name}
+                      getDescription={source => `${source.source_kind} → ${source.collection_id}`}
+                      getMeta={source => (
+                        <>
+                          <StatusBadge tone="neutral">{source.source_kind}</StatusBadge>
+                          <span>{source.last_scan?.summary.supported_count ?? 0} files</span>
+                        </>
+                      )}
+                      onSelect={source => {
+                        setSelectedSourceId(source.source_id)
+                        if (source.last_scan) setSourceScan(source.last_scan)
+                      }}
+                    />
+                  ) : (
+                    <EmptyState title="No registered sources" body="Register a local folder or repository from the Local Path tab, then refresh it here without retyping paths." />
+                  )}
+
+                  {visibleRegisteredSource && (
+                    <div className="summary-list">
+                      <div className="summary-row">
+                        <span>Paths</span>
+                        <strong>{visibleRegisteredSource.paths.join(', ')}</strong>
+                      </div>
+                      <div className="summary-row">
+                        <span>Last Scan</span>
+                        <strong>{visibleRegisteredSource.last_scan ? `${visibleRegisteredSource.last_scan.summary.supported_count} supported, ${visibleRegisteredSource.last_scan.summary.skipped_count} skipped` : 'Not scanned'}</strong>
+                      </div>
+                      <div className="summary-row">
+                        <span>Last Refresh</span>
+                        <strong>{formatTimestamp(asRecord(visibleRegisteredSource.last_refresh)?.updated_at)}</strong>
+                      </div>
+                    </div>
+                  )}
+
+                  <ActionBar>
+                    <ActionButton tone="secondary" onClick={() => void handleRefreshSource(true)} disabled={!visibleRegisteredSource}>Preview Drift</ActionButton>
+                    <ActionButton tone="primary" onClick={() => void handleRefreshSource(false)} disabled={!visibleRegisteredSource}>Refresh Now</ActionButton>
+                    <ActionButton tone="ghost" onClick={() => void handleRefreshSource(false, true)} disabled={!visibleRegisteredSource}>Queue Refresh</ActionButton>
+                  </ActionBar>
+
+                  {selectedSourceRuns.length > 0 && (
+                    <div className="timeline-list">
+                      {selectedSourceRuns.slice(0, 3).map(run => (
+                        <article key={run.run_id} className="timeline-item">
+                          <div className="timeline-dot" aria-hidden="true" />
+                          <div>
+                            <strong>{humanizeKey(run.status)}</strong>
+                            <p>{run.detail || run.operation}</p>
+                            <span>{formatTimestamp(run.completed_at || run.updated_at || run.started_at)}</span>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeCollectionAction === 'sync' && (
                 <div className="collection-action-panel collection-action-panel-compact">
                   <div className="collection-action-copy">
                     <strong>Sync configured KB sources</strong>
-                    <p>Use this when the collection should mirror the runtime KB roots. Ad hoc uploaded or host-path corpora do not require this step.</p>
+                    <p>Use this when the collection should mirror the runtime KB roots. Uploaded folders and registered sources do not require this step.</p>
                   </div>
                   <ActionButton tone="ghost" onClick={() => void handleSyncCollection()}>Sync Configured Sources</ActionButton>
+                </div>
+              )}
+
+              {sourceScan && (
+                <div className="preview-card collection-result-card">
+                  <div className="badge-cluster">
+                    <StatusBadge tone={toneForStatus(sourceScan.status)}>{humanizeKey(sourceScan.status)}</StatusBadge>
+                    <StatusBadge tone="accent">{sourceScanSummary?.supported_count ?? 0} supported</StatusBadge>
+                    <StatusBadge tone={sourceScanSummary?.skipped_count ? 'warning' : 'neutral'}>{sourceScanSummary?.skipped_count ?? 0} skipped</StatusBadge>
+                    <StatusBadge tone={sourceScanSummary?.blocked_count ? 'danger' : 'neutral'}>{sourceScanSummary?.blocked_count ?? 0} blocked</StatusBadge>
+                    <StatusBadge tone="neutral">{sourceScanSummary?.estimated_chunks ?? 0} est. chunks</StatusBadge>
+                  </div>
+                  <div className="summary-list">
+                    <div className="summary-row">
+                      <span>Source</span>
+                      <strong>{humanizeKey(sourceScan.source_kind)} into {sourceScan.collection_id}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Size</span>
+                      <strong>{formatWholeNumber(sourceScanSummary?.total_size_bytes)} bytes</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Duplicates</span>
+                      <strong>
+                        {sourceScan.duplicate_display_paths.length > 0
+                          ? shortList(sourceScan.duplicate_display_paths.slice(0, 3))
+                          : (sourceScan.duplicate_filenames ?? []).length > 0
+                            ? shortList((sourceScan.duplicate_filenames ?? []).slice(0, 3))
+                            : 'None'}
+                      </strong>
+                    </div>
+                  </div>
+                  {sourceScan.warnings.length > 0 && (
+                    <div className="inline-alert inline-alert-warning">
+                      <span>Warnings</span>
+                      <strong>{shortList(sourceScan.warnings.slice(0, 4))}</strong>
+                    </div>
+                  )}
+                  {sourceScan.supported_files.length > 0 && (
+                    <div className="collection-result-list">
+                      {sourceScan.supported_files.slice(0, 6).map(file => (
+                        <div key={`${file.source_path}-${file.display_path}`} className="meta-chip">
+                          <span>{file.display_path}</span>
+                          <strong>{file.filename}</strong>
+                          <span>{formatWholeNumber(file.size_bytes)} bytes</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {sourceScan.skipped_files.length > 0 && (
+                    <p className="muted-copy">{sourceScan.skipped_files.length} skipped file(s), including {shortList(sourceScan.skipped_files.slice(0, 3).map(file => file.display_path))}.</p>
+                  )}
                 </div>
               )}
 
@@ -4212,6 +4807,17 @@ export default function App() {
                         <p className="muted-copy">{collectionActivityExceptions.length - 6} more file result(s) are available in the API payload.</p>
                       )}
                     </div>
+                  )}
+
+                  {selectedCollectionCanBuildGraph && !Boolean(collectionActivityRecord?.preview) && (
+                    <ActionBar>
+                      <ActionButton
+                        tone="primary"
+                        onClick={() => openGraphBuilderForCollection(normalizeCollectionId(selectedCollection || collectionDraft))}
+                      >
+                        Build Graph From This Corpus
+                      </ActionButton>
+                    </ActionBar>
                   )}
                 </div>
               ) : (
@@ -5072,6 +5678,8 @@ export default function App() {
                   setGraphTuneTargets(['extract_graph.txt'])
                   setGraphTuneResult(null)
                   setGraphTuneSelectedPrompts([])
+                  setGraphAssistantPreflight(null)
+                  setGraphSmokeResult(null)
                 }}>
                   New Graph
                 </ActionButton>
@@ -5105,7 +5713,7 @@ export default function App() {
             <div className="content-stack">
               <SurfaceCard
                 title="Graph Workspace"
-                subtitle="Select a knowledge collection or choose indexed KB documents, then save the draft before validating and building the GraphRAG project."
+                subtitle="Choose a corpus, generate sensible GraphRAG defaults, run a friendly preflight, then build and smoke-test the graph."
               >
                 <div className="form-grid form-grid-compact">
                   <label className="field">
@@ -5139,6 +5747,20 @@ export default function App() {
                           {asString(collection.collection_id)}
                         </option>
                       ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Graph Intent</span>
+                    <select
+                      aria-label="Graph Intent"
+                      value={graphIntent}
+                      onChange={event => setGraphIntent(event.target.value)}
+                    >
+                      <option value="general">General Knowledge</option>
+                      <option value="vendor_risk">Vendor Risk</option>
+                      <option value="requirements">Requirements</option>
+                      <option value="policy">Policy & Controls</option>
+                      <option value="research">Research Corpus</option>
                     </select>
                   </label>
                 </div>
@@ -5195,36 +5817,110 @@ export default function App() {
                     )}
                 </div>
 
-                <div className="form-grid">
-                  <label className="field">
-                    <span>Prompt Overrides JSON</span>
-                    <textarea
-                      aria-label="Graph Prompt Overrides"
-                      rows={8}
-                      value={graphPromptDraft}
-                      onChange={event => setGraphPromptDraft(event.target.value)}
-                      placeholder='{"extract_graph.txt": "Custom extraction instructions"}'
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Config Overrides JSON</span>
-                    <textarea
-                      aria-label="Graph Config Overrides"
-                      rows={8}
-                      value={graphConfigDraft}
-                      onChange={event => setGraphConfigDraft(event.target.value)}
-                      placeholder='{"extract_graph": {"entity_types": ["vendor", "risk"]}}'
-                    />
-                  </label>
-                </div>
-
                 <ActionBar>
+                  <ActionButton tone="secondary" onClick={() => void handleGraphSuggest()}>Suggest Defaults</ActionButton>
                   <ActionButton tone="primary" onClick={() => void handleGraphCreate()}>Save Draft</ActionButton>
-                  <ActionButton tone="secondary" onClick={() => void handleGraphValidate()} disabled={!selectedGraph}>Validate</ActionButton>
+                  <ActionButton tone="secondary" onClick={() => void handleGraphValidate()} disabled={!selectedGraph}>Run Preflight</ActionButton>
                   <ActionButton tone="ghost" onClick={() => void handleGraphBuild(false)} disabled={!selectedGraph}>Build</ActionButton>
                   <ActionButton tone="ghost" onClick={() => void handleGraphBuild(true)} disabled={!selectedGraph}>Refresh</ActionButton>
-                  <ActionButton tone="ghost" onClick={() => void handleGraphSavePrompts()} disabled={!selectedGraph}>Save Prompts</ActionButton>
                 </ActionBar>
+
+                {graphAssistantFriendly && (
+                  <div className="preview-card collection-result-card">
+                    <div className="badge-cluster">
+                      <StatusBadge tone={toneForStatus(graphAssistantFriendly.status)}>{humanizeKey(asString(graphAssistantFriendly.status, 'unknown'))}</StatusBadge>
+                      <StatusBadge tone={graphAssistantFriendly.ready ? 'ok' : 'warning'}>{asString(graphAssistantFriendly.headline, 'Preflight')}</StatusBadge>
+                      <StatusBadge tone="neutral">{formatWholeNumber(graphAssistantFriendly.source_count)} sources</StatusBadge>
+                      <StatusBadge tone={graphAssistantFriendly.runtime_ok ? 'ok' : 'danger'}>Runtime {graphAssistantFriendly.runtime_ok ? 'ok' : 'blocked'}</StatusBadge>
+                    </div>
+                    <div className="summary-list">
+                      <div className="summary-row">
+                        <span>Model Endpoint</span>
+                        <strong>{humanizeKey(asString(graphAssistantFriendly.model_endpoint_status, 'unknown'))}</strong>
+                      </div>
+                      <div className="summary-row">
+                        <span>Extraction Sample</span>
+                        <strong>{humanizeKey(asString(graphAssistantFriendly.extraction_status, 'unknown'))}</strong>
+                      </div>
+                      <div className="summary-row">
+                        <span>Community Reports</span>
+                        <strong>{humanizeKey(asString(graphAssistantFriendly.community_report_status, 'unknown'))}</strong>
+                      </div>
+                    </div>
+                    {asArray<string>(graphAssistantFriendly.blockers).length > 0 && (
+                      <div className="inline-alert">
+                        <span>Blockers</span>
+                        <strong>{shortList(asArray<string>(graphAssistantFriendly.blockers).slice(0, 4))}</strong>
+                      </div>
+                    )}
+                    {asArray<string>(graphAssistantFriendly.warnings).length > 0 && (
+                      <div className="inline-alert inline-alert-warning">
+                        <span>Warnings</span>
+                        <strong>{shortList(asArray<string>(graphAssistantFriendly.warnings).slice(0, 4))}</strong>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="collection-action-panel collection-action-panel-compact">
+                  <label className="field">
+                    <span>Smoke Query</span>
+                    <input
+                      aria-label="Graph Smoke Query"
+                      value={graphSmokeQuery}
+                      onChange={event => setGraphSmokeQuery(event.target.value)}
+                      placeholder="What are the main entities and relationships in this graph?"
+                    />
+                  </label>
+                  <ActionButton tone="secondary" onClick={() => void handleGraphSmokeTest()} disabled={!selectedGraph}>Smoke Test</ActionButton>
+                </div>
+
+                {graphSmokeFriendly && (
+                  <div className="inline-alert inline-alert-warning">
+                    <span>{asString(graphSmokeFriendly.status, 'Smoke test')}</span>
+                    <strong>{asString(graphSmokeFriendly.message, 'No smoke-test message available.')}</strong>
+                  </div>
+                )}
+
+                <div className="field-stack">
+                  <button
+                    type="button"
+                    className="collapsible-toggle"
+                    aria-expanded={graphAdvancedOpen}
+                    onClick={() => setGraphAdvancedOpen(!graphAdvancedOpen)}
+                  >
+                    {graphAdvancedOpen ? 'Hide Advanced GraphRAG JSON' : 'Show Advanced GraphRAG JSON'}
+                  </button>
+                  {graphAdvancedOpen && (
+                    <>
+                      <div className="form-grid">
+                        <label className="field">
+                          <span>Prompt Overrides JSON</span>
+                          <textarea
+                            aria-label="Graph Prompt Overrides"
+                            rows={8}
+                            value={graphPromptDraft}
+                            onChange={event => setGraphPromptDraft(event.target.value)}
+                            placeholder='{"extract_graph.txt": "Custom extraction instructions"}'
+                          />
+                        </label>
+                        <label className="field">
+                          <span>Config Overrides JSON</span>
+                          <textarea
+                            aria-label="Graph Config Overrides"
+                            rows={8}
+                            value={graphConfigDraft}
+                            onChange={event => setGraphConfigDraft(event.target.value)}
+                            placeholder='{"extract_graph": {"entity_types": ["vendor", "risk"]}}'
+                          />
+                        </label>
+                      </div>
+                      <ActionBar>
+                        <ActionButton tone="ghost" onClick={() => void handleGraphSavePrompts()} disabled={!selectedGraph}>Save Prompt Overrides</ActionButton>
+                      </ActionBar>
+                    </>
+                  )}
+                </div>
               </SurfaceCard>
 
               <SurfaceCard
@@ -5503,6 +6199,84 @@ export default function App() {
                 <EmptyState title="Select or create a graph" body="The inspector will show query readiness, runs, logs, and graph-bound skills once a graph is selected." />
               )}
             </CollapsibleSurfaceCard>
+
+            <SurfaceCard
+              title="Graph Quality Studio"
+              subtitle="Spot coverage, freshness, and grounding signals after a build so users know when GraphRAG is stronger than normal RAG."
+            >
+              {graphDetail ? (
+                <div className="field-stack">
+                  <div className="collection-summary-strip">
+                    <div className="meta-chip">
+                      <span>Entities</span>
+                      <strong>{formatWholeNumber(graphQualityHealth?.entity_count ?? graphDetail.graph.entity_samples?.length)}</strong>
+                    </div>
+                    <div className="meta-chip">
+                      <span>Relationships</span>
+                      <strong>{formatWholeNumber(graphQualityHealth?.relationship_count ?? graphDetail.graph.relationship_samples?.length)}</strong>
+                    </div>
+                    <div className="meta-chip">
+                      <span>Source Coverage</span>
+                      <strong>{formatWholeNumber(graphDetail.sources.length)} sources</strong>
+                    </div>
+                    <div className="meta-chip">
+                      <span>Freshness</span>
+                      <strong>{formatPercent(graphDetail.graph.freshness_score)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="form-grid form-grid-compact">
+                    <div className="preview-card">
+                      <div className="tool-card-head">
+                        <strong>Entity Samples</strong>
+                        <StatusBadge tone="neutral">{graphDetail.graph.entity_samples?.length ?? 0}</StatusBadge>
+                      </div>
+                      {graphDetail.graph.entity_samples?.length ? (
+                        <p>{shortList(graphDetail.graph.entity_samples.slice(0, 6))}</p>
+                      ) : (
+                        <p>No entity samples available yet.</p>
+                      )}
+                    </div>
+                    <div className="preview-card">
+                      <div className="tool-card-head">
+                        <strong>Relationship Samples</strong>
+                        <StatusBadge tone="neutral">{graphDetail.graph.relationship_samples?.length ?? 0}</StatusBadge>
+                      </div>
+                      {graphDetail.graph.relationship_samples?.length ? (
+                        <p>{shortList(graphDetail.graph.relationship_samples.slice(0, 6))}</p>
+                      ) : (
+                        <p>No relationship samples available yet.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {graphQualityWarnings.length > 0 ? (
+                    <div className="inline-alert inline-alert-warning">
+                      <span>Why this graph may be weak</span>
+                      <strong>{shortList(graphQualityWarnings.slice(0, 5))}</strong>
+                    </div>
+                  ) : (
+                    <div className="inline-alert inline-alert-warning">
+                      <span>Graph / vector guidance</span>
+                      <strong>Use GraphRAG for relationship-heavy questions; use normal RAG for pinpoint quotes, table lookup, and single-document evidence.</strong>
+                    </div>
+                  )}
+
+                  <div className="summary-list">
+                    <div className="summary-row">
+                      <span>GraphRAG Best For</span>
+                      <strong>Entities, relationships, communities, multi-hop summaries</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Normal RAG Best For</span>
+                      <strong>Exact passages, narrow facts, fresh source-only retrieval</strong>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <EmptyState title="No graph selected" body="Build or select a graph to inspect quality signals." />
+              )}
+            </SurfaceCard>
           </div>
         ) : (
           <div className="content-stack">

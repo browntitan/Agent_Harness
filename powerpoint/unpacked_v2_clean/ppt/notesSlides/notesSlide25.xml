@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Slide Image Placeholder 1"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldImg"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="3" name="Notes Placeholder 2"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="body" idx="1"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US" dirty="0"/>
+              <a:t>When the coordinator agent decomposes a complex task, it creates a structured task plan that specifies exactly what each worker should do and how they should pass results back. Each task specification includes an executor - the worker agent type like rag_worker, data_analyst, utility, general, graph_manager, or verifier. Tasks can run in sequential or parallel execution modes. Terminal states are completed, failed, stopped, or waiting_message (when a worker needs clarification from the coordinator). The 8 artifact handoff types define the structured data that workers pass back to the coordinator and finalizer. These include title_candidates for document identification, doc_focus for narrowing to specific documents, research_facets for breaking research into angles, facet_matches for results mapped to research angles, doc_digest for document summaries, subsystem_inventory for architecture inventories, policy_guidance_matches for compliance findings, and buyer_recommendation_table for comparative analysis. Document ranking uses 6 keys to prioritize which documents matter most: is_meta_document flags high-level overview docs, reviewed_relevance scores human-verified importance, matched_facets counts how many research angles a doc covers, strong_evidence_count tallies high-confidence citations, title_path_score measures filename relevance, and seed_hits counts initial search matches. This structured approach ensures worker outputs are machine-parseable and the finalizer can synthesize coherently.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="4" name="Slide Number Placeholder 3"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldNum" sz="quarter" idx="10"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:fld id="{F7021451-1387-4CA6-816F-3879F97B5CBC}" type="slidenum">
+              <a:rPr lang="en-US"/>
+              <a:t>0</a:t>
+            </a:fld>
+            <a:endParaRPr lang="en-US"/>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

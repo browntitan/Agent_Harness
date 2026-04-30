@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.messages import SessionState
 from agentic_chatbot_next.capabilities import EffectiveCapabilities
+from agentic_chatbot_next.agents.registry import AgentRegistry
 from agentic_chatbot_next.runtime.context import RuntimePaths
 from agentic_chatbot_next.tools.base import ToolContext
 from agentic_chatbot_next.tools.policy import ToolPolicyService
@@ -222,3 +223,13 @@ def test_tool_policy_restricted_mode_allows_read_only_tools_only(tmp_path: Path)
 
     assert policy.is_allowed(agent, definitions["list_jobs"], ctx)
     assert not policy.is_allowed(agent, definitions["stop_job"], ctx)
+
+
+def test_research_coordinator_has_no_terminal_or_execute_code_tools_by_default() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    registry = AgentRegistry(repo_root / "data" / "agents")
+    agent = registry.get("research_coordinator")
+
+    assert agent is not None
+    forbidden = {"execute_code", "workspace_write", "workspace_read", "terminal", "shell"}
+    assert forbidden.isdisjoint(set(agent.allowed_tools))

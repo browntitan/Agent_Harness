@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Slide Image Placeholder 1"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldImg"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="3" name="Notes Placeholder 2"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="body" idx="1"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US" dirty="0"/>
+              <a:t>Deep RAG sits above the base RAG pipeline and adds two critical capabilities: multi-pass parallel retrieval and automated verification. On the left, Deep RAG mode controls search depth with three modes. Off uses the standard single-pass pipeline. Auto lets an LLM policy planner decide based on query complexity - broad research questions automatically escalate to deep mode. Force always uses the full deep pipeline. Within deep mode, three concurrent retrieval lanes run in parallel, each pursuing different search strategies. If a collection returns 24 or more chunks, full-read mode activates to ensure comprehensive coverage. One synchronous reflection round per pass lets the system self-correct before moving on. When 4 or more background tasks are queued, the system switches to background mode to avoid blocking interactive queries. Coverage goals specify how exhaustive the search should be: corpus_wide, exhaustive, targeted, or cross_document. Result modes control output format: answer, comparison, or inventory. On the right, the verification pipeline catches four types of problems. Missed document detection identifies documents that should have been retrieved but were not. Unsupported hop detection flags claims requiring evidence hops the system cannot make. Citation mismatch checks that citation text actually aligns with source material. And stale graph detection compares graph index age against document ingest timestamps. The 4-level relevance grading system scores chunks from 0 (not relevant) to 3 (highly relevant), using LLM grading for up to 12 chunks with a heuristic fallback that assigns score 3 when term overlap reaches 3 or more tokens.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="4" name="Slide Number Placeholder 3"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldNum" sz="quarter" idx="10"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:fld id="{F7021451-1387-4CA6-816F-3879F97B5CBC}" type="slidenum">
+              <a:rPr lang="en-US"/>
+              <a:t>0</a:t>
+            </a:fld>
+            <a:endParaRPr lang="en-US"/>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

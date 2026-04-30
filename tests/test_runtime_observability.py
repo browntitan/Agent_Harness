@@ -1894,7 +1894,7 @@ def test_process_turn_upgrades_basic_router_candidate_when_semantic_contract_req
     assert router_event["payload"]["router_evidence"]["basic_candidate_upgraded"] is True
 
 
-def test_process_turn_defaults_broad_grounded_analysis_to_coordinator(tmp_path: Path, monkeypatch):
+def test_process_turn_defaults_deep_research_grounded_analysis_to_research_coordinator(tmp_path: Path, monkeypatch):
     settings = _runtime_settings(tmp_path)
     providers = SimpleNamespace(chat=object(), judge=object(), embeddings=object())
     stores = SimpleNamespace()
@@ -1939,7 +1939,7 @@ def test_process_turn_defaults_broad_grounded_analysis_to_coordinator(tmp_path: 
     )
 
     assert text == "agent answer"
-    assert captured["agent_name"] == "coordinator"
+    assert captured["agent_name"] == "research_coordinator"
     assert captured["route_metadata"]["coordinator_default_applied"] is True
 
 
@@ -2252,11 +2252,18 @@ def test_live_progress_sink_translates_tool_lifecycle_to_status_cards() -> None:
     assert started["agentic_tool_call"]["parallel_group_id"] == "tool-wave-general-1-call-1"
     assert started["agentic_tool_call"]["redacted_fields"] == ["input.api_key"]
     assert started["agentic_tool_call"]["payload_limit_chars"] == 12000
+    assert started["agentic_audit_item"]["kind"] == "tool"
+    assert started["agentic_audit_item"]["item_id"] == "tool-call-1"
+    assert started["agentic_audit_item"]["actor"] == "coordinator"
+    assert started["agentic_audit_item"]["target"] == "search_indexed_docs"
+    assert started["agentic_audit_item"]["redacted_fields"] == ["input.api_key"]
     assert completed["status_id"] == "tool-call-1"
     assert completed["done"] is True
     assert completed["agentic_tool_call"]["status"] == "completed"
     assert completed["agentic_tool_call"]["output"] == {"hits": 1}
     assert completed["agentic_tool_call"]["source_event_id"] == "evt_end"
+    assert completed["agentic_audit_item"]["title"] == "search_indexed_docs ran"
+    assert completed["agentic_audit_item"]["output"] == {"hits": 1}
 
 
 def test_live_progress_sink_translates_worker_agent_activity_payloads() -> None:
@@ -2301,6 +2308,11 @@ def test_live_progress_sink_translates_worker_agent_activity_payloads() -> None:
         "completed_at": "",
         "duration_ms": None,
     }
+    assert event["agentic_audit_item"]["kind"] == "handoff"
+    assert event["agentic_audit_item"]["title"] == "coordinator handed off T2 to rag_worker"
+    assert event["agentic_audit_item"]["actor"] == "coordinator"
+    assert event["agentic_audit_item"]["target"] == "rag_worker"
+    assert event["agentic_audit_item"]["group_id"] == "worker-batch-T1-T2"
 
 
 def test_live_progress_sink_translates_top_level_agent_completion_activity() -> None:
@@ -2368,6 +2380,78 @@ def test_live_progress_sink_translates_parallel_group_payloads() -> None:
         "completed_at": "",
         "duration_ms": None,
     }
+    assert event["agentic_audit_item"]["kind"] == "parallel"
+    assert event["agentic_audit_item"]["title"] == "Coordinator handed off 2 task(s) to worker agents"
+    assert event["agentic_audit_item"]["members"] == members
+
+
+def test_live_progress_sink_hides_solo_tool_wave_audit_rows() -> None:
+    sink = LiveProgressSink()
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_tool_wave",
+            event_type="tool_parallel_group_started",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            payload={
+                "group_id": "tool-wave-general-1-call-1",
+                "group_kind": "tool_wave",
+                "status": "running",
+                "execution_mode": "sequential",
+                "size": 1,
+                "members": [{"tool_name": "calculator", "tool_call_id": "call-1"}],
+                "reason": "One tool call was scheduled; details are shown on the tool row.",
+            },
+        )
+    )
+
+    event = sink.events.get_nowait()
+
+    assert event["agentic_parallel_group"]["group_kind"] == "tool_wave"
+    assert event["agentic_audit_item"]["visible"] is False
+    assert event["agentic_audit_item"]["notices"] == [
+        "One tool call was scheduled; details are shown on the tool row."
+    ]
+
+
+def test_live_progress_sink_includes_planner_task_summaries_in_audit_item() -> None:
+    sink = LiveProgressSink()
+    tasks = [
+        {
+            "id": "T1",
+            "title": "Find release-note evidence",
+            "executor": "rag_worker",
+            "mode": "parallel",
+            "depends_on": [],
+            "handoff_schema": "research_inventory",
+        },
+        {
+            "id": "T2",
+            "title": "Summarize operational impact",
+            "executor": "finalizer",
+            "mode": "sequential",
+            "depends_on": ["T1"],
+        },
+    ]
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_plan_done",
+            event_type="coordinator_planning_completed",
+            session_id="tenant:user:conv",
+            agent_name="coordinator",
+            payload={"planner_agent": "planner", "task_count": 2, "summary": "Planned evidence review.", "tasks": tasks},
+        )
+    )
+
+    event = sink.events.get_nowait()
+
+    assert event["type"] == "phase_end"
+    assert event["agentic_status"]["kind"] == "plan"
+    assert event["agentic_audit_item"]["kind"] == "plan"
+    assert event["agentic_audit_item"]["title"] == "Coordinator planned 2 task(s)"
+    assert event["agentic_audit_item"]["tasks"][0]["id"] == "T1"
+    assert event["agentic_audit_item"]["tasks"][0]["executor"] == "rag_worker"
+    assert event["agentic_audit_item"]["tasks"][1]["dependencies"] == ["T1"]
 
 
 def test_live_progress_sink_uses_planner_agent_for_coordinator_planning_events() -> None:

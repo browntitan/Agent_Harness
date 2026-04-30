@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Notes"/>
+          <p:cNvSpPr txBox="1"/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="0" y="0"/>
+            <a:ext cx="10000000" cy="1000000"/>
+          </a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:t>The graph module supports 4 query methods, each optimized for different types of questions. Local queries traverse entity relationships within document clusters - great for "what entities connect contract risk to vendor performance?" type questions. This requires 5 graph artifacts to be built. Global queries generate corpus-wide summaries and cross-document themes - useful for "what are the main risk categories across all our contracts?" This requires 3 artifacts. Drift queries track temporal changes and evolution across graph rebuilds - so you can see how entity relationships changed between two versions of a document corpus. This also requires 5 artifacts. SQL queries go through the StructuredSearchAdapter for exact matches, metadata filtering, and structured queries that do not need semantic search. The build pipeline runs in three phases. Phase 1 is Entity and Relationship Extraction via LLM - the system reads documents and uses the LLM to identify named entities (people, organizations, concepts) and the relationships between them. Phase 2 is Community Detection - the system groups related entities into communities and generates summary reports. This uses native graph algorithms with a text-based fallback. Phase 3 is Embedding and Indexing - entity descriptions and community reports get vectorized for semantic search. Two backends are available: MicrosoftGraphRagBackend provides the full local/global/drift query pipeline, and Neo4jGraphImportBackend enables importing existing Neo4j graph databases.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

@@ -1326,7 +1326,7 @@ def _stream_with_progress(
             break
         if isinstance(event, dict) and any(
             isinstance(event.get(key), dict)
-            for key in ("agentic_tool_call", "agentic_agent_activity", "agentic_parallel_group")
+            for key in ("agentic_tool_call", "agentic_agent_activity", "agentic_parallel_group", "agentic_audit_item")
         ):
             yield _named_sse_event("status", event)
             if tracker is not None and not isinstance(event.get("agentic_tool_call"), dict):

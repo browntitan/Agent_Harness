@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Notes"/>
+          <p:cNvSpPr txBox="1"/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="0" y="0"/>
+            <a:ext cx="10000000" cy="1000000"/>
+          </a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:t>The storage subsystem provides a unified abstraction over three different blob storage backends: Amazon S3, Azure Blob Storage, and local filesystem. This means the application code never cares where files physically live - it just works with BlobRef objects. A BlobRef is a dataclass with 8 fields: backend identifies which storage provider (S3, Azure, or local), uri is the full resource URI, bucket and key specify the bucket name and object key, etag and sha1 provide content integrity hashes for deduplication and verification, size is the byte count, and content_type is the MIME type. The system uses key sanitization and SHA1 hashing to ensure safe, deduplicated storage - if you upload the same file twice, it detects the duplicate by hash. BlobRefs are used across the API for three main purposes: storing uploaded documents from the ingestion pipeline, storing agent artifacts like charts and analysis results from the data_analyst, and generating signed download URLs via the /v1/files/download_id endpoint so clients can securely download files without direct storage access. For development and testing, the local filesystem backend means you do not need cloud storage configured. In production, S3 or Azure provides durability, versioning, and access control.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

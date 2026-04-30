@@ -1117,6 +1117,7 @@ def _status_signature(payload: Mapping[str, Any]) -> str:
         _agentic_status_signature(payload.get("agentic_agent_activity")),
         _agentic_status_signature(payload.get("agentic_parallel_group")),
         _agentic_status_signature(payload.get("agentic_tool_call")),
+        _agentic_status_signature(payload.get("agentic_audit_item")),
     ]
     return "\u241f".join(parts)
 

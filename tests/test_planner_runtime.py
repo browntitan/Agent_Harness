@@ -41,7 +41,7 @@ def test_comparison_request_produces_parallel_tasks():
 def test_corpus_discovery_request_produces_multi_task_campaign():
     plan = build_fallback_plan("Identify all documents that have process flows outlined in them.")
 
-    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7"]
+    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7", "task_8"]
     assert plan[0]["executor"] == "general"
     assert plan[0]["produces_artifacts"] == ["title_candidates"]
     assert plan[1]["executor"] == "rag_worker"
@@ -52,9 +52,11 @@ def test_corpus_discovery_request_produces_multi_task_campaign():
     assert plan[2]["consumes_artifacts"] == ["title_candidates", "doc_focus"]
     assert plan[2]["produces_artifacts"] == ["research_facets"]
     assert plan[3]["controller_hints"]["dynamic_facet_fanout"] is True
-    assert plan[4]["controller_hints"]["dynamic_doc_review_fanout"] is True
-    assert plan[5]["produces_artifacts"] == ["subsystem_inventory"]
-    assert plan[6]["controller_hints"]["dynamic_subsystem_backfill"] is True
+    assert plan[4]["controller_hints"]["dynamic_triage_fanout"] is True
+    assert plan[5]["controller_hints"]["dynamic_doc_review_fanout"] is True
+    assert "research_triage_note" in plan[5]["consumes_artifacts"]
+    assert plan[6]["produces_artifacts"] == ["subsystem_inventory"]
+    assert plan[7]["controller_hints"]["dynamic_subsystem_backfill"] is True
     assert all(task["controller_hints"].get("prefer_inventory_output") for task in plan)
 
 
@@ -67,7 +69,7 @@ def test_structured_document_discovery_prompt_produces_corpus_discovery_plan():
         """
     )
 
-    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7"]
+    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7", "task_8"]
     assert plan[0]["executor"] == "general"
     assert plan[0]["produces_artifacts"] == ["title_candidates"]
     assert plan[1]["executor"] == "rag_worker"
@@ -76,8 +78,10 @@ def test_structured_document_discovery_prompt_produces_corpus_discovery_plan():
     assert plan[1]["result_mode"] == "inventory"
     assert plan[2]["executor"] == "general"
     assert plan[2]["produces_artifacts"] == ["research_facets"]
-    assert plan[4]["controller_hints"]["dynamic_doc_review_fanout"] is True
-    assert plan[5]["produces_artifacts"] == ["subsystem_inventory"]
+    assert plan[4]["controller_hints"]["dynamic_triage_fanout"] is True
+    assert plan[5]["controller_hints"]["dynamic_doc_review_fanout"] is True
+    assert "research_triage_note" in plan[5]["consumes_artifacts"]
+    assert plan[6]["produces_artifacts"] == ["subsystem_inventory"]
     assert all("default" not in task["doc_scope"] for task in plan)
     assert plan[0]["controller_hints"]["kb_collection_id"] == "default"
 
@@ -99,14 +103,16 @@ def test_exact_major_subsystems_prompt_produces_multi_stage_research_campaign():
 
     plan = build_fallback_plan(query, session_metadata={"kb_collection_id": "default"})
 
-    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7"]
+    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7", "task_8"]
     assert plan[0]["produces_artifacts"] == ["title_candidates"]
     assert plan[1]["executor"] == "rag_worker"
     assert plan[1]["answer_mode"] == "evidence_only"
     assert plan[2]["produces_artifacts"] == ["research_facets"]
-    assert plan[4]["controller_hints"]["dynamic_doc_review_fanout"] is True
-    assert plan[5]["produces_artifacts"] == ["subsystem_inventory"]
-    assert plan[6]["controller_hints"]["dynamic_subsystem_backfill"] is True
+    assert plan[4]["controller_hints"]["dynamic_triage_fanout"] is True
+    assert plan[5]["controller_hints"]["dynamic_doc_review_fanout"] is True
+    assert "research_triage_note" in plan[5]["consumes_artifacts"]
+    assert plan[6]["produces_artifacts"] == ["subsystem_inventory"]
+    assert plan[7]["controller_hints"]["dynamic_subsystem_backfill"] is True
     assert all(task["controller_hints"]["final_output_mode"] == "detailed_subsystem_summary" for task in plan)
 
 
@@ -378,14 +384,15 @@ def test_normalise_task_plan_repairs_collapsed_broad_grounded_synthesis_plan():
         session_metadata={"resolved_turn_intent": resolve_turn_intent(query, {}).to_dict()},
     )
 
-    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7"]
+    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7", "task_8"]
     assert plan[0]["produces_artifacts"] == ["title_candidates"]
     assert plan[1]["answer_mode"] == "evidence_only"
     assert plan[1]["produces_artifacts"] == ["doc_focus"]
     assert plan[2]["produces_artifacts"] == ["research_facets"]
-    assert plan[4]["controller_hints"]["dynamic_doc_review_fanout"] is True
-    assert plan[5]["produces_artifacts"] == ["subsystem_inventory"]
-    assert plan[6]["controller_hints"]["dynamic_subsystem_backfill"] is True
+    assert plan[4]["controller_hints"]["dynamic_triage_fanout"] is True
+    assert plan[5]["controller_hints"]["dynamic_doc_review_fanout"] is True
+    assert plan[6]["produces_artifacts"] == ["subsystem_inventory"]
+    assert plan[7]["controller_hints"]["dynamic_subsystem_backfill"] is True
 
 
 def test_normalise_task_plan_repairs_collapsed_holistic_repository_plan():
@@ -437,8 +444,9 @@ def test_normalise_task_plan_repairs_collapsed_holistic_repository_plan():
         },
     )
 
-    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7"]
+    assert [task["id"] for task in plan] == ["task_1", "task_2", "task_3", "task_4", "task_5", "task_6", "task_7", "task_8"]
     assert plan[0]["produces_artifacts"] == ["title_candidates"]
     assert plan[2]["produces_artifacts"] == ["research_facets"]
-    assert plan[4]["controller_hints"]["dynamic_doc_review_fanout"] is True
-    assert plan[5]["produces_artifacts"] == ["subsystem_inventory"]
+    assert plan[4]["controller_hints"]["dynamic_triage_fanout"] is True
+    assert plan[5]["controller_hints"]["dynamic_doc_review_fanout"] is True
+    assert plan[6]["produces_artifacts"] == ["subsystem_inventory"]

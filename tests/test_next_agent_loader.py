@@ -17,6 +17,7 @@ def test_agent_registry_loads_markdown_definitions_from_repo() -> None:
         "basic",
         "general",
         "coordinator",
+        "research_coordinator",
         "utility",
         "data_analyst",
         "rag_worker",
@@ -61,6 +62,21 @@ def test_agent_registry_loads_markdown_definitions_from_repo() -> None:
     ]
     assert coordinator.max_steps == 12
     assert coordinator.max_tool_calls == 14
+    research_coordinator = registry.get("research_coordinator")
+    assert research_coordinator is not None
+    assert research_coordinator.mode == "coordinator"
+    assert research_coordinator.metadata["role_kind"] == "manager"
+    assert research_coordinator.metadata["entry_path"] == "router_fast_path_or_delegated"
+    assert research_coordinator.metadata["research_campaign_agent"] is True
+    assert set(research_coordinator.allowed_worker_agents) == {
+        "planner",
+        "rag_worker",
+        "general",
+        "graph_manager",
+        "finalizer",
+        "verifier",
+    }
+    assert "execute_code" not in research_coordinator.allowed_tools
 
 
 def test_repo_agents_directory_has_no_live_json_definitions() -> None:

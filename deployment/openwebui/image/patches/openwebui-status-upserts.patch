@@ -30,8 +30,17 @@ index a44756f..0cc3ed8 100644
 +		return status?.agentic_parallel_group?.version === 1;
 +	};
 +
++	const isAuditItemStatus = (status: any): boolean => {
++		return status?.agentic_audit_item?.version === 1;
++	};
++
 +	const isAuditStatus = (status: any): boolean => {
-+		return isToolStatus(status) || isAgentActivityStatus(status) || isParallelGroupStatus(status);
++		return (
++			isAuditItemStatus(status) ||
++			isToolStatus(status) ||
++			isAgentActivityStatus(status) ||
++			isParallelGroupStatus(status)
++		);
 +	};
 +
 +	const latestNonToolStatus = (history: any[] = []) => {
@@ -65,13 +74,25 @@ index a44756f..0cc3ed8 100644
 +	};
 +
 +	const upsertStatusHistory = (history: any[] = [], incoming: any) => {
-+		const statusId = typeof incoming?.status_id === 'string' ? incoming.status_id.trim() : '';
++		const auditItemId =
++			typeof incoming?.agentic_audit_item?.item_id === 'string'
++				? incoming.agentic_audit_item.item_id.trim()
++				: '';
++		const statusId = auditItemId || (typeof incoming?.status_id === 'string' ? incoming.status_id.trim() : '');
 +		if (!statusId) {
 +			return [...history, incoming];
 +		}
 +
 +		const next = [...history];
-+		const existingIndex = next.findIndex((status) => status?.status_id === statusId);
++		const existingIndex = next.findIndex((status) => {
++			const existingAuditId =
++				typeof status?.agentic_audit_item?.item_id === 'string'
++					? status.agentic_audit_item.item_id.trim()
++					: '';
++			const existingStatusId =
++				typeof status?.status_id === 'string' ? status.status_id.trim() : '';
++			return (existingAuditId || existingStatusId) === statusId;
++		});
 +		if (existingIndex === -1) {
 +			next.push(incoming);
 +			return next;
@@ -147,6 +168,7 @@ index ab3bc89..55e3378 100644
 +			agentic_tool_call?: Record<string, unknown>;
 +			agentic_agent_activity?: Record<string, unknown>;
 +			agentic_parallel_group?: Record<string, unknown>;
++			agentic_audit_item?: Record<string, unknown>;
  		}[];
 +		currentStatus?: {
 +			done: boolean;
@@ -181,6 +203,7 @@ index ab3bc89..55e3378 100644
 +			agentic_tool_call?: Record<string, unknown>;
 +			agentic_agent_activity?: Record<string, unknown>;
 +			agentic_parallel_group?: Record<string, unknown>;
++			agentic_audit_item?: Record<string, unknown>;
 +		};
  		status?: {
  			done: boolean;
@@ -212,6 +235,7 @@ index ab3bc89..55e3378 100644
 +			agentic_tool_call?: Record<string, unknown>;
 +			agentic_agent_activity?: Record<string, unknown>;
 +			agentic_parallel_group?: Record<string, unknown>;
++			agentic_audit_item?: Record<string, unknown>;
  		};
  		done: boolean;
  		error?: boolean | { content: string };
@@ -246,9 +270,7 @@ index 5aaf774..aba6604 100644
  	const i18n = getContext('i18n');
  
  	import StatusItem from './StatusHistory/StatusItem.svelte';
-+	import ToolCallStack from './StatusHistory/ToolCallStack.svelte';
-+	import AgentActivityStack from './StatusHistory/AgentActivityStack.svelte';
-+	import ParallelGroupStack from './StatusHistory/ParallelGroupStack.svelte';
++	import ActivityStream from './StatusHistory/ActivityStream.svelte';
  	export let statusHistory = [];
 +	export let currentStatus = null;
  	export let expand = false;
@@ -264,23 +286,23 @@ index 5aaf774..aba6604 100644
  	let history = [];
  	let status = null;
 +	let visibleHistory = [];
-+	let toolStatuses = [];
-+	let agentStatuses = [];
-+	let parallelGroupStatuses = [];
++	let auditStatuses = [];
 +	const isToolStatus = (status) => status?.agentic_tool_call?.version === 1;
 +	const isAgentActivityStatus = (status) => status?.agentic_agent_activity?.version === 1;
 +	const isParallelGroupStatus = (status) => status?.agentic_parallel_group?.version === 1;
++	const isAuditItemStatus = (status) => status?.agentic_audit_item?.version === 1;
 +	const isAuditStatus = (status) =>
-+		isToolStatus(status) || isAgentActivityStatus(status) || isParallelGroupStatus(status);
++		isAuditItemStatus(status) ||
++		isToolStatus(status) ||
++		isAgentActivityStatus(status) ||
++		isParallelGroupStatus(status);
 +	const latestNonToolStatus = (items = []) =>
 +		[...items].reverse().find((status) => !isAuditStatus(status)) ?? null;
  
 -	$: if (history && history.length > 0) {
 -		status = history.at(-1);
 +	$: visibleHistory = (history ?? []).filter((status) => !isAuditStatus(status));
-+	$: toolStatuses = (history ?? []).filter((status) => isToolStatus(status));
-+	$: agentStatuses = (history ?? []).filter((status) => isAgentActivityStatus(status));
-+	$: parallelGroupStatuses = (history ?? []).filter((status) => isParallelGroupStatus(status));
++	$: auditStatuses = (history ?? []).filter((status) => isAuditStatus(status));
 +	$: if (currentStatus && !isAuditStatus(currentStatus)) {
 +		status = currentStatus;
 +	} else if (visibleHistory && visibleHistory.length > 0) {
@@ -298,7 +320,7 @@ index 5aaf774..aba6604 100644
  </script>
  
 -{#if history && history.length > 0}
-+{#if status || toolStatuses.length > 0 || agentStatuses.length > 0 || parallelGroupStatuses.length > 0}
++{#if status || auditStatuses.length > 0}
  	{#if status?.hidden !== true}
  		<div class="text-sm flex flex-col w-full">
 -			<button
@@ -327,10 +349,7 @@ index 5aaf774..aba6604 100644
 +					</div>
 +				</button>
 +			{/if}
-+
-+			<ParallelGroupStack {parallelGroupStatuses} />
-+			<AgentActivityStack {agentStatuses} />
-+			<ToolCallStack {toolStatuses} />
++			<ActivityStream {auditStatuses} />
  
  			{#if showHistory}
  				<div class="flex flex-row">
@@ -354,193 +373,267 @@ index 5aaf774..aba6604 100644
  												class="w-[0.5px] ml-[6.5px] h-[calc(100%-14px)] bg-gray-300 dark:bg-gray-700"
  											/>
  										{/if}
-diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentActivityStack.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentActivityStack.svelte
+diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityStream.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityStream.svelte
 new file mode 100644
-index 0000000..3a73b62
+index 0000000..8f0a251
 --- /dev/null
-+++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AgentActivityStack.svelte
-@@ -0,0 +1,82 @@
++++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityStream.svelte
+@@ -0,0 +1,107 @@
 +<script>
-+	export let agentStatuses = [];
++	import ActivityRow from './ActivityRow.svelte';
 +
-+	const activity = (status) => status?.agentic_agent_activity ?? {};
-+	const activityKey = (status, index) =>
-+		status?.status_id ?? activity(status)?.activity_id ?? `agent-${index}`;
++	export let auditStatuses = [];
++	let rows = [];
 +
-+	const statusLabel = (item) => {
-+		const status = String(item?.status ?? '').toLowerCase();
-+		if (status === 'running') return 'Running';
++	const clean = (value) => String(value ?? '').trim();
++	const statusOf = (status) => status?.agentic_audit_item ?? legacyItem(status);
++	const keyOf = (row, index) => row?.item?.item_id ?? row?.status?.status_id ?? `audit-${index}`;
++	const isVisible = (item) => item && item.visible !== false;
++
++	const legacyItem = (status) => {
++		if (status?.agentic_tool_call?.version === 1) {
++			const tool = status.agentic_tool_call;
++			return {
++				version: 1,
++				item_id: status?.status_id ?? tool?.tool_call_id,
++				kind: 'tool',
++				status: tool?.status ?? status?.status,
++				title: `${tool?.tool_name ?? 'tool'} ${tool?.status === 'running' ? 'running' : tool?.status === 'error' ? 'failed' : 'ran'}`,
++				subtitle: tool?.output_preview || tool?.error_preview || tool?.error || tool?.input_preview || '',
++				actor: tool?.parent_agent || tool?.agent_name || '',
++				target: tool?.tool_name ?? '',
++				group_id: tool?.parallel_group_id ?? '',
++				chips: [tool?.agent_name, tool?.tool_name, tool?.duration_ms ? `${tool.duration_ms}ms` : ''].filter(Boolean),
++				started_at: tool?.started_at ?? '',
++				completed_at: tool?.completed_at ?? '',
++				duration_ms: tool?.duration_ms,
++				input: tool?.input,
++				output: tool?.output,
++				error: tool?.error,
++				notices: [
++					tool?.truncated ? `Payload limited to ${tool?.payload_limit_chars || 'the configured'} characters.` : '',
++					tool?.redacted_fields?.length ? 'Sensitive fields were redacted.' : ''
++				].filter(Boolean),
++				redacted_fields: tool?.redacted_fields ?? [],
++				payload_limit_chars: tool?.payload_limit_chars
++			};
++		}
++		if (status?.agentic_parallel_group?.version === 1) {
++			const group = status.agentic_parallel_group;
++			const isSoloToolWave = group?.group_kind === 'tool_wave' && Number(group?.size ?? 0) <= 1;
++			const isParallel = group?.execution_mode === 'parallel' && Number(group?.size ?? 0) > 1;
++			return {
++				version: 1,
++				item_id: status?.status_id ?? group?.group_id,
++				kind: isParallel ? 'parallel' : 'sequence',
++				status: group?.status ?? status?.status,
++				title: isParallel
++					? `Ran ${group?.size ?? group?.members?.length ?? 0} items in parallel`
++					: 'Sequenced work',
++				subtitle: group?.reason ?? '',
++				actor: status?.agent ?? '',
++				target: group?.group_kind === 'tool_wave' ? 'tools' : 'worker agents',
++				group_id: group?.group_id ?? '',
++				chips: [group?.execution_mode, String(group?.group_kind ?? '').replaceAll('_', ' ')].filter(Boolean),
++				members: group?.members ?? [],
++				duration_ms: group?.duration_ms,
++				visible: !isSoloToolWave
++			};
++		}
++		if (status?.agentic_agent_activity?.version === 1) {
++			const agent = status.agentic_agent_activity;
++			return {
++				version: 1,
++				item_id: status?.status_id ?? agent?.activity_id,
++				kind: agent?.role === 'planner' ? 'plan' : agent?.role === 'verifier' ? 'verify' : agent?.role === 'worker' ? 'handoff' : 'agent',
++				status: agent?.status ?? status?.status,
++				title: agent?.title ?? status?.label ?? '',
++				subtitle: agent?.description ?? status?.detail ?? '',
++				actor: agent?.parent_agent ?? '',
++				target: agent?.agent_name ?? '',
++				group_id: agent?.parallel_group_id ?? '',
++				chips: [agent?.role, agent?.task_id ? `task ${agent.task_id}` : '', agent?.job_id ? `job ${agent.job_id}` : ''].filter(Boolean),
++				started_at: agent?.started_at ?? '',
++				completed_at: agent?.completed_at ?? '',
++				duration_ms: agent?.duration_ms
++			};
++		}
++		return null;
++	};
++
++	$: rows = (auditStatuses ?? [])
++		.map((status, index) => ({ status, item: statusOf(status), index }))
++		.filter((row) => isVisible(row.item) && clean(row.item?.title));
++</script>
++
++{#if rows.length > 0}
++	<div class="mt-2 flex w-full flex-col gap-1.5">
++		{#each rows as row, idx (keyOf(row, idx))}
++			<ActivityRow item={row.item} rawStatus={row.status} last={idx === rows.length - 1} />
++		{/each}
++	</div>
++{/if}
+diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityRow.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityRow.svelte
+new file mode 100644
+index 0000000..c2369f1
+--- /dev/null
++++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityRow.svelte
+@@ -0,0 +1,155 @@
++<script>
++	import AuditDetailPanel from './AuditDetailPanel.svelte';
++
++	export let item = {};
++	export let rawStatus = {};
++	export let last = false;
++	let expanded = false;
++	let userControlled = false;
++	let activeItemId = '';
++
++	const titleCase = (value) => {
++		const text = String(value ?? '').replaceAll('_', ' ').trim();
++		return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
++	};
++
++	const hasDetails = (item) =>
++		(item?.tasks?.length ?? 0) > 0 ||
++		(item?.members?.length ?? 0) > 0 ||
++		item?.input !== undefined ||
++		item?.output !== undefined ||
++		item?.error !== undefined ||
++		(item?.notices?.length ?? 0) > 0 ||
++		(item?.redacted_fields?.length ?? 0) > 0;
++
++	const rowId = (item) => item?.item_id || item?.group_id || item?.title || '';
++
++	const defaultExpanded = (item) =>
++		item?.status === 'running' && hasDetails(item) && item?.kind !== 'tool';
++
++	const handleToggle = () => {
++		userControlled = true;
++	};
++
++	const formatDuration = (value) => {
++		if (typeof value !== 'number' || !Number.isFinite(value)) return '';
++		if (value < 1000) return `${Math.max(0, Math.floor(value))}ms`;
++		return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
++	};
++
++	const statusLabel = (value) => {
++		const status = String(value ?? '').toLowerCase();
++		if (status === 'completed' || status === 'complete') return 'Completed';
++		if (status === 'error' || status === 'failed') return 'Failed';
 +		if (status === 'queued') return 'Queued';
 +		if (status === 'waiting') return 'Waiting';
-+		if (status === 'error') return 'Failed';
-+		return 'Completed';
++		return 'Running';
 +	};
 +
-+	const statusClasses = (item) => {
++	const tone = (item) => {
 +		const status = String(item?.status ?? '').toLowerCase();
-+		if (status === 'error') {
-+			return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200';
-+		}
-+		if (status === 'completed') {
-+			return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-200';
-+		}
-+		return 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/30 dark:text-sky-200';
++		if (status === 'error' || status === 'failed') return 'rose';
++		if (status === 'completed' || status === 'complete') return 'emerald';
++		if (item?.kind === 'verify' || item?.kind === 'revise') return 'amber';
++		if (item?.kind === 'tool') return 'sky';
++		if (item?.kind === 'parallel') return 'indigo';
++		return 'slate';
 +	};
 +
-+	const meta = (item) =>
-+		[
-+			item?.role,
-+			item?.task_id ? `task ${item.task_id}` : '',
-+			item?.job_id ? `job ${item.job_id}` : '',
-+			item?.parallel_group_id ? `group ${item.parallel_group_id}` : ''
-+		]
-+			.filter(Boolean)
-+			.join(' · ');
++	const dotClasses = (item) => {
++		const t = tone(item);
++		if (t === 'rose') return 'bg-rose-400 ring-rose-400/20';
++		if (t === 'emerald') return 'bg-emerald-400 ring-emerald-400/20';
++		if (t === 'amber') return 'bg-amber-400 ring-amber-400/20';
++		if (t === 'sky') return 'bg-sky-400 ring-sky-400/20';
++		if (t === 'indigo') return 'bg-indigo-400 ring-indigo-400/20';
++		return 'bg-slate-400 ring-slate-400/20';
++	};
++
++	const badgeClasses = (item) => {
++		const t = tone(item);
++		if (t === 'rose') return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-300/60 dark:bg-rose-950/20 dark:text-rose-200';
++		if (t === 'emerald') return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-300/50 dark:bg-emerald-950/20 dark:text-emerald-200';
++		if (t === 'amber') return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-300/50 dark:bg-amber-950/20 dark:text-amber-200';
++		if (t === 'sky') return 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-300/50 dark:bg-sky-950/20 dark:text-sky-200';
++		if (t === 'indigo') return 'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-300/50 dark:bg-indigo-950/20 dark:text-indigo-200';
++		return 'border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-400/40 dark:bg-slate-900/30 dark:text-slate-200';
++	};
++
++	$: {
++		const nextItemId = rowId(item);
++		if (nextItemId !== activeItemId) {
++			activeItemId = nextItemId;
++			userControlled = false;
++			expanded = defaultExpanded(item);
++		}
++	}
 +</script>
 +
-+{#if agentStatuses && agentStatuses.length > 0}
-+	<div
-+		class="mt-1 flex w-full flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-slate-50/70 p-2 dark:border-slate-800 dark:bg-slate-950/40"
-+	>
-+		<div class="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-+			Agents
-+		</div>
-+
-+		{#each agentStatuses as agentStatus, idx (activityKey(agentStatus, idx))}
-+			{@const item = activity(agentStatus)}
-+			<details
-+				class="group rounded-lg border border-slate-200 bg-white text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
-+				open={item?.status === 'running'}
-+			>
-+				<summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
-+					<div class="min-w-0">
-+						<div class="flex min-w-0 items-center gap-2">
-+							<span class="truncate text-xs font-semibold">{item?.agent_name ?? 'agent'}</span>
-+							<span
-+								class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold {statusClasses(item)}"
-+							>
-+								{statusLabel(item)}
-+							</span>
-+						</div>
-+						<div class="truncate text-[11px] text-slate-500 dark:text-slate-400">
-+							{item?.title || item?.description || meta(item)}
-+						</div>
-+					</div>
-+					<span class="transition group-open:rotate-90 text-[11px] text-slate-500">&rsaquo;</span>
-+				</summary>
-+
-+				<div class="flex flex-col gap-1 border-t border-slate-100 px-3 py-2 text-[11px] leading-5 text-slate-600 dark:border-slate-800 dark:text-slate-300">
-+					{#if item?.description}<div>{item.description}</div>{/if}
-+					{#if meta(item)}<div>{meta(item)}</div>{/if}
-+					{#if item?.parent_agent}<div>Parent: {item.parent_agent}</div>{/if}
-+				</div>
-+			</details>
-+		{/each}
++<div class="relative flex w-full gap-2 pl-1">
++	<div class="relative flex w-4 shrink-0 justify-center">
++		<span class="mt-2 h-2 w-2 rounded-full ring-4 {dotClasses(item)}"></span>
++		{#if !last}
++			<span class="absolute top-5 h-[calc(100%-0.25rem)] w-px bg-slate-200 dark:bg-slate-700/60"></span>
++		{/if}
 +	</div>
-+{/if}
-diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ParallelGroupStack.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ParallelGroupStack.svelte
-new file mode 100644
-index 0000000..78679e1
---- /dev/null
-+++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ParallelGroupStack.svelte
-@@ -0,0 +1,93 @@
-+<script>
-+	export let parallelGroupStatuses = [];
 +
-+	const group = (status) => status?.agentic_parallel_group ?? {};
-+	const groupKey = (status, index) => status?.status_id ?? group(status)?.group_id ?? `group-${index}`;
-+	const label = (item) => {
-+		const mode = String(item?.execution_mode ?? '').toLowerCase();
-+		const kind = String(item?.group_kind ?? 'group').replaceAll('_', ' ');
-+		const count = Number(item?.size ?? item?.members?.length ?? 0);
-+		return `${mode === 'parallel' ? 'Parallel ' : ''}${kind}: ${count}`;
-+	};
-+	const statusClasses = (item) => {
-+		const status = String(item?.status ?? '').toLowerCase();
-+		if (status === 'error') {
-+			return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200';
-+		}
-+		if (status === 'completed') {
-+			return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-200';
-+		}
-+		return 'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/70 dark:bg-indigo-950/30 dark:text-indigo-200';
-+	};
-+	const statusLabel = (item) => {
-+		const status = String(item?.status ?? '').toLowerCase();
-+		if (status === 'running') return 'Running';
-+		if (status === 'error') return 'Failed';
-+		return 'Completed';
-+	};
-+</script>
-+
-+{#if parallelGroupStatuses && parallelGroupStatuses.length > 0}
-+	<div
-+		class="mt-1 flex w-full flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-slate-50/70 p-2 dark:border-slate-800 dark:bg-slate-950/40"
-+	>
-+		<div class="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-+			Parallel work
-+		</div>
-+
-+		{#each parallelGroupStatuses as groupStatus, idx (groupKey(groupStatus, idx))}
-+			{@const item = group(groupStatus)}
-+			<details
-+				class="group rounded-lg border border-slate-200 bg-white text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
-+				open={item?.status === 'running'}
-+			>
-+				<summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
-+					<div class="min-w-0">
-+						<div class="flex min-w-0 items-center gap-2">
-+							<span class="truncate text-xs font-semibold">{label(item)}</span>
-+							<span
-+								class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold {statusClasses(item)}"
-+							>
-+								{statusLabel(item)}
++	<details class="group min-w-0 flex-1" bind:open={expanded} on:toggle={handleToggle}>
++		<summary class="flex min-w-0 cursor-pointer list-none items-start justify-between gap-2 rounded-md px-1.5 py-1 hover:bg-slate-100 dark:hover:bg-slate-800/40">
++			<div class="min-w-0 flex-1">
++				<div class="flex min-w-0 flex-wrap items-center gap-1.5">
++					<span class="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
++						{titleCase(item?.kind)}
++					</span>
++					<span class="min-w-0 truncate text-xs font-semibold text-slate-800 dark:text-slate-100">
++						{item?.title}
++					</span>
++					{#if item?.actor && item?.target}
++						<span class="truncate text-[11px] text-slate-500 dark:text-slate-400">{item.actor} → {item.target}</span>
++					{:else if item?.actor || item?.target}
++						<span class="truncate text-[11px] text-slate-500 dark:text-slate-400">{item?.actor || item?.target}</span>
++					{/if}
++					<span class="shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold {badgeClasses(item)}">
++						{statusLabel(item?.status)}
++					</span>
++					{#if formatDuration(item?.duration_ms)}
++						<span class="shrink-0 rounded-full border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
++							{formatDuration(item.duration_ms)}
++						</span>
++					{/if}
++					{#each item?.chips ?? [] as chip}
++						{#if chip}
++							<span class="max-w-[11rem] truncate rounded-full border border-slate-300 px-1.5 py-0.5 text-[10px] text-slate-500 dark:border-slate-700/80 dark:text-slate-400">
++								{chip}
 +							</span>
-+						</div>
-+						<div class="truncate text-[11px] text-slate-500 dark:text-slate-400">
-+							{item?.reason || item?.group_id}
-+						</div>
-+					</div>
-+					<span class="transition group-open:rotate-90 text-[11px] text-slate-500">&rsaquo;</span>
-+				</summary>
-+
-+				<div class="flex flex-col gap-1 border-t border-slate-100 px-3 py-2 text-[11px] leading-5 text-slate-600 dark:border-slate-800 dark:text-slate-300">
-+					{#if item?.reason}<div>{item.reason}</div>{/if}
-+					{#each item?.members ?? [] as member}
-+						<div class="rounded bg-slate-50 px-2 py-1 dark:bg-slate-900">
-+							{member.agent_name ?? member.tool_name ?? 'member'}
-+							{#if member.task_id} · task {member.task_id}{/if}
-+							{#if member.tool_call_id} · call {member.tool_call_id}{/if}
-+							{#if member.job_id} · job {member.job_id}{/if}
-+						</div>
++						{/if}
 +					{/each}
 +				</div>
-+			</details>
-+		{/each}
-+	</div>
-+{/if}
-diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte
++				{#if item?.subtitle}
++					<div class="mt-0.5 truncate text-[11px] text-slate-500">{item.subtitle}</div>
++				{/if}
++			</div>
++
++			{#if hasDetails(item)}
++				<span class="mt-0.5 shrink-0 text-[11px] text-slate-500 transition group-open:rotate-90">&rsaquo;</span>
++			{/if}
++		</summary>
++
++		{#if hasDetails(item)}
++			<AuditDetailPanel {item} {rawStatus} />
++		{/if}
++	</details>
++</div>
+diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AuditDetailPanel.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AuditDetailPanel.svelte
 new file mode 100644
-index 0000000..2b95f0a
+index 0000000..75ee568
 --- /dev/null
-+++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte
-@@ -0,0 +1,144 @@
++++ b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AuditDetailPanel.svelte
+@@ -0,0 +1,94 @@
 +<script>
-+	export let toolStatuses = [];
-+
-+	let copiedKey = '';
-+
-+	const toolCall = (status) => status?.agentic_tool_call ?? {};
-+	const toolKey = (status, index) =>
-+		status?.status_id ?? toolCall(status)?.tool_call_id ?? `tool-${index}`;
++	export let item = {};
++	export let rawStatus = {};
 +
 +	const compact = (value, fallback = '') => {
-+		if (value === null || value === undefined || value === '') {
-+			return fallback;
-+		}
-+		if (typeof value === 'string') {
-+			return value;
-+		}
++		if (value === null || value === undefined || value === '') return fallback;
++		if (typeof value === 'string') return value;
 +		try {
 +			return JSON.stringify(value, null, 2);
 +		} catch {
@@ -548,162 +641,79 @@ index 0000000..2b95f0a
 +		}
 +	};
 +
-+	const oneLine = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
-+
 +	const hasValue = (value) => value !== null && value !== undefined && value !== '';
-+
-+	const formatDuration = (value) => {
-+		if (typeof value !== 'number' || !Number.isFinite(value)) {
-+			return '';
-+		}
-+		if (value < 1000) {
-+			return `${Math.max(0, Math.floor(value))}ms`;
-+		}
-+		return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`;
-+	};
-+
-+	const statusLabel = (tool) => {
-+		const status = String(tool?.status ?? '').toLowerCase();
-+		if (status === 'running') {
-+			return 'Running';
-+		}
-+		if (status === 'error') {
-+			return 'Failed';
-+		}
-+		return 'Completed';
-+	};
-+
-+	const statusClasses = (tool) => {
-+		const status = String(tool?.status ?? '').toLowerCase();
-+		if (status === 'error') {
-+			return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200';
-+		}
-+		if (status === 'running') {
-+			return 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/30 dark:text-sky-200';
-+		}
-+		return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-200';
-+	};
-+
-+	const copyPayload = async (payload, key) => {
-+		if (typeof navigator === 'undefined' || !navigator.clipboard) {
-+			return;
-+		}
-+		await navigator.clipboard.writeText(compact(payload));
-+		copiedKey = key;
-+		window.setTimeout(() => {
-+			if (copiedKey === key) {
-+				copiedKey = '';
-+			}
-+		}, 1400);
-+	};
 +</script>
 +
-+{#if toolStatuses && toolStatuses.length > 0}
-+	<div
-+		class="mt-1 flex w-full flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-slate-50/70 p-2 dark:border-slate-800 dark:bg-slate-950/40"
-+	>
-+		<div class="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-+			Tool calls
++<div class="ml-1 mt-1 flex flex-col gap-2 rounded-md border border-slate-200 bg-white/70 p-2 text-[11px] leading-5 text-slate-700 dark:border-slate-800/80 dark:bg-slate-950/40 dark:text-slate-300">
++	{#if item?.tasks?.length}
++		<div>
++			<div class="mb-1 font-semibold uppercase tracking-wide text-slate-500">Tasks</div>
++			<div class="flex flex-col gap-1">
++				{#each item.tasks as task}
++					<div class="rounded bg-slate-100 px-2 py-1 dark:bg-slate-900/70">
++						<span class="font-semibold text-slate-800 dark:text-slate-200">{task.id || 'task'}</span>
++						{#if task.executor}<span class="text-slate-500"> · {task.executor}</span>{/if}
++						{#if task.mode}<span class="text-slate-500"> · {task.mode}</span>{/if}
++						{#if task.title}<div class="text-slate-600 dark:text-slate-400">{task.title}</div>{/if}
++						{#if task.handoff_schema}<div class="text-slate-500">handoff: {task.handoff_schema}</div>{/if}
++					</div>
++				{/each}
++			</div>
 +		</div>
++	{/if}
 +
-+		{#each toolStatuses as toolStatus, idx (toolKey(toolStatus, idx))}
-+			{@const tool = toolCall(toolStatus)}
-+			{@const key = toolKey(toolStatus, idx)}
-+			<details
-+				class="group rounded-lg border border-slate-200 bg-white text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200"
-+				open={tool?.status === 'running'}
-+			>
-+				<summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2">
-+					<div class="min-w-0">
-+						<div class="flex min-w-0 items-center gap-2">
-+							<span class="truncate text-xs font-semibold">{tool?.tool_name ?? 'tool'}</span>
-+							<span
-+								class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold {statusClasses(tool)}"
-+							>
-+								{statusLabel(tool)}
-+							</span>
-+							{#if tool?.agent_name || tool?.parent_agent}
-+								<span class="shrink-0 rounded-full border border-slate-200 px-2 py-0.5 text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
-+									{tool?.agent_name ?? tool?.parent_agent}
-+								</span>
-+							{/if}
-+							{#if tool?.parallel_group_id}
-+								<span class="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 dark:border-indigo-900/70 dark:bg-indigo-950/30 dark:text-indigo-200">
-+									parallel
-+								</span>
-+							{/if}
-+						</div>
-+						<div class="truncate text-[11px] text-slate-500 dark:text-slate-400">
-+							{oneLine(tool?.output_preview || tool?.error_preview || tool?.error || tool?.input_preview || '')}
-+						</div>
-+					</div>
-+					<div class="flex shrink-0 items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-+						{#if formatDuration(tool?.duration_ms)}
-+							<span>{formatDuration(tool.duration_ms)}</span>
-+						{/if}
-+						<span class="transition group-open:rotate-90">&rsaquo;</span>
-+					</div>
-+				</summary>
++	{#if item?.members?.length}
++		<div>
++			<div class="mb-1 font-semibold uppercase tracking-wide text-slate-500">Members</div>
++			<div class="flex flex-wrap gap-1">
++				{#each item.members as member}
++					<span class="rounded-full border border-slate-300 px-2 py-0.5 text-slate-600 dark:border-slate-700 dark:text-slate-400">
++						{member.agent_name ?? member.tool_name ?? 'member'}
++						{#if member.task_id} · {member.task_id}{/if}
++						{#if member.tool_call_id} · {member.tool_call_id}{/if}
++					</span>
++				{/each}
++			</div>
++		</div>
++	{/if}
 +
-+				<div class="flex flex-col gap-2 border-t border-slate-100 px-3 py-2 dark:border-slate-800">
-+					{#if tool?.input_preview || hasValue(tool?.input)}
-+						<div class="rounded-md bg-slate-50 p-2 dark:bg-slate-900">
-+							<div class="mb-1 flex items-center justify-between gap-2">
-+								<div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-+									Input
-+								</div>
-+								<button
-+									type="button"
-+									class="rounded border border-slate-200 px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
-+									on:click|preventDefault|stopPropagation={() =>
-+										copyPayload(tool?.input ?? tool?.input_preview, `${key}:input`)}
-+								>
-+									{copiedKey === `${key}:input` ? 'Copied' : 'Copy'}
-+								</button>
-+							</div>
-+							<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5">{compact(tool?.input, tool?.input_preview)}</pre>
-+						</div>
-+					{/if}
++	{#if hasValue(item?.input)}
++		<div>
++			<div class="mb-1 font-semibold uppercase tracking-wide text-slate-500">Input</div>
++			<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-100 p-2 dark:bg-slate-900/70">{compact(item.input)}</pre>
++		</div>
++	{/if}
 +
-+					{#if tool?.output_preview || tool?.error_preview || hasValue(tool?.output) || tool?.error}
-+						<div class="rounded-md bg-slate-50 p-2 dark:bg-slate-900">
-+							<div class="mb-1 flex items-center justify-between gap-2">
-+								<div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-+									{tool?.error ? 'Error' : 'Output'}
-+								</div>
-+								<button
-+									type="button"
-+									class="rounded border border-slate-200 px-2 py-0.5 text-[11px] text-slate-500 hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
-+									on:click|preventDefault|stopPropagation={() =>
-+										copyPayload(tool?.error ?? tool?.output ?? tool?.output_preview, `${key}:output`)}
-+								>
-+									{copiedKey === `${key}:output` ? 'Copied' : 'Copy'}
-+								</button>
-+							</div>
-+							<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5">{compact(tool?.error ?? tool?.output, tool?.error_preview ?? tool?.output_preview)}</pre>
-+						</div>
-+					{/if}
++	{#if hasValue(item?.output)}
++		<div>
++			<div class="mb-1 font-semibold uppercase tracking-wide text-slate-500">Output</div>
++			<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-100 p-2 dark:bg-slate-900/70">{compact(item.output)}</pre>
++		</div>
++	{/if}
 +
-+					{#if tool?.truncated}
-+						<div class="text-[11px] text-amber-700 dark:text-amber-300">
-+							Payload limited to {tool?.payload_limit_chars ?? 'the configured'} characters. Trace reference: {tool?.source_event_id}
-+						</div>
-+					{/if}
-+					{#if tool?.redacted_fields?.length}
-+						<div class="text-[11px] text-slate-500 dark:text-slate-400">
-+							Redacted fields: {tool.redacted_fields.join(', ')}
-+						</div>
-+					{/if}
-+					{#if tool?.parallel_group_id}
-+						<div class="text-[11px] text-indigo-700 dark:text-indigo-300">
-+							Parallel group: {tool.parallel_group_id}
-+						</div>
-+					{/if}
-+				</div>
-+			</details>
-+		{/each}
-+	</div>
-+{/if}
++	{#if hasValue(item?.error)}
++		<div>
++			<div class="mb-1 font-semibold uppercase tracking-wide text-rose-600 dark:text-rose-300">Error</div>
++			<pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded bg-rose-50 p-2 text-rose-700 dark:bg-rose-950/20 dark:text-rose-100">{compact(item.error)}</pre>
++		</div>
++	{/if}
++
++	{#if item?.notices?.length}
++		<div class="flex flex-col gap-1 text-amber-700 dark:text-amber-200">
++			{#each item.notices as notice}
++				<div>{notice}</div>
++			{/each}
++		</div>
++	{/if}
++
++	{#if item?.redacted_fields?.length}
++		<div class="text-slate-500">Redacted fields: {item.redacted_fields.join(', ')}</div>
++	{/if}
++
++	{#if item?.payload_limit_chars}
++		<div class="text-slate-500">Payload limit: {item.payload_limit_chars} characters</div>
++	{/if}
++</div>
 diff --git a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte b/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte
 index da234b6..4582f65 100644
 --- a/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/StatusItem.svelte

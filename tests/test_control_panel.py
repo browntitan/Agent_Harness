@@ -96,6 +96,7 @@ def _control_panel_settings(tmp_path: Path, *, enabled: bool = True, token: str 
         control_panel_agent_overlays_dir=agent_overlay_dir,
         control_panel_audit_log_path=audit_log_path,
         control_panel_static_dir=tmp_path / "dist",
+        control_panel_source_allowed_roots=(kb_dir, docs_dir),
         agents_dir=agents_dir,
         skills_dir=skills_dir,
         prompts_dir=prompts_dir,
@@ -1539,7 +1540,8 @@ async def test_collection_routes_ingest_upload_reindex_delete_and_keep_empty_col
             headers=_admin_headers(),
             json={"changes": {}},
         )
-        for doc in list(documents.json()["documents"]):
+        documents_after_reindex = await client.get("/v1/admin/collections/smoke-control-panel/documents", headers=_admin_headers())
+        for doc in list(documents_after_reindex.json()["documents"]):
             await client.delete(
                 f"/v1/admin/collections/smoke-control-panel/documents/{doc['doc_id']}",
                 headers=_admin_headers(),
@@ -1561,21 +1563,110 @@ async def test_collection_routes_ingest_upload_reindex_delete_and_keep_empty_col
     listed_ids = [item["collection_id"] for item in collections.json()["collections"]]
     assert "smoke-control-panel" in listed_ids
     assert "smoke-sync" in listed_ids
-    assert len(documents.json()["documents"]) == 1
-    assert documents.json()["documents"][0]["source_type"] == "host_path"
+    assert len(documents.json()["documents"]) == 2
+    assert {item["source_type"] for item in documents.json()["documents"]} == {"host_path", "collection_upload"}
+    assert any(item["title"] == "regional_controls.csv" for item in documents.json()["documents"])
     upload_payload = uploads.json()["uploads"]
-    assert any(item["title"] == "regional_controls.csv" for item in upload_payload)
-    assert all(item["source_type"] == "upload" for item in upload_payload)
+    assert upload_payload == []
     detail_payload = detail.json()
     assert detail_payload["extracted_content"]["content"]
     assert detail_payload["raw_source"]["content"]
     assert reindexed.json()["ingested_doc_ids"] == [first_doc_id]
     final_ids = [item["collection_id"] for item in final_collections.json()["collections"]]
-    assert "smoke-control-panel" not in final_ids
+    assert "smoke-control-panel" in final_ids
     assert deleted.json()["deleted"] is True
     final_after_delete_ids = [item["collection_id"] for item in collections_after_delete.json()["collections"]]
     assert "smoke-control-panel" not in final_after_delete_ids
     assert "smoke-sync" in final_ids
+
+
+@pytest.mark.asyncio
+async def test_source_routes_scan_register_and_incremental_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _control_panel_settings(tmp_path)
+    runtime = _build_runtime(settings)
+    manager = _FakeManager(settings, runtime=runtime)
+    source_root = settings.kb_dir / "repo-source"
+    docs_dir = source_root / "docs"
+    docs_dir.mkdir(parents=True)
+    file_a = docs_dir / "a.md"
+    file_b = docs_dir / "b.md"
+    file_a.write_text("alpha graph content", encoding="utf-8")
+    file_b.write_text("beta graph content", encoding="utf-8")
+    (source_root / "ignored.tmp").write_text("ignored", encoding="utf-8")
+    outside_path = tmp_path / "private-not-allowed.md"
+    outside_path.write_text("secret", encoding="utf-8")
+
+    monkeypatch.setattr(control_panel_routes, "ingest_paths", _make_fake_ingest())
+
+    async with _admin_client(manager) as client:
+        blocked = await client.post(
+            "/v1/admin/sources/scan",
+            headers=_admin_headers(),
+            json={
+                "paths": [str(outside_path)],
+                "source_kind": "local_folder",
+                "collection_id": "source-corpus",
+            },
+        )
+        scan = await client.post(
+            "/v1/admin/sources/scan",
+            headers=_admin_headers(),
+            json={
+                "paths": [str(source_root)],
+                "source_kind": "local_folder",
+                "collection_id": "source-corpus",
+                "include_globs": ["docs/**"],
+            },
+        )
+        registered = await client.post(
+            "/v1/admin/sources/register",
+            headers=_admin_headers(),
+            json={
+                "paths": [str(source_root)],
+                "source_kind": "local_folder",
+                "collection_id": "source-corpus",
+                "include_globs": ["docs/**"],
+            },
+        )
+        source_id = registered.json()["source"]["source_id"]
+        sources = await client.get("/v1/admin/sources", headers=_admin_headers())
+        first_refresh = await client.post(
+            f"/v1/admin/sources/{source_id}/refresh",
+            headers=_admin_headers(),
+            json={"index_preview": False},
+        )
+        first_docs = await client.get("/v1/admin/collections/source-corpus/documents", headers=_admin_headers())
+
+        file_a.write_text("alpha graph content with a changed relationship", encoding="utf-8")
+        file_b.unlink()
+        file_c = docs_dir / "c.md"
+        file_c.write_text("gamma graph content", encoding="utf-8")
+        second_refresh = await client.post(
+            f"/v1/admin/sources/{source_id}/refresh",
+            headers=_admin_headers(),
+            json={"index_preview": False},
+        )
+        second_docs = await client.get("/v1/admin/collections/source-corpus/documents", headers=_admin_headers())
+
+    assert blocked.status_code == 200
+    assert blocked.json()["summary"]["blocked_count"] == 1
+    assert blocked.json()["blocked_paths"] == [str(outside_path.resolve())]
+    assert scan.status_code == 200
+    assert scan.json()["summary"]["supported_count"] == 2
+    assert [item["display_path"] for item in scan.json()["supported_files"]] == ["docs/a.md", "docs/b.md"]
+    assert registered.status_code == 200
+    assert registered.json()["source"]["collection_id"] == "source-corpus"
+    assert sources.json()["sources"][0]["source_id"] == source_id
+    assert first_refresh.status_code == 200
+    assert first_refresh.json()["ingested_count"] == 2
+    assert first_refresh.json()["files"][0]["source_type"] == "local_folder"
+    assert {doc["source_type"] for doc in first_docs.json()["documents"]} == {"local_folder"}
+    assert second_refresh.status_code == 200
+    assert second_refresh.json()["changes"]["changed_count"] == 1
+    assert second_refresh.json()["changes"]["added_count"] == 1
+    assert second_refresh.json()["changes"]["deleted_count"] == 1
+    assert second_refresh.json()["deleted_doc_ids"] == ["source-corpus-b-md"]
+    assert {doc["title"] for doc in second_docs.json()["documents"]} == {"a.md", "c.md"}
 
 
 @pytest.mark.asyncio

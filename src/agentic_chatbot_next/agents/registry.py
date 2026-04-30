@@ -87,6 +87,14 @@ class AgentRegistry:
                 return agent.name
         return "coordinator"
 
+    def get_research_agent_name(self) -> str:
+        for agent in self.list_routable():
+            if bool(agent.metadata.get("research_campaign_agent")):
+                return agent.name
+        if self.get("research_coordinator") is not None:
+            return "research_coordinator"
+        return self.get_manager_agent_name()
+
     def get_data_analyst_agent_name(self) -> str:
         for agent in self.list_routable():
             tools = set(agent.allowed_tools)

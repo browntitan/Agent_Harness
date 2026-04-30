@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Notes"/>
+          <p:cNvSpPr txBox="1"/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="0" y="0"/>
+            <a:ext cx="10000000" cy="1000000"/>
+          </a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:t>The authorization subsystem implements Role-Based Access Control, or RBAC, which is the industry standard for managing who can do what in an enterprise system. Let me walk through the model. Principals are the identities - users and service accounts, each with a unique ID. Roles are named permission bundles like admin, editor, and viewer. Bindings map a principal to a role on a specific resource - so you might bind user Alice to the editor role on collection "hr-docs". Memberships handle group-level role inheritance so you do not have to assign roles individually to every user. And Permissions are the granular resource-action pairs like "collection:read" or "agent:invoke". The system exposes 15 admin endpoints for managing all of this - CRUD operations for principals, roles, bindings, memberships, plus a permissions query and an effective-access endpoint that resolves the full permission set for a given principal. The authz service in authz/service.py is about 269 lines and provides tenant-scoped resource access. It integrates with the API gateway via gateway_security.py, with connector endpoints via connector_security.py, and with the skill runtime for per-skill access filtering. Tool policy enforcement happens in tools/policy.py. This is the foundation - the next evolution is ABAC, attribute-based access control, which would add dataset-level and column-level checks.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

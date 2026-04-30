@@ -319,6 +319,7 @@ class Settings:
     control_panel_agent_overlays_dir: Path
     control_panel_audit_log_path: Path
     control_panel_static_dir: Path
+    control_panel_source_allowed_roots: tuple[Path, ...]
 
 
 def _getenv(name: str, default: str | None = None) -> str | None:
@@ -1063,6 +1064,13 @@ def load_settings(
         _getenv("CONTROL_PANEL_STATIC_DIR", str(project_root / "control_panel" / "dist")) or "",
         base=project_root,
     )
+    configured_source_roots = _as_path_tuple("CONTROL_PANEL_SOURCE_ALLOWED_ROOTS", base=project_root)
+    control_panel_source_allowed_roots = configured_source_roots or (
+        kb_dir,
+        *kb_extra_dirs,
+        project_root,
+        data_dir,
+    )
 
     # Ensure backend values are in allowed sets.
     if database_backend not in {"postgres"}:
@@ -1360,4 +1368,5 @@ def load_settings(
         control_panel_agent_overlays_dir=control_panel_agent_overlays_dir,
         control_panel_audit_log_path=control_panel_audit_log_path,
         control_panel_static_dir=control_panel_static_dir,
+        control_panel_source_allowed_roots=control_panel_source_allowed_roots,
     )

@@ -380,6 +380,91 @@ export interface CollectionOperationResult {
   metadata_summary?: Record<string, unknown>
 }
 
+export interface SourceScanSummary {
+  supported_count: number
+  skipped_count: number
+  missing_count: number
+  blocked_count: number
+  duplicate_display_path_count: number
+  duplicate_filename_count: number
+  total_size_bytes: number
+  estimated_chunks: number
+}
+
+export interface SourceScanFile {
+  display_path: string
+  filename: string
+  source_path: string
+  source_type: string
+  supported: boolean
+  outcome: string
+  error?: string
+  duplicate_display_path?: boolean
+  size_bytes?: number
+  fingerprint?: Record<string, unknown>
+}
+
+export interface SourceScanPayload {
+  object: string
+  status: string
+  source_kind: string
+  collection_id: string
+  metadata_profile: string
+  requested_paths: string[]
+  allowed_roots: string[]
+  roots: Array<Record<string, unknown>>
+  summary: SourceScanSummary
+  files: SourceScanFile[]
+  supported_files: SourceScanFile[]
+  skipped_files: SourceScanFile[]
+  missing_paths: string[]
+  blocked_paths: string[]
+  duplicate_display_paths: string[]
+  duplicate_filenames: string[]
+  warnings: string[]
+}
+
+export interface RegisteredSource {
+  source_id: string
+  tenant_id?: string
+  collection_id: string
+  display_name: string
+  source_kind: string
+  paths: string[]
+  include_globs?: string[]
+  exclude_globs?: string[]
+  last_scan?: SourceScanPayload
+  last_refresh?: Record<string, unknown>
+  created_at?: string
+  updated_at?: string
+}
+
+export interface SourceRefreshRun {
+  run_id: string
+  source_id: string
+  operation: string
+  status: string
+  detail?: string
+  started_at?: string
+  completed_at?: string
+  updated_at?: string
+  result?: Record<string, unknown>
+}
+
+export interface GraphAssistantPayload {
+  friendly?: Record<string, unknown>
+  validation?: Record<string, unknown>
+  result?: Record<string, unknown>
+  graph_id?: string
+  query?: string
+  display_name?: string
+  config_overrides?: Record<string, unknown>
+  prompt_overrides?: Record<string, unknown>
+  source_doc_ids?: string[]
+  source_count?: number
+  guidance?: string
+}
+
 export interface GraphIndexRecord {
   graph_id: string
   tenant_id: string

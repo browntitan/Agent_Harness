@@ -15,12 +15,16 @@ import type {
   ConfigValidationResult,
   ControlPanelCapabilities,
   EffectiveAccessPayload,
+  GraphAssistantPayload,
   GraphDetailPayload,
   GraphIndexRecord,
   GraphIndexRunRecord,
   GraphResearchTunePayload,
   McpConnectionRecord,
   McpToolCatalogRecord,
+  RegisteredSource,
+  SourceRefreshRun,
+  SourceScanPayload,
   UploadedFileSummary,
 } from './types'
 
@@ -283,24 +287,25 @@ export const api = {
       body: JSON.stringify({ changes: {} }),
     })
   },
-  ingestPaths(token: string, collectionId: string, paths: string[], metadataProfile = 'auto', indexPreview = false) {
+  ingestPaths(token: string, collectionId: string, paths: string[], metadataProfile = 'auto', indexPreview = false, sourceType = 'host_path') {
     return apiFetch<CollectionOperationResult>(`/v1/admin/collections/${collectionId}/ingest-paths`, token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         paths,
-        source_type: 'host_path',
+        source_type: sourceType,
         metadata_profile: metadataProfile,
         index_preview: indexPreview,
       }),
     })
   },
-  uploadFiles(token: string, collectionId: string, files: File[], relativePaths: string[] = [], metadataProfile = 'auto', indexPreview = false) {
+  uploadFiles(token: string, collectionId: string, files: File[], relativePaths: string[] = [], metadataProfile = 'auto', indexPreview = false, sourceType = 'collection_upload') {
     const form = new FormData()
     files.forEach((file, index) => {
       form.append('files', file)
       form.append('relative_paths', relativePaths[index] ?? '')
     })
+    form.append('source_type', sourceType)
     form.append('metadata_profile', metadataProfile)
     form.append('index_preview', String(indexPreview))
     return apiFetch<CollectionOperationResult>(`/v1/admin/collections/${collectionId}/upload`, token, {
@@ -393,9 +398,65 @@ export const api = {
       { method: 'DELETE' },
     )
   },
+  listSources(token: string) {
+    return apiFetch<{ sources: RegisteredSource[]; runs: SourceRefreshRun[]; allowed_roots: string[] }>('/v1/admin/sources', token)
+  },
+  scanSource(
+    token: string,
+    payload: {
+      paths: string[]
+      source_kind: string
+      collection_id?: string
+      include_globs?: string[]
+      exclude_globs?: string[]
+      metadata_profile?: string
+    },
+  ) {
+    return apiFetch<SourceScanPayload>('/v1/admin/sources/scan', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
+  registerSource(
+    token: string,
+    payload: {
+      source_id?: string
+      display_name?: string
+      paths: string[]
+      source_kind: string
+      collection_id?: string
+      include_globs?: string[]
+      exclude_globs?: string[]
+      metadata_profile?: string
+    },
+  ) {
+    return apiFetch<{ created: boolean; source: RegisteredSource; scan: SourceScanPayload }>('/v1/admin/sources/register', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
+  refreshSource(token: string, sourceId: string, payload: { metadata_profile?: string; index_preview?: boolean; background?: boolean }) {
+    return apiFetch<Record<string, unknown>>(`/v1/admin/sources/${sourceId}/refresh`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
+  getSourceRun(token: string, runId: string) {
+    return apiFetch<{ run: SourceRefreshRun }>(`/v1/admin/sources/runs/${runId}`, token)
+  },
   listGraphs(token: string, collectionId = '') {
     const suffix = collectionId ? `?collection_id=${encodeURIComponent(collectionId)}` : ''
     return apiFetch<{ graphs: GraphIndexRecord[] }>(`/v1/admin/graphs${suffix}`, token)
+  },
+  suggestGraph(token: string, payload: { collection_id: string; intent?: string; source_doc_ids?: string[] }) {
+    return apiFetch<GraphAssistantPayload>('/v1/admin/graphs/assistant/suggest', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
   },
   getGraph(token: string, graphId: string) {
     return apiFetch<GraphDetailPayload>(`/v1/admin/graphs/${graphId}`, token)
@@ -430,6 +491,20 @@ export const api = {
   },
   getGraphRuns(token: string, graphId: string) {
     return apiFetch<{ runs: GraphIndexRunRecord[] }>(`/v1/admin/graphs/${graphId}/runs`, token)
+  },
+  graphAssistantPreflight(token: string, graphId: string) {
+    return apiFetch<GraphAssistantPayload>(`/v1/admin/graphs/${graphId}/assistant/preflight`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+  },
+  graphSmokeTest(token: string, graphId: string, payload: { query?: string; methods?: string[]; limit?: number }) {
+    return apiFetch<GraphAssistantPayload>(`/v1/admin/graphs/${graphId}/assistant/smoke-test`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
   },
   startGraphResearchTune(
     token: string,

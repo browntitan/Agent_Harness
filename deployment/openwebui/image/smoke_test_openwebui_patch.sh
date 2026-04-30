@@ -22,7 +22,19 @@ git -C "${WORKDIR}/open-webui" apply --recount --check "${PATCH_FILE}"
 
 echo "Checking patched tool-call trace UI files"
 git -C "${WORKDIR}/open-webui" apply --recount "${PATCH_FILE}"
-test -f "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ToolCallStack.svelte"
+test -f "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityStream.svelte"
+test -f "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityRow.svelte"
+test -f "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/AuditDetailPanel.svelte"
+grep -R "bind:open={expanded}" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityRow.svelte" >/dev/null
+if grep -R "open={item?.status === 'running'" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory/ActivityRow.svelte" >/dev/null; then
+  echo "ActivityRow still uses computed details open state" >&2
+  exit 1
+fi
+grep -R "agentic_audit_item" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Chat.svelte" \
+  "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory" >/dev/null
 grep -R "agentic_tool_call" \
   "${WORKDIR}/open-webui/src/lib/components/chat/Chat.svelte" \
   "${WORKDIR}/open-webui/src/lib/components/chat/Messages/ResponseMessage/StatusHistory" >/dev/null

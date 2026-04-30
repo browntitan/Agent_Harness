@@ -10,14 +10,16 @@ from agentic_chatbot_next.utils.json_utils import extract_json
 
 _ALLOWED_MODES = {"off", "auto", "force"}
 _ALLOWED_SEARCH_MODES = {"fast", "auto", "deep"}
-_ALLOWED_AGENTS = {"", "rag_worker", "coordinator"}
+_ALLOWED_AGENTS = {"", "rag_worker", "coordinator", "research_coordinator"}
 
 _BROAD_RESEARCH_HINTS = re.compile(
     r"\b("
     r"investigate|across\s+the\s+default\s+collection|across\s+the\s+documents|"
     r"identify\s+all\s+documents|provide\s+(?:me\s+)?a\s+list\s+of\s+documents|"
     r"be\s+exhaustive|corpus|comprehensive|deep\s+research|major\s+subsystems|"
-    r"full\s+lifecycle|end-to-end|cross-cutting|compare\s+many|long-form|long form"
+    r"full\s+lifecycle|end-to-end|cross-cutting|compare\s+many|long-form|long form|"
+    r"organize\s+(?:this\s+|the\s+)?(?:repository|corpus|documents|docs|files)|multi[-\s]?hop|"
+    r"synthesi[sz]e\s+(?:across|over)\s+(?:all\s+|the\s+)?(?:documents|docs|files|corpus|repository)"
     r")\b",
     re.IGNORECASE,
 )
@@ -74,7 +76,8 @@ or start in the coordinator.
 Important rules:
 - Hard blockers like missing scope or missing uploads are handled elsewhere; do not reason about them here.
 - Prefer `search_mode="deep"` when the query is complex, broad, evidence-sensitive, or asks for detailed synthesis.
-- Prefer `preferred_agent="coordinator"` for broad research campaigns, compare-many tasks, or exhaustive corpus work.
+- Prefer `preferred_agent="research_coordinator"` for deep research, multi-hop, repository-scale synthesis, or exhaustive corpus work.
+- Prefer `preferred_agent="coordinator"` for broad non-research multi-agent campaigns and compare-many tasks.
 - Prefer `preferred_agent="rag_worker"` for focused grounded questions that still need deep staged retrieval.
 - Prefer `prefer_full_reads=true` when the user asks to inspect, look through, or directly read documents.
 - Prefer `prefer_section_first=true` for long or structured documents before paginating through the full document.
@@ -276,7 +279,7 @@ def _complexity_score(
         score += 1
     if has_attachments:
         score += 1
-    if suggested_agent == "coordinator":
+    if suggested_agent in {"coordinator", "research_coordinator"}:
         score += 2
     if _FOLLOWUP_SUMMARY_HINTS.search(text) and bool(dict(session_metadata or {}).get("active_doc_focus")):
         score += 2
@@ -345,7 +348,9 @@ def _heuristic_policy(
     search_mode = "deep" if request.mode == "force" or score >= 3 or followup_doc_summary else "auto"
     preferred_agent = ""
     if route == "AGENT":
-        if followup_doc_summary or broad_research or suggested_agent == "coordinator":
+        if broad_research or suggested_agent == "research_coordinator":
+            preferred_agent = "research_coordinator"
+        elif followup_doc_summary or suggested_agent == "coordinator":
             preferred_agent = "coordinator"
         elif search_mode == "deep":
             preferred_agent = "rag_worker"
