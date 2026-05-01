@@ -296,7 +296,6 @@ Key packs added for corpus-scale document research include:
 - `rag/corpus_discovery`
 - `rag/coverage_sufficiency_audit`
 - `rag/cross_document_inventory`
-- `rag/defense_graph_guidance`
 - `rag/document_resolution`
 - `rag/empty_result_recovery`
 - `rag/graph_drift_followup`
@@ -305,6 +304,7 @@ Key packs added for corpus-scale document research include:
 - `rag/graph_grounding_and_resolve_back`
 - `rag/graph_local_relationship_tracing`
 - `rag/graph_vs_vector_source_selection`
+- `rag/knowledge_base_search_guidance`
 - `rag/multi_document_comparison`
 - `rag/negative_evidence_reporting`
 - `rag/process_flow_identification`

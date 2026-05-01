@@ -731,7 +731,7 @@ def _collection_domain_opening(
 ) -> str:
     clean_collection_id = str(collection_id or "").strip()
     if clean_collection_id.casefold() == "default":
-        return "The primary corporate knowledge base"
+        return "The default knowledge-base collection"
     hint_text = _normalize_namespace_text(
         " ".join(
             [
@@ -742,9 +742,7 @@ def _collection_domain_opening(
         )
     )
     if any(token in hint_text for token in ("test", "validation", "sandbox", "demo")):
-        return "A secondary test collection"
-    if "rfp" in hint_text or "request for proposal" in hint_text or "proposal" in hint_text:
-        return "A specialized collection for request-for-proposal (RFP) material"
+        return "A test knowledge-base collection"
     if "vendor security" in hint_text:
         return "A vendor-security collection"
     if "security" in hint_text:
@@ -2113,7 +2111,7 @@ def build_kb_collection_access_answer(payload: dict[str, Any]) -> dict[str, Any]
         lines.append(str(item.get("summary") or "").strip() or "A knowledge-base collection.")
         lines.append("")
     if len(lines) == 1:
-        lines.extend(["default", "The primary corporate knowledge base.", ""])
+        lines.extend(["default", "The default knowledge-base collection.", ""])
 
     lines.append("Knowledge graphs available to this chat:")
     if graphs:

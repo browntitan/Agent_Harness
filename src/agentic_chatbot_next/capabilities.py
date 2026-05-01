@@ -117,6 +117,21 @@ class EffectiveCapabilities(CapabilityProfile):
     hidden_unavailable: list[str] = field(default_factory=list)
     source: str = "defaults"
     collection_access_limited: bool = False
+    agent_access_limited: bool = False
+    skill_access_limited: bool = False
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any] | None) -> "EffectiveCapabilities":
+        payload = _coerce_mapping(raw)
+        base = CapabilityProfile.from_dict(payload)
+        return cls(
+            **base.to_dict(),
+            hidden_unavailable=_clean_strings(payload.get("hidden_unavailable")),
+            source=str(payload.get("source") or "defaults"),
+            collection_access_limited=bool(payload.get("collection_access_limited", False)),
+            agent_access_limited=bool(payload.get("agent_access_limited", False)),
+            skill_access_limited=bool(payload.get("skill_access_limited", False)),
+        )
 
     @classmethod
     def from_profile(
@@ -147,7 +162,32 @@ class EffectiveCapabilities(CapabilityProfile):
             enabled_collections = [collection for collection in enabled_collections if collection in available_collections]
 
         collection_access_limited = False
+        agent_access_limited = False
+        skill_access_limited = False
         if access_summary_authz_enabled(access_summary):
+            agent_resource = dict(dict(dict(access_summary or {}).get("resources") or {}).get("agent") or {})
+            agent_use_all = bool(agent_resource.get("use_all"))
+            authz_agent_ids = list(access_summary_allowed_ids(access_summary, "agent", action="use"))
+            authz_agent_groups = list(access_summary_allowed_ids(access_summary, "agent_group", action="use"))
+            if not agent_use_all and (authz_agent_ids or authz_agent_groups):
+                allowed_agents = set(authz_agent_ids)
+                for group in authz_agent_groups:
+                    clean_group = str(group or "").strip().lower()
+                    if clean_group == "*":
+                        agent_use_all = True
+                        break
+                    for agent in available_agents:
+                        lowered = agent.lower()
+                        if clean_group and (clean_group in lowered or (clean_group in {"coordinator", "planner"} and lowered in {"coordinator", "research_coordinator", "planner"})):
+                            allowed_agents.add(agent)
+                if not agent_use_all:
+                    if enabled_agents:
+                        hidden.extend([agent for agent in enabled_agents if agent not in allowed_agents])
+                        enabled_agents = [agent for agent in enabled_agents if agent in allowed_agents]
+                    else:
+                        enabled_agents = sorted(allowed_agents)
+                    agent_access_limited = True
+
             authz_collection_ids = list(access_summary_allowed_ids(access_summary, "collection", action="use"))
             collection_resource = dict(dict(dict(access_summary or {}).get("resources") or {}).get("collection") or {})
             collection_use_all = bool(collection_resource.get("use_all"))
@@ -167,14 +207,42 @@ class EffectiveCapabilities(CapabilityProfile):
                 enabled_tools = [tool for tool in base.enabled_tools if tool in set(authz_tool_ids)]
             else:
                 enabled_tools = list(base.enabled_tools)
+
+            authz_tool_groups = list(access_summary_allowed_ids(access_summary, "tool_group", action="use"))
+            if authz_tool_groups and "*" not in authz_tool_groups:
+                enabled_tool_groups = [group for group in base.enabled_tool_groups if group in set(authz_tool_groups)]
+                if not enabled_tool_groups:
+                    enabled_tool_groups = list(authz_tool_groups)
+            else:
+                enabled_tool_groups = list(base.enabled_tool_groups)
+
+            authz_skill_ids = [
+                *list(access_summary_allowed_ids(access_summary, "skill", action="use")),
+                *list(access_summary_allowed_ids(access_summary, "skill_family", action="use")),
+            ]
+            skill_resource = dict(dict(dict(access_summary or {}).get("resources") or {}).get("skill") or {})
+            skill_family_resource = dict(dict(dict(access_summary or {}).get("resources") or {}).get("skill_family") or {})
+            skill_use_all = bool(skill_resource.get("use_all") or skill_family_resource.get("use_all"))
+            if authz_skill_ids and "*" not in authz_skill_ids:
+                allowed_skills = set(authz_skill_ids)
+                if base.enabled_skill_pack_ids:
+                    enabled_skill_pack_ids = [skill for skill in base.enabled_skill_pack_ids if skill in allowed_skills]
+                else:
+                    enabled_skill_pack_ids = list(authz_skill_ids)
+                skill_access_limited = True
+            else:
+                enabled_skill_pack_ids = list(base.enabled_skill_pack_ids)
+                skill_access_limited = not skill_use_all and bool(authz_skill_ids)
         else:
             enabled_tools = list(base.enabled_tools)
+            enabled_tool_groups = list(base.enabled_tool_groups)
+            enabled_skill_pack_ids = list(base.enabled_skill_pack_ids)
 
         return cls(
             enabled_tools=enabled_tools,
             disabled_tools=list(base.disabled_tools),
-            enabled_tool_groups=list(base.enabled_tool_groups),
-            enabled_skill_pack_ids=list(base.enabled_skill_pack_ids),
+            enabled_tool_groups=enabled_tool_groups,
+            enabled_skill_pack_ids=enabled_skill_pack_ids,
             disabled_skill_pack_ids=list(base.disabled_skill_pack_ids),
             enabled_mcp_tool_ids=list(base.enabled_mcp_tool_ids),
             enabled_agents=enabled_agents,
@@ -186,6 +254,8 @@ class EffectiveCapabilities(CapabilityProfile):
             hidden_unavailable=_clean_strings(hidden),
             source=source,
             collection_access_limited=collection_access_limited,
+            agent_access_limited=agent_access_limited,
+            skill_access_limited=skill_access_limited,
         )
 
     @classmethod
@@ -204,10 +274,14 @@ class EffectiveCapabilities(CapabilityProfile):
         payload["hidden_unavailable"] = list(self.hidden_unavailable)
         payload["source"] = self.source
         payload["collection_access_limited"] = self.collection_access_limited
+        payload["agent_access_limited"] = self.agent_access_limited
+        payload["skill_access_limited"] = self.skill_access_limited
         return payload
 
     def allows_agent(self, agent_name: str) -> bool:
         clean = str(agent_name or "").strip()
+        if self.agent_access_limited and not self.enabled_agents:
+            return False
         return not self.enabled_agents or clean in set(self.enabled_agents)
 
     def allows_collection(self, collection_id: str) -> bool:
@@ -226,6 +300,8 @@ class EffectiveCapabilities(CapabilityProfile):
             return False
         if self.enabled_skill_pack_ids:
             return any(_any_selector_matches(self.enabled_skill_pack_ids, candidate) for candidate in candidates)
+        if self.skill_access_limited:
+            return False
         return True
 
     def allows_tool(
@@ -368,11 +444,12 @@ def resolve_effective_capabilities(
         profile = CapabilityProfile.from_dict(_coerce_mapping(profile))
 
     available_agents: list[str] = []
-    if registry is not None and hasattr(registry, "list_routable"):
+    if registry is not None and (hasattr(registry, "list") or hasattr(registry, "list_routable")):
         try:
+            agent_iterable = registry.list() if hasattr(registry, "list") else registry.list_routable()
             available_agents = [
                 str(getattr(agent, "name", "") or "").strip()
-                for agent in registry.list_routable()
+                for agent in agent_iterable
                 if str(getattr(agent, "name", "") or "").strip()
             ]
         except Exception:

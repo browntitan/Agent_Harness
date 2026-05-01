@@ -246,7 +246,6 @@ The main RAG-oriented packs live under `data/skill_packs/rag/`:
 - `corpus_discovery`
 - `coverage_sufficiency_audit`
 - `cross_document_inventory`
-- `defense_graph_guidance`
 - `document_resolution`
 - `empty_result_recovery`
 - `graph_drift_followup`
@@ -255,6 +254,7 @@ The main RAG-oriented packs live under `data/skill_packs/rag/`:
 - `graph_grounding_and_resolve_back`
 - `graph_local_relationship_tracing`
 - `graph_vs_vector_source_selection`
+- `knowledge_base_search_guidance`
 - `multi_document_comparison`
 - `negative_evidence_reporting`
 - `process_flow_identification`

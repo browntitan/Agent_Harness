@@ -8,23 +8,32 @@ import type {
 import { EmptyState, FilterChip, Popover, SegmentedControl, Tooltip } from '../../components/ui'
 
 type PrincipalFilter = 'all' | 'user' | 'group' | 'service'
-type ActionLevel = 'none' | 'use' | 'manage'
+type ActionLevel = 'none' | 'use' | 'approve' | 'delete' | 'manage'
 
 const RESOURCE_TYPES: Array<{ key: string; label: string }> = [
+  { key: 'agent', label: 'Agents' },
+  { key: 'agent_group', label: 'Agent Groups' },
   { key: 'collection', label: 'Collections' },
   { key: 'graph', label: 'Graphs' },
+  { key: 'skill', label: 'Skills' },
+  { key: 'skill_family', label: 'Skill Families' },
   { key: 'tool', label: 'Tools' },
-  { key: 'skill_family', label: 'Skills' },
+  { key: 'tool_group', label: 'Tool Groups' },
+  { key: 'worker_request', label: 'Worker Requests' },
 ]
 
 function strongerAction(a: ActionLevel, b: ActionLevel): ActionLevel {
   if (a === 'manage' || b === 'manage') return 'manage'
+  if (a === 'delete' || b === 'delete') return 'delete'
+  if (a === 'approve' || b === 'approve') return 'approve'
   if (a === 'use' || b === 'use') return 'use'
   return 'none'
 }
 
 function glyphForLevel(level: ActionLevel): string {
   if (level === 'manage') return '●'
+  if (level === 'delete') return '◆'
+  if (level === 'approve') return '◐'
   if (level === 'use') return '○'
   return '·'
 }
@@ -87,7 +96,7 @@ export function RbacMatrix(props: {
         for (const perm of rolePerms) {
           const g = grants[perm.resource_type]
           if (!g) continue
-          const action = (perm.action === 'manage' ? 'manage' : 'use') as ActionLevel
+          const action = (['manage', 'delete', 'approve', 'use'].includes(perm.action) ? perm.action : 'use') as ActionLevel
           g.level = strongerAction(g.level, action)
           if (!g.selectors.includes(perm.resource_selector)) g.selectors.push(perm.resource_selector)
           g.via.push({
@@ -172,6 +181,8 @@ export function RbacMatrix(props: {
       <div className="rbac-matrix-legend">
         <span><span className="rbac-glyph rbac-glyph-none">·</span> None</span>
         <span><span className="rbac-glyph rbac-glyph-use">○</span> Use</span>
+        <span><span className="rbac-glyph rbac-glyph-use">◐</span> Approve</span>
+        <span><span className="rbac-glyph rbac-glyph-manage">◆</span> Delete</span>
         <span><span className="rbac-glyph rbac-glyph-manage">●</span> Manage</span>
       </div>
 

@@ -18,6 +18,7 @@ import type {
   GraphAssistantPayload,
   GraphDetailPayload,
   GraphIndexRecord,
+  GraphProgressPayload,
   GraphIndexRunRecord,
   GraphResearchTunePayload,
   McpConnectionRecord,
@@ -475,22 +476,39 @@ export const api = {
       body: JSON.stringify({}),
     })
   },
-  buildGraph(token: string, graphId: string) {
+  buildGraph(token: string, graphId: string, payload: { force?: boolean; cancel_existing?: boolean } = {}) {
     return apiFetch<Record<string, unknown>>(`/v1/admin/graphs/${graphId}/build`, token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify(payload),
     })
   },
-  refreshGraph(token: string, graphId: string) {
+  refreshGraph(token: string, graphId: string, payload: { force?: boolean; cancel_existing?: boolean } = {}) {
     return apiFetch<Record<string, unknown>>(`/v1/admin/graphs/${graphId}/refresh`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
+  getGraphProgress(token: string, graphId: string) {
+    return apiFetch<GraphProgressPayload>(`/v1/admin/graphs/${graphId}/progress`, token)
+  },
+  getGraphRuns(token: string, graphId: string) {
+    return apiFetch<{ runs: GraphIndexRunRecord[] }>(`/v1/admin/graphs/${graphId}/runs`, token)
+  },
+  cancelGraphRun(token: string, graphId: string, runId: string) {
+    return apiFetch<Record<string, unknown>>(`/v1/admin/graphs/${graphId}/runs/${runId}/cancel`, token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     })
   },
-  getGraphRuns(token: string, graphId: string) {
-    return apiFetch<{ runs: GraphIndexRunRecord[] }>(`/v1/admin/graphs/${graphId}/runs`, token)
+  deleteGraph(token: string, graphId: string, payload: { delete_artifacts?: boolean } = {}) {
+    return apiFetch<Record<string, unknown>>(`/v1/admin/graphs/${graphId}`, token, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
   },
   graphAssistantPreflight(token: string, graphId: string) {
     return apiFetch<GraphAssistantPayload>(`/v1/admin/graphs/${graphId}/assistant/preflight`, token, {

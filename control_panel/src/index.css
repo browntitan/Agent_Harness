@@ -695,6 +695,22 @@ p {
 
 .graph-studio {
   grid-template-columns: 320px minmax(560px, 1fr) 360px;
+  grid-template-areas: "rail main inspector";
+}
+
+.graph-studio > .graph-rail {
+  grid-area: rail;
+}
+
+.graph-studio > .content-stack {
+  grid-area: main;
+}
+
+.graph-inspector-card {
+  grid-area: inspector;
+  position: sticky;
+  top: 102px;
+  align-self: start;
 }
 
 .prompt-edit-layout,
@@ -743,6 +759,67 @@ p {
   align-self: start;
   gap: 12px;
   padding: 16px;
+}
+
+.graph-progress-panel,
+.wizard-shell {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.progress-track {
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent-solid);
+  transition: width var(--dur-3) var(--ease-standard);
+}
+
+.stage-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.stage-chip {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--fg-muted);
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+button.stage-chip {
+  cursor: pointer;
+}
+
+.stage-chip-active {
+  border-color: var(--accent-border);
+  background: var(--accent-surface);
+  color: var(--accent-fg);
+}
+
+.stage-chip-completed {
+  border-color: var(--status-ok-border);
+  background: var(--status-ok-surface);
+  color: var(--status-ok-fg);
+}
+
+.stage-chip-failed,
+.stage-chip-cancelled {
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-surface);
+  color: var(--status-danger-fg);
 }
 
 .surface-head {
@@ -1618,11 +1695,82 @@ p {
   gap: 10px;
 }
 
+.tool-catalog,
+.tool-catalog-toolbar,
+.tool-tag-groups,
+.tool-tag-group {
+  display: grid;
+  gap: 14px;
+}
+
+.tool-catalog-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--fg-muted);
+  font-size: var(--font-size-sm);
+}
+
+.tool-catalog-summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+}
+
+.tool-catalog-summary strong {
+  color: var(--fg-default);
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-tag-filter-row,
+.tool-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-tag-filter-btn {
+  border-radius: var(--radius-pill);
+}
+
+.tool-tag-filter-btn[aria-pressed="false"] .filter-chip {
+  opacity: 0.72;
+}
+
+.tool-tag-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tool-tag-group-head h4 {
+  font-size: var(--font-size-md);
+}
+
+.tool-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
 .tool-card-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.tool-card-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .detail-tabs {
@@ -1981,6 +2129,12 @@ p {
     grid-template-columns: 320px minmax(0, 1fr);
   }
 
+  .graph-studio {
+    grid-template-areas:
+      "rail main"
+      "inspector main";
+  }
+
   .agent-studio .studio-sidebar,
   .prompt-studio .studio-sidebar,
   .skill-studio .studio-sidebar,
@@ -2097,6 +2251,21 @@ p {
   }
 
   .selection-rail.surface-card {
+    position: static;
+    top: auto;
+  }
+
+  .graph-studio {
+    grid-template-areas: none;
+  }
+
+  .graph-studio > .graph-rail,
+  .graph-studio > .content-stack,
+  .graph-inspector-card {
+    grid-area: auto;
+  }
+
+  .graph-inspector-card {
     position: static;
     top: auto;
   }

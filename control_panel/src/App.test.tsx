@@ -1102,20 +1102,136 @@ function createFetchMock(options: {
       return jsonResponse({ principals: state.accessPrincipals })
     }
 
+    if (path === '/v1/admin/access/principals' && method === 'POST') {
+      const body = readJsonBody(init)
+      const principalType = String(body.principal_type ?? 'user')
+      const email = String(body.email_normalized ?? '')
+      const displayName = String(body.display_name ?? email)
+      const principalId = String(body.principal_id ?? (
+        principalType === 'group'
+          ? `principal-group-${slugify(displayName)}`
+          : `principal-user-${slugify(email || displayName)}`
+      ))
+      const principal = {
+        principal_id: principalId,
+        tenant_id: 'openwebui',
+        principal_type: principalType,
+        provider: String(body.provider ?? (principalType === 'group' ? 'system' : 'email')),
+        external_id: String(body.external_id ?? ''),
+        email_normalized: email,
+        display_name: displayName,
+        metadata_json: (body.metadata_json ?? {}) as Record<string, unknown>,
+        active: body.active !== false,
+        created_at: '2026-04-08T10:00:00Z',
+        updated_at: '2026-04-08T10:00:00Z',
+      }
+      state.accessPrincipals = state.accessPrincipals.filter(existing => existing.principal_id !== principalId)
+      state.accessPrincipals.push(principal)
+      return jsonResponse({ principal })
+    }
+
     if (path === '/v1/admin/access/memberships' && method === 'GET') {
       return jsonResponse({ memberships: state.accessMemberships })
+    }
+
+    if (path === '/v1/admin/access/memberships' && method === 'POST') {
+      const body = readJsonBody(init)
+      const membership = {
+        membership_id: String(body.membership_id ?? `membership-${slugify(String(body.parent_principal_id ?? 'group'))}-${slugify(String(body.child_principal_id ?? 'member'))}-${state.accessMemberships.length + 1}`),
+        tenant_id: 'openwebui',
+        parent_principal_id: String(body.parent_principal_id ?? ''),
+        child_principal_id: String(body.child_principal_id ?? ''),
+        created_at: '2026-04-08T10:00:00Z',
+      }
+      state.accessMemberships = state.accessMemberships.filter(existing => existing.membership_id !== membership.membership_id)
+      state.accessMemberships.push(membership)
+      return jsonResponse({ membership })
+    }
+
+    if (path.startsWith('/v1/admin/access/memberships/') && method === 'DELETE') {
+      const membershipId = path.split('/').pop() ?? ''
+      state.accessMemberships = state.accessMemberships.filter(membership => membership.membership_id !== membershipId)
+      return jsonResponse({ deleted: true, membership_id: membershipId })
     }
 
     if (path === '/v1/admin/access/roles' && method === 'GET') {
       return jsonResponse({ roles: state.accessRoles })
     }
 
+    if (path === '/v1/admin/access/roles' && method === 'POST') {
+      const body = readJsonBody(init)
+      const name = String(body.name ?? 'Role')
+      const role = {
+        role_id: String(body.role_id ?? `role-${slugify(name)}-${state.accessRoles.length + 1}`),
+        tenant_id: 'openwebui',
+        name,
+        description: String(body.description ?? ''),
+        created_at: '2026-04-08T10:00:00Z',
+        updated_at: '2026-04-08T10:00:00Z',
+      }
+      state.accessRoles = state.accessRoles.filter(existing => existing.role_id !== role.role_id)
+      state.accessRoles.push(role)
+      return jsonResponse({ role })
+    }
+
+    if (path.startsWith('/v1/admin/access/roles/') && method === 'DELETE') {
+      const roleId = path.split('/').pop() ?? ''
+      state.accessRoles = state.accessRoles.filter(role => role.role_id !== roleId)
+      state.accessBindings = state.accessBindings.filter(binding => binding.role_id !== roleId)
+      state.accessPermissions = state.accessPermissions.filter(permission => permission.role_id !== roleId)
+      return jsonResponse({ deleted: true, role_id: roleId })
+    }
+
     if (path === '/v1/admin/access/bindings' && method === 'GET') {
       return jsonResponse({ bindings: state.accessBindings })
     }
 
+    if (path === '/v1/admin/access/bindings' && method === 'POST') {
+      const body = readJsonBody(init)
+      const binding = {
+        binding_id: String(body.binding_id ?? `binding-${slugify(String(body.role_id ?? 'role'))}-${slugify(String(body.principal_id ?? 'principal'))}-${state.accessBindings.length + 1}`),
+        tenant_id: 'openwebui',
+        role_id: String(body.role_id ?? ''),
+        principal_id: String(body.principal_id ?? ''),
+        created_at: '2026-04-08T10:00:00Z',
+        disabled_at: body.disabled ? '2026-04-08T10:00:00Z' : '',
+        disabled: Boolean(body.disabled),
+      }
+      state.accessBindings = state.accessBindings.filter(existing => existing.binding_id !== binding.binding_id)
+      state.accessBindings.push(binding)
+      return jsonResponse({ binding })
+    }
+
+    if (path.startsWith('/v1/admin/access/bindings/') && method === 'DELETE') {
+      const bindingId = path.split('/').pop() ?? ''
+      state.accessBindings = state.accessBindings.filter(binding => binding.binding_id !== bindingId)
+      return jsonResponse({ deleted: true, binding_id: bindingId })
+    }
+
     if (path === '/v1/admin/access/permissions' && method === 'GET') {
       return jsonResponse({ permissions: state.accessPermissions })
+    }
+
+    if (path === '/v1/admin/access/permissions' && method === 'POST') {
+      const body = readJsonBody(init)
+      const permission = {
+        permission_id: String(body.permission_id ?? `permission-${slugify(String(body.role_id ?? 'role'))}-${slugify(String(body.resource_type ?? 'resource'))}-${slugify(String(body.action ?? 'use'))}-${state.accessPermissions.length + 1}`),
+        tenant_id: 'openwebui',
+        role_id: String(body.role_id ?? ''),
+        resource_type: String(body.resource_type ?? 'collection'),
+        action: String(body.action ?? 'use'),
+        resource_selector: String(body.resource_selector ?? '*'),
+        created_at: '2026-04-08T10:00:00Z',
+      }
+      state.accessPermissions = state.accessPermissions.filter(existing => existing.permission_id !== permission.permission_id)
+      state.accessPermissions.push(permission)
+      return jsonResponse({ permission })
+    }
+
+    if (path.startsWith('/v1/admin/access/permissions/') && method === 'DELETE') {
+      const permissionId = path.split('/').pop() ?? ''
+      state.accessPermissions = state.accessPermissions.filter(permission => permission.permission_id !== permissionId)
+      return jsonResponse({ deleted: true, permission_id: permissionId })
     }
 
     if (path.startsWith('/v1/admin/access/effective-access') && method === 'GET') {
@@ -1662,6 +1778,23 @@ function createFetchMock(options: {
       return jsonResponse(listGraphsPayload())
     }
 
+    if (path === '/v1/admin/graphs/assistant/suggest' && method === 'POST') {
+      const body = readJsonBody(init)
+      const collectionId = String(body.collection_id ?? 'default')
+      const intent = String(body.intent ?? 'general')
+      const graphId = slugify(`${collectionId}-${intent}-graph`)
+      return jsonResponse({
+        graph_id: graphId,
+        display_name: `${collectionId} ${intent} Graph`,
+        collection_id: collectionId,
+        source_doc_ids: Array.isArray(body.source_doc_ids) ? body.source_doc_ids.map(String) : [],
+        source_count: (state.collections[collectionId] ?? []).length,
+        config_overrides: { extract_graph: { entity_types: ['entity', 'relationship'] } },
+        prompt_overrides: { 'extract_graph.txt': 'Extract graph facts from {input_text}.' },
+        friendly: { status: 'ready', headline: 'Suggested defaults' },
+      })
+    }
+
     if (path === '/v1/admin/graphs' && method === 'POST') {
       const body = readJsonBody(init)
       const displayName = String(body.display_name ?? 'New Graph')
@@ -1704,6 +1837,34 @@ function createFetchMock(options: {
       const detail = graphDetailPayload(graphMatch[1])
       if (!detail) return jsonResponse({ detail: 'Graph not found.' }, 404)
       return jsonResponse(detail)
+    }
+
+    const graphProgressMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/progress$/)
+    if (graphProgressMatch && method === 'GET') {
+      const [, graphId] = graphProgressMatch
+      const graph = state.graphs[graphId]
+      if (!graph) return jsonResponse({ detail: 'Graph not found.' }, 404)
+      const latestRun = (state.graphRuns[graphId] ?? [])[0] ?? null
+      const active = ['queued', 'running'].includes(String(latestRun?.status ?? '').toLowerCase())
+      return jsonResponse({
+        graph_id: graphId,
+        status: graph.status,
+        active,
+        active_run: active ? latestRun : null,
+        latest_run: latestRun,
+        workflow: active ? 'extract_graph' : 'finalize',
+        task_progress: active ? { label: 'extract graph', current: 2, total: 4, percent: 50 } : {},
+        stages: [
+          { id: 'prepare', label: 'Prepare Project', state: active ? 'completed' : 'completed' },
+          { id: 'extract_graph', label: 'Extract Graph', state: active ? 'active' : 'completed', workflow: 'extract_graph' },
+          { id: 'finalize', label: 'Finalize Index', state: active ? 'pending' : 'completed' },
+        ],
+        percent: active ? 50 : 100,
+        updated_at: '2026-04-08T10:02:00Z',
+        logs: graph.logs,
+        log_tail: String(graph.logs[0]?.preview ?? ''),
+        cursor: '2026-04-08T10:02:00Z:420',
+      })
     }
 
     const graphValidateMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/validate$/)
@@ -1802,6 +1963,23 @@ function createFetchMock(options: {
         detail: `${action} completed successfully.`,
         logs: graph.logs,
       })
+    }
+
+    const graphCancelMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/runs\/([^/]+)\/cancel$/)
+    if (graphCancelMatch && method === 'POST') {
+      const [, graphId, runId] = graphCancelMatch
+      const runs = state.graphRuns[graphId] ?? []
+      state.graphRuns[graphId] = runs.map(run => run.run_id === runId ? { ...run, status: 'cancelled', completed_at: '2026-04-08T10:03:00Z' } : run)
+      if (state.graphs[graphId]) state.graphs[graphId].status = 'failed'
+      return jsonResponse({ graph_id: graphId, status: 'cancelled', run: state.graphRuns[graphId][0] })
+    }
+
+    if (graphMatch && method === 'DELETE') {
+      const [, graphId] = graphMatch
+      if (!state.graphs[graphId]) return jsonResponse({ detail: 'Graph not found.' }, 404)
+      delete state.graphs[graphId]
+      delete state.graphRuns[graphId]
+      return jsonResponse({ deleted: true, graph_id: graphId, cleanup: { graph_indexes: 1 } })
     }
 
     const graphSmokeMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/assistant\/smoke-test$/)
@@ -2115,6 +2293,97 @@ describe('App', () => {
     openSection('Operations')
 
     expect(await screen.findByText('Operations unavailable')).toBeInTheDocument()
+  })
+
+  it('organizes access controls into guided tabs and readable effective access', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+    openSection('Access')
+
+    expect(await screen.findByRole('heading', { name: 'Access Control' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('button', { name: 'Access Setup Wizard' })).toBeInTheDocument()
+    expect(screen.getByText('Group-first access keeps policy readable as the runtime grows.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Users' }))
+    expect(await screen.findByRole('button', { name: 'Manage User' })).toBeInTheDocument()
+    expect(screen.getAllByText('alex@example.com').length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Groups' }))
+    expect(await screen.findByRole('button', { name: 'Create Group' })).toBeInTheDocument()
+    expect(screen.getByText('Finance Analysts')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Effective Access' }))
+    fireEvent.change(screen.getByLabelText('User Email'), { target: { value: 'alex@example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview Access' }))
+    expect(await screen.findByText('Allowed Collections')).toBeInTheDocument()
+    expect(screen.getAllByText('Blocked / No Grant').length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Matrix / Audit' }))
+    expect(await screen.findByRole('heading', { name: 'Access Matrix', level: 3 })).toBeInTheDocument()
+  })
+
+  it('creates users, groups, and resource grants through access wizards', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+    openSection('Access')
+    expect(await screen.findByRole('heading', { name: 'Access Control' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Users' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Manage User' }))
+    let dialog = await screen.findByRole('dialog', { name: 'Manage User' })
+    fireEvent.change(within(dialog).getByLabelText('User Email'), { target: { value: 'taylor@example.com' } })
+    fireEvent.change(within(dialog).getByLabelText('Display Name'), { target: { value: 'Taylor Admin' } })
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Admin' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    fireEvent.click(within(dialog).getByLabelText(/Finance Analysts/))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Apply' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Manage User' })).not.toBeInTheDocument())
+    expect(await screen.findByText('Taylor Admin')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Grant Resource Access' }))
+    dialog = await screen.findByRole('dialog', { name: 'Grant Resource Access' })
+    expect(within(dialog).getByText('All Collections')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    expect(within(dialog).getByLabelText(/Finance Analysts/)).toBeChecked()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    expect(within(dialog).getByLabelText(/Use/)).toBeChecked()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Apply' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Grant Resource Access' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getAllByText('All Collections').length).toBeGreaterThan(0))
+    expect(screen.getByText('Finance Analysts')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Groups' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create Group' }))
+    dialog = await screen.findByRole('dialog', { name: 'Create Group' })
+    fireEvent.change(within(dialog).getByLabelText('Group Name'), { target: { value: 'Research Team' } })
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Team / Sharing Group' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    fireEvent.click(within(dialog).getByLabelText(/Taylor Admin/))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Next' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Apply' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create Group' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getAllByText('Research Team').length).toBeGreaterThan(0))
+
+    expect(fetchMock.mock.calls.some(([input, init]) => requestPath(input) === '/v1/admin/access/principals' && requestMethod(input, init) === 'POST')).toBe(true)
+    expect(fetchMock.mock.calls.some(([input, init]) => requestPath(input) === '/v1/admin/access/memberships' && requestMethod(input, init) === 'POST')).toBe(true)
+    expect(fetchMock.mock.calls.some(([input, init]) => requestPath(input) === '/v1/admin/access/permissions' && requestMethod(input, init) === 'POST')).toBe(true)
   })
 
   it('loads the architecture section, updates the inspector, and shows routing and traffic views', async () => {
@@ -2444,7 +2713,7 @@ describe('App', () => {
 
     expect(await screen.findByRole('button', { name: /^smoke-control-panel\b/ })).toBeInTheDocument()
     const inspector = getSection('Collection Inspector')
-    fireEvent.click(within(inspector).getByRole('button', { name: 'Expand' }))
+    fireEvent.click(within(inspector).getByRole('button', { name: /Expand/ }))
     expect(await within(inspector).findAllByText('text-embedding-3-large')).toHaveLength(2)
 
     fireEvent.change(screen.getByLabelText('Collection Upload Files Input'), {
@@ -2707,6 +2976,57 @@ describe('App', () => {
     expect(screen.getByRole('option', { name: 'graph-empty' })).toBeInTheDocument()
   })
 
+  it('explains ingestion wizard source modes and can tune prompts before building', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+
+    openSection('Collections')
+    fireEvent.click(await screen.findByRole('button', { name: 'Ingestion Wizard' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Ingestion Wizard' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Source' }))
+
+    expect(within(dialog).getByText('Upload files or a folder from this browser')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Wizard Server-Readable Local Paths')).not.toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Local Source' }))
+    expect(within(dialog).getByLabelText('Wizard Server-Readable Local Paths')).toBeInTheDocument()
+    expect(within(dialog).getByText('Allowed Roots')).toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Registered Source' }))
+    expect(within(dialog).getByText('Refresh a saved folder or repository source')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Wizard Server-Readable Local Paths')).not.toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Sync Existing' }))
+    expect(within(dialog).getByText('Sync runtime-configured KB sources')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Wizard Server-Readable Local Paths')).not.toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Graph' }))
+    fireEvent.click(within(dialog).getByLabelText('Start the graph build after creating the draft'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Tuning' }))
+    fireEvent.click(within(dialog).getByLabelText('Run prompt tuning before the graph build'))
+    fireEvent.change(within(dialog).getByLabelText('Wizard Prompt Tuning Guidance'), {
+      target: { value: 'Prioritize supplier ownership and approval chains.' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Run Research & Tune' }))
+
+    await waitFor(() => expect(within(dialog).getByText('Prompt tuning result')).toBeInTheDocument())
+    fireEvent.click(within(dialog).getByLabelText('Apply selected prompt drafts before build'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Review' }))
+    expect(within(dialog).getByText('Run and apply selected drafts')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finish' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Ingestion Wizard' })).not.toBeInTheDocument())
+    const applyIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input).includes('/research-tune/default-general-graph-tune-1/apply'))
+    const buildIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input) === '/v1/admin/graphs/default-general-graph/build')
+    expect(applyIndex).toBeGreaterThanOrEqual(0)
+    expect(buildIndex).toBeGreaterThan(applyIndex)
+  })
+
   it('renders collection inspector metadata including storage tables, dims, and mismatch warnings', async () => {
     const { fetchMock } = createFetchMock()
     vi.stubGlobal('fetch', fetchMock)
@@ -2720,7 +3040,7 @@ describe('App', () => {
     fireEvent.change(await screen.findByLabelText('Available Collections'), { target: { value: 'default' } })
 
     const inspector = getSection('Collection Inspector')
-    fireEvent.click(within(inspector).getByRole('button', { name: 'Expand' }))
+    fireEvent.click(within(inspector).getByRole('button', { name: /Expand/ }))
     expect(await within(inspector).findAllByText('text-embedding-3-large')).toHaveLength(2)
     expect(within(inspector).getByText('documents, chunks')).toBeInTheDocument()
     expect(within(inspector).getByText('chunks: 1536')).toBeInTheDocument()
@@ -2862,7 +3182,7 @@ describe('App', () => {
 
     openSection('Agents')
     await screen.findByRole('heading', { name: 'Agent Inspector', level: 3 })
-    fireEvent.click(within(getSection('Agent Inspector')).getByRole('button', { name: 'Collapse' }))
+    fireEvent.click(within(getSection('Agent Inspector')).getByRole('button', { name: /Collapse/ }))
 
     openSection('Prompts')
     await screen.findByRole('heading', { name: 'Prompt Editor', level: 3 })
@@ -2880,6 +3200,6 @@ describe('App', () => {
 
     openSection('Agents')
     await screen.findByRole('heading', { name: 'Agent Inspector', level: 3 })
-    expect(within(getSection('Agent Inspector')).getByRole('button', { name: 'Expand' })).toBeInTheDocument()
+    expect(within(getSection('Agent Inspector')).getByRole('button', { name: /Expand/ })).toBeInTheDocument()
   })
 })

@@ -45,20 +45,20 @@ class _GraphBoundSkillStore(_SkillStore):
         del kwargs
         records = [
             SkillPackRecord(
-                skill_id="defense-graph-guidance",
-                name="Defense Graph Guidance",
+                skill_id="relationship-graph-guidance",
+                name="Relationship Graph Guidance",
                 agent_scope="rag",
                 checksum="abc123",
                 tenant_id=tenant_id,
-                graph_id="defense_rag_test_corpus",
+                graph_id="project_relationship_graph",
                 retrieval_profile="targeted",
-                controller_hints={"prefer_graph": True, "planned_graph_ids": ["defense_rag_test_corpus"]},
+                controller_hints={"prefer_graph": True, "planned_graph_ids": ["project_relationship_graph"]},
                 coverage_goal="targeted",
                 result_mode="answer",
-                body_markdown="# Defense Graph Guidance\nUse the defense graph first.\n",
+                body_markdown="# Relationship Graph Guidance\nUse the graph when relationship structure matters.\n",
                 visibility="tenant",
                 status="active",
-                version_parent="defense-graph-guidance",
+                version_parent="relationship-graph-guidance",
             )
         ]
         if graph_id:
@@ -69,15 +69,15 @@ class _GraphBoundSkillStore(_SkillStore):
 class _GraphIndexStore:
     def get_index(self, graph_id: str, tenant_id: str, user_id: str = ""):
         del tenant_id, user_id
-        if graph_id != "defense_rag_test_corpus":
+        if graph_id != "project_relationship_graph":
             return None
         return GraphIndexRecord(
-            graph_id="defense_rag_test_corpus",
+            graph_id="project_relationship_graph",
             tenant_id="tenant",
-            display_name="Defense RAG Test Corpus",
+            display_name="Project Relationship Graph",
             owner_admin_user_id="owner",
             visibility="tenant",
-            graph_skill_ids=["defense-graph-guidance"],
+            graph_skill_ids=["relationship-graph-guidance"],
         )
 
 
@@ -188,13 +188,13 @@ def test_resolve_rag_execution_hints_uses_active_graph_bound_skill_metadata():
         session=SimpleNamespace(
             tenant_id="tenant",
             user_id="user",
-            metadata={"active_graph_ids": ["defense_rag_test_corpus"]},
+            metadata={"active_graph_ids": ["project_relationship_graph"]},
         ),
-        query="What relationship connects Iron Vale to endurance testing evidence?",
+        query="What relationship connects supplier risk to schedule evidence?",
         skill_queries=["graph follow-up"],
     )
 
-    assert "defense-graph-guidance" in hints.matched_skill_ids
+    assert "relationship-graph-guidance" in hints.matched_skill_ids
     assert hints.controller_hints["prefer_graph"] is True
 
 

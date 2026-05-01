@@ -302,14 +302,13 @@ def test_list_indexed_docs_kb_collections_view_returns_all_visible_collections()
     assert result["collections"][0]["summary_topics"] == ["product overviews", "pricing", "architecture"]
     assert (
         result["collections"][0]["summary"]
-        == "The primary corporate knowledge base - 2 indexed documents covering product overviews, pricing, and architecture."
+        == "The default knowledge-base collection - 2 indexed documents covering product overviews, pricing, and architecture."
     )
     assert result["collections"][1]["kb_doc_count"] == 1
     assert result["collections"][1]["graph_count"] == 1
     assert result["collections"][1]["summary_mode"] == "indexed"
     assert result["collections"][1]["summary"] == (
-        "A specialized collection for request-for-proposal (RFP) material - "
-        "1 indexed document covering product overviews."
+        "A knowledge-base collection - 1 indexed document covering product overviews."
     )
     assert result["graphs"] == [
         {
@@ -510,7 +509,7 @@ def test_list_indexed_docs_kb_collections_view_reports_visible_zero_doc_collecti
     assert defense["kb_doc_count"] == 0
     assert defense["summary_mode"] == "empty"
     assert defense["summary"] == (
-        "A secondary test collection. It is listed as available but currently has no indexed documents shown in the inventory."
+        "A test knowledge-base collection. It is listed as available but currently has no indexed documents shown in the inventory."
     )
 
 
@@ -566,7 +565,7 @@ def test_list_indexed_docs_kb_collections_view_reports_nonenumerable_collection_
             "summary_topics": [],
             "summary_mode": "not_enumerated",
             "summary": (
-                "A specialized collection for request-for-proposal (RFP) material. "
+                "A knowledge-base collection. "
                 "It is listed as available, but the inventory payload does not enumerate its individual files."
             ),
         }

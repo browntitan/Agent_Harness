@@ -523,6 +523,29 @@ export interface GraphLogRecord {
   preview: string
 }
 
+export interface GraphProgressStage {
+  id: string
+  label: string
+  state: string
+  workflow?: string
+}
+
+export interface GraphProgressPayload {
+  graph_id: string
+  status: string
+  active: boolean
+  active_run?: GraphIndexRunRecord | null
+  latest_run?: GraphIndexRunRecord | null
+  workflow?: string
+  task_progress?: Record<string, unknown>
+  stages: GraphProgressStage[]
+  percent: number
+  updated_at?: string
+  logs?: GraphLogRecord[]
+  log_tail?: string
+  cursor?: string
+}
+
 export interface GraphDetailPayload {
   graph: GraphIndexRecord
   sources: GraphIndexSourceRecord[]

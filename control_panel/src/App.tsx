@@ -64,6 +64,7 @@ import type {
   GraphAssistantPayload,
   GraphDetailPayload,
   GraphIndexRecord,
+  GraphProgressPayload,
   GraphIndexRunRecord,
   GraphResearchTunePayload,
   LangGraphExport,
@@ -126,10 +127,61 @@ type GraphsTab = 'workspace' | 'runs'
 type GraphSourceMode = 'collection' | 'manual'
 type KnowledgeSourceKind = 'local_folder' | 'local_repo'
 type SkillsTab = 'editor' | 'preview'
-type AccessResourceType = 'collection' | 'graph' | 'tool' | 'skill_family'
+type AccessResourceType = 'agent' | 'agent_group' | 'collection' | 'graph' | 'skill' | 'skill_family' | 'tool' | 'tool_group' | 'worker_request'
+type AccessAction = 'use' | 'manage' | 'approve' | 'delete'
+type AccessTab = 'overview' | 'users' | 'groups' | 'roles' | 'grants' | 'effective' | 'advanced'
+type AccessWizardMode = 'setup' | 'grant' | 'user' | 'group' | null
+type AccessGroupPurpose = 'permission' | 'team' | 'admin'
+type AccessPresetId = 'kb_reader' | 'graph_builder' | 'agent_operator' | 'approval_manager' | 'custom'
+type IngestionWizardStep = 'collection' | 'source' | 'graph' | 'tuning' | 'review'
 type OperationsTab = 'reloads' | 'jobs' | 'audit'
 
 const COLLECTION_ACTION_MODES: CollectionActionMode[] = ['upload', 'local', 'registered', 'sync']
+const INGESTION_WIZARD_STEPS: IngestionWizardStep[] = ['collection', 'source', 'graph', 'tuning', 'review']
+const ACCESS_TABS: Array<{ id: AccessTab; label: string }> = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'users', label: 'Users' },
+  { id: 'groups', label: 'Groups' },
+  { id: 'roles', label: 'Roles / Presets' },
+  { id: 'grants', label: 'Resource Grants' },
+  { id: 'effective', label: 'Effective Access' },
+  { id: 'advanced', label: 'Matrix / Audit' },
+]
+const ACCESS_RESOURCE_TYPES: Array<{ key: AccessResourceType; label: string }> = [
+  { key: 'agent', label: 'Agent' },
+  { key: 'agent_group', label: 'Agent Group' },
+  { key: 'collection', label: 'Collection' },
+  { key: 'graph', label: 'Graph' },
+  { key: 'skill', label: 'Skill' },
+  { key: 'skill_family', label: 'Skill Family' },
+  { key: 'tool', label: 'Tool' },
+  { key: 'tool_group', label: 'Tool Group' },
+  { key: 'worker_request', label: 'Worker Request' },
+]
+const ACCESS_ACTIONS: Array<{ key: AccessAction; label: string }> = [
+  { key: 'use', label: 'Use' },
+  { key: 'manage', label: 'Manage' },
+  { key: 'approve', label: 'Approve' },
+  { key: 'delete', label: 'Delete' },
+]
+const ACCESS_GROUP_PURPOSES: Array<{ key: AccessGroupPurpose; label: string; description: string }> = [
+  { key: 'permission', label: 'Permission Group', description: 'Best for capability and resource access.' },
+  { key: 'team', label: 'Team / Sharing Group', description: 'Best for organizing people and shared work.' },
+  { key: 'admin', label: 'Admin Group', description: 'Best for operators who manage policy.' },
+]
+const ACCESS_PRESETS: Array<{
+  id: AccessPresetId
+  label: string
+  description: string
+  resourceType: AccessResourceType
+  actions: AccessAction[]
+}> = [
+  { id: 'kb_reader', label: 'KB Reader', description: 'Use selected knowledge base collections.', resourceType: 'collection', actions: ['use'] },
+  { id: 'graph_builder', label: 'Graph Builder', description: 'Use and manage selected GraphRAG graphs.', resourceType: 'graph', actions: ['use', 'manage'] },
+  { id: 'agent_operator', label: 'Agent Operator', description: 'Use selected agents or agent groups.', resourceType: 'agent', actions: ['use'] },
+  { id: 'approval_manager', label: 'Approval Manager', description: 'Approve worker-request queues.', resourceType: 'worker_request', actions: ['approve'] },
+  { id: 'custom', label: 'Custom', description: 'Choose resource type, actions, and selectors manually.', resourceType: 'collection', actions: ['use'] },
+]
 const SUPPORTED_DOCUMENT_TYPES = ['.txt', '.md', '.csv', '.pdf', '.docx', '.xls', '.xlsx', 'OCR images'] as const
 const GRAPH_RESEARCH_TUNE_TARGETS = [
   'extract_graph.txt',
@@ -283,18 +335,81 @@ function uniqueList(items: string[]): string[] {
   return Array.from(new Set(items.filter(Boolean)))
 }
 
+function normalizeToolTag(value: unknown): string {
+  return asString(value).trim().replace(/\s+/g, ' ')
+}
+
+function collectToolTags(tool: Record<string, unknown>): string[] {
+  const metadata = asRecord(tool.metadata) ?? {}
+  const group = normalizeToolTag(tool.group || 'general')
+  const tags = [
+    group,
+    ...asArray(tool.tags),
+    ...asArray(tool.tool_tags),
+    ...asArray(tool.keywords),
+    ...asArray(metadata.tags),
+    ...asArray(metadata.tool_tags),
+    ...asArray(metadata.keywords),
+    Boolean(tool.read_only) ? 'read only' : Boolean(tool.destructive) ? 'destructive' : 'mutable',
+    Boolean(tool.background_safe) ? 'background safe' : 'foreground only',
+    Boolean(tool.requires_workspace) ? 'needs workspace' : 'no workspace',
+    Boolean(tool.should_defer || tool.deferred) ? 'deferred' : '',
+  ]
+  return uniqueList(tags.map(normalizeToolTag)).sort((left, right) => left.localeCompare(right))
+}
+
+function primaryToolTag(tool: Record<string, unknown>): string {
+  return normalizeToolTag(tool.group || 'general') || 'general'
+}
+
+const TOOL_TAG_ACRONYMS = new Set(['api', 'csv', 'docx', 'json', 'kb', 'llm', 'mcp', 'nlp', 'ocr', 'pdf', 'rag', 'sql', 'xls', 'xlsx'])
+
+function toolTagLabel(tag: string): string {
+  const normalized = tag.replace(/[_-]/g, ' ')
+  return normalized
+    .split(' ')
+    .filter(Boolean)
+    .map(word => TOOL_TAG_ACRONYMS.has(word.toLowerCase()) ? word.toUpperCase() : humanizeKey(word))
+    .join(' ')
+}
+
 function multilineList(value: string): string[] {
   return uniqueList(value.split('\n').map(item => item.trim()))
 }
 
 function accessResourceLabel(resourceType: string): string {
   const labels: Record<string, string> = {
+    agent: 'Agent',
+    agent_group: 'Agent Group',
     collection: 'Collection',
     graph: 'Graph',
     tool: 'Tool',
+    tool_group: 'Tool Group',
+    skill: 'Skill',
     skill_family: 'Skill Family',
+    worker_request: 'Worker Request',
   }
   return labels[resourceType] ?? humanizeKey(resourceType)
+}
+
+function principalLabel(principal: AccessPrincipal | null | undefined): string {
+  if (!principal) return 'Unknown principal'
+  return principal.display_name || principal.email_normalized || principal.principal_id
+}
+
+function principalSystemRole(principal: AccessPrincipal | null | undefined): string {
+  return asString(principal?.metadata_json?.system_role, principal?.principal_type === 'group' ? 'group' : 'user')
+}
+
+function groupPurpose(principal: AccessPrincipal | null | undefined): AccessGroupPurpose {
+  const raw = asString(principal?.metadata_json?.purpose, 'permission').toLowerCase()
+  if (raw === 'admin') return 'admin'
+  if (raw === 'team') return 'team'
+  return 'permission'
+}
+
+function groupPurposeLabel(value: string): string {
+  return ACCESS_GROUP_PURPOSES.find(purpose => purpose.key === value)?.label ?? humanizeKey(value)
 }
 
 function computeResourceGrantSummary(options: {
@@ -505,16 +620,19 @@ function useSessionStringState<T extends string>(key: string, initialValue: T): 
   return [value, setValue]
 }
 
-function useSessionBooleanState(key: string, initialValue: boolean): [boolean, (nextValue: boolean) => void] {
+function useSessionBooleanState(key: string, initialValue: boolean): [boolean, (nextValue: boolean | ((current: boolean) => boolean)) => void] {
   const [value, setValueState] = useState<boolean>(() => {
     const stored = sessionStorage.getItem(key)
     if (stored === 'true') return true
     if (stored === 'false') return false
     return initialValue
   })
-  const setValue = (nextValue: boolean) => {
-    sessionStorage.setItem(key, String(nextValue))
-    setValueState(nextValue)
+  const setValue = (nextValue: boolean | ((current: boolean) => boolean)) => {
+    setValueState(current => {
+      const resolved = typeof nextValue === 'function' ? nextValue(current) : nextValue
+      sessionStorage.setItem(key, String(resolved))
+      return resolved
+    })
   }
   return [value, setValue]
 }
@@ -609,6 +727,7 @@ export default function App() {
   const [agentsPayload, setAgentsPayload] = useState<{ agents: Array<Record<string, unknown>>; tools: Array<Record<string, unknown>> } | null>(null)
   const [selectedAgent, setSelectedAgent] = useState('')
   const [agentSearch, setAgentSearch] = useSessionStringState<string>('control-panel-ui-agent-search', '')
+  const [toolTagFilter, setToolTagFilter] = useSessionStringState<string>('control-panel-ui-tool-tag-filter', '')
   const [agentDetail, setAgentDetail] = useState<Record<string, unknown> | null>(null)
   const [agentForm, setAgentForm] = useState<Record<string, unknown>>({})
   const [prompts, setPrompts] = useState<Array<Record<string, unknown>>>([])
@@ -650,6 +769,9 @@ export default function App() {
   const [graphDetail, setGraphDetail] = useState<GraphDetailPayload | null>(null)
   const [graphValidation, setGraphValidation] = useState<Record<string, unknown> | null>(null)
   const [graphRuns, setGraphRuns] = useState<GraphIndexRunRecord[]>([])
+  const [graphProgress, setGraphProgress] = useState<GraphProgressPayload | null>(null)
+  const [deleteGraphArtifacts, setDeleteGraphArtifacts] = useState(false)
+  const [graphLifecycleBusy, setGraphLifecycleBusy] = useState(false)
   const [graphCollectionId, setGraphCollectionId] = useState('')
   const [graphCollectionDocs, setGraphCollectionDocs] = useState<Array<Record<string, unknown>>>([])
   const [graphSelectedDocIds, setGraphSelectedDocIds] = useState<string[]>([])
@@ -669,6 +791,14 @@ export default function App() {
   const [graphTuneResult, setGraphTuneResult] = useState<GraphResearchTunePayload | null>(null)
   const [graphTuneSelectedPrompts, setGraphTuneSelectedPrompts] = useState<string[]>([])
   const [graphTuneRunning, setGraphTuneRunning] = useState(false)
+  const [ingestionWizardOpen, setIngestionWizardOpen] = useState(false)
+  const [ingestionWizardStep, setIngestionWizardStep] = useState<IngestionWizardStep>('collection')
+  const [wizardCollectionId, setWizardCollectionId] = useState('')
+  const [wizardCreateGraph, setWizardCreateGraph] = useState(true)
+  const [wizardStartBuild, setWizardStartBuild] = useState(false)
+  const [wizardRunTune, setWizardRunTune] = useState(false)
+  const [wizardApplyTune, setWizardApplyTune] = useState(false)
+  const [wizardRequireTuneBeforeBuild, setWizardRequireTuneBeforeBuild] = useState(false)
   const [skills, setSkills] = useState<Array<Record<string, unknown>>>([])
   const [selectedSkill, setSelectedSkill] = useState('')
   const [skillSearch, setSkillSearch] = useSessionStringState<string>('control-panel-ui-skill-search', '')
@@ -685,6 +815,7 @@ export default function App() {
   const [accessPermissions, setAccessPermissions] = useState<AccessRolePermission[]>([])
   const [accessPreviewEmail, setAccessPreviewEmail] = useState('')
   const [effectiveAccess, setEffectiveAccess] = useState<EffectiveAccessPayload | null>(null)
+  const [accessWizardPreview, setAccessWizardPreview] = useState<EffectiveAccessPayload | null>(null)
   const [mcpConnections, setMcpConnections] = useState<McpConnectionRecord[]>([])
   const [selectedMcpConnection, setSelectedMcpConnection] = useState('')
   const [mcpSearch, setMcpSearch] = useSessionStringState<string>('control-panel-ui-mcp-search', '')
@@ -702,10 +833,37 @@ export default function App() {
   const [bindingPrincipalId, setBindingPrincipalId] = useState('')
   const [permissionRoleId, setPermissionRoleId] = useState('')
   const [permissionResourceType, setPermissionResourceType] = useState<AccessResourceType>('collection')
-  const [permissionAction, setPermissionAction] = useState<'use' | 'manage'>('use')
+  const [permissionAction, setPermissionAction] = useState<'use' | 'manage' | 'approve' | 'delete'>('use')
   const [permissionSelector, setPermissionSelector] = useState('')
   const [membershipParentId, setMembershipParentId] = useState('')
   const [membershipChildId, setMembershipChildId] = useState('')
+  const [accessTab, setAccessTab] = useSessionStringState<AccessTab>('control-panel-ui-access-tab', 'overview')
+  const [accessUserSearch, setAccessUserSearch] = useSessionStringState<string>('control-panel-ui-access-user-search', '')
+  const [accessGroupSearch, setAccessGroupSearch] = useSessionStringState<string>('control-panel-ui-access-group-search', '')
+  const [accessGrantSearch, setAccessGrantSearch] = useSessionStringState<string>('control-panel-ui-access-grant-search', '')
+  const [accessWizard, setAccessWizard] = useState<AccessWizardMode>(null)
+  const [accessWizardStep, setAccessWizardStep] = useState('')
+  const [setupGroupMode, setSetupGroupMode] = useState<'existing' | 'create'>('existing')
+  const [setupGroupId, setSetupGroupId] = useState('')
+  const [setupGroupName, setSetupGroupName] = useState('')
+  const [setupGroupPurpose, setSetupGroupPurpose] = useState<AccessGroupPurpose>('permission')
+  const [setupPresetId, setSetupPresetId] = useState<AccessPresetId>('kb_reader')
+  const [setupMemberIds, setSetupMemberIds] = useState<string[]>([])
+  const [setupResourceType, setSetupResourceType] = useState<AccessResourceType>('collection')
+  const [setupResourceSelectors, setSetupResourceSelectors] = useState<string[]>([])
+  const [setupActions, setSetupActions] = useState<AccessAction[]>(['use'])
+  const [grantResourceType, setGrantResourceType] = useState<AccessResourceType>('collection')
+  const [grantResourceSelectors, setGrantResourceSelectors] = useState<string[]>([])
+  const [grantPrincipalIds, setGrantPrincipalIds] = useState<string[]>([])
+  const [grantActions, setGrantActions] = useState<AccessAction[]>(['use'])
+  const [manageUserEmail, setManageUserEmail] = useState('')
+  const [manageUserDisplayName, setManageUserDisplayName] = useState('')
+  const [manageUserSystemRole, setManageUserSystemRole] = useState<'admin' | 'user' | 'pending'>('user')
+  const [manageUserGroupIds, setManageUserGroupIds] = useState<string[]>([])
+  const [createGroupName, setCreateGroupName] = useState('')
+  const [createGroupPurpose, setCreateGroupPurpose] = useState<AccessGroupPurpose>('permission')
+  const [createGroupRoleId, setCreateGroupRoleId] = useState('')
+  const [createGroupMemberIds, setCreateGroupMemberIds] = useState<string[]>([])
   const [agentsTab, setAgentsTab] = useSessionStringState<AgentsTab>('control-panel-ui-agents-tab', 'workspace')
   const [promptsTab, setPromptsTab] = useSessionStringState<PromptsTab>('control-panel-ui-prompts-tab', 'edit')
   const [collectionsTab, setCollectionsTab] = useSessionStringState<CollectionsTab>('control-panel-ui-collections-tab', 'workspace')
@@ -728,6 +886,8 @@ export default function App() {
   const [skillSummaryOpen, setSkillSummaryOpen] = useSessionBooleanState('control-panel-ui-skill-summary-open', !isCompactViewport())
   const collectionFilesInputRef = useRef<HTMLInputElement | null>(null)
   const collectionFolderInputRef = useRef<HTMLInputElement | null>(null)
+  const wizardFilesInputRef = useRef<HTMLInputElement | null>(null)
+  const wizardFolderInputRef = useRef<HTMLInputElement | null>(null)
   const uploadFilesInputRef = useRef<HTMLInputElement | null>(null)
   const uploadFolderInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -944,6 +1104,18 @@ export default function App() {
   const uploadActivityExceptions = uploadActivityFiles.filter(item => asString(item.outcome) !== 'ingested')
   const uploadActivityStatus = asString(uploadActivityRecord?.status)
   const graphBuildDocCount = graphSourceMode === 'collection' ? graphCollectionDocs.length : graphSelectedDocIds.length
+  const selectedGraphRecord = graphs.find(graph => graph.graph_id === selectedGraph) ?? null
+  const activeGraphRun = graphProgress?.active_run
+    ?? graphRuns.find(run => ['queued', 'running'].includes(asString(run.status).toLowerCase()))
+    ?? null
+  const graphBuildRunning = Boolean(
+    selectedGraph
+    && (
+      graphProgress?.active
+      || activeGraphRun
+      || ['queued', 'running'].includes(asString(graphDetail?.graph.status || selectedGraphRecord?.status).toLowerCase())
+    ),
+  )
   const graphAssistantFriendly = asRecord(graphAssistantPreflight?.friendly)
   const graphSmokeFriendly = asRecord(graphSmokeResult?.friendly)
   const graphQualityWarnings = useMemo(() => graphQualityIssues(graphDetail), [graphDetail])
@@ -987,6 +1159,199 @@ export default function App() {
     })
   }, [skillDetail, accessPermissions, accessBindings, accessRoles, accessPrincipals])
   const toolCatalog = asArray<Record<string, unknown>>(agentsPayload?.tools)
+  const toolCatalogItems = useMemo(() => {
+    return toolCatalog.map(tool => ({
+      tool,
+      primaryTag: primaryToolTag(tool),
+      tags: collectToolTags(tool),
+    }))
+  }, [toolCatalog])
+  const toolTagOptions = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const item of toolCatalogItems) {
+      for (const tag of item.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
+    return Array.from(counts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((left, right) => {
+        if (right.count !== left.count) return right.count - left.count
+        return toolTagLabel(left.tag).localeCompare(toolTagLabel(right.tag))
+      })
+  }, [toolCatalogItems])
+  const activeToolTag = toolTagOptions.some(option => option.tag === toolTagFilter) ? toolTagFilter : ''
+  const filteredToolCatalogItems = useMemo(() => {
+    if (!activeToolTag) return toolCatalogItems
+    return toolCatalogItems.filter(item => item.tags.includes(activeToolTag))
+  }, [activeToolTag, toolCatalogItems])
+  const groupedToolCatalog = useMemo(() => {
+    const groups = new Map<string, typeof toolCatalogItems>()
+    for (const item of filteredToolCatalogItems) {
+      const groupTag = activeToolTag || item.primaryTag
+      const current = groups.get(groupTag) ?? []
+      current.push(item)
+      groups.set(groupTag, current)
+    }
+    return Array.from(groups.entries())
+      .map(([tag, items]) => ({ tag, items }))
+      .sort((left, right) => toolTagLabel(left.tag).localeCompare(toolTagLabel(right.tag)))
+  }, [activeToolTag, filteredToolCatalogItems])
+  const accessUsers = useMemo(() => {
+    return accessPrincipals
+      .filter(principal => principal.principal_type === 'user')
+      .filter(principal => matchesTextQuery(accessUserSearch, principal.display_name, principal.email_normalized, principal.provider, principalSystemRole(principal)))
+  }, [accessPrincipals, accessUserSearch])
+  const accessGroups = useMemo(() => {
+    return accessPrincipals
+      .filter(principal => principal.principal_type === 'group')
+      .filter(principal => matchesTextQuery(accessGroupSearch, principal.display_name, principal.principal_id, groupPurposeLabel(groupPurpose(principal))))
+  }, [accessPrincipals, accessGroupSearch])
+  const accessPrincipalById = useMemo(() => new Map(accessPrincipals.map(principal => [principal.principal_id, principal])), [accessPrincipals])
+  const accessRoleById = useMemo(() => new Map(accessRoles.map(role => [role.role_id, role])), [accessRoles])
+  const accessMembershipsByGroup = useMemo(() => {
+    const map = new Map<string, AccessMembership[]>()
+    for (const membership of accessMemberships) {
+      const list = map.get(membership.parent_principal_id) ?? []
+      list.push(membership)
+      map.set(membership.parent_principal_id, list)
+    }
+    return map
+  }, [accessMemberships])
+  const accessBindingsByRole = useMemo(() => {
+    const map = new Map<string, AccessRoleBinding[]>()
+    for (const binding of accessBindings.filter(binding => !binding.disabled)) {
+      const list = map.get(binding.role_id) ?? []
+      list.push(binding)
+      map.set(binding.role_id, list)
+    }
+    return map
+  }, [accessBindings])
+  const accessResourceOptions = useMemo(() => {
+    const options: Record<AccessResourceType, Array<{ id: string; label: string; description: string }>> = {
+      agent: (agentsPayload?.agents ?? []).map(agent => ({
+        id: asString(agent.name),
+        label: asString(agent.name, 'agent'),
+        description: asString(agent.description, 'Agent runtime profile'),
+      })).filter(option => option.id),
+      agent_group: [
+        { id: 'coordinator', label: 'Coordinator / Planner Workflow', description: 'Planner and coordinator dispatch path' },
+        { id: 'rag', label: 'RAG Agents', description: 'Retrieval-oriented agents' },
+        { id: 'data', label: 'Data Agents', description: 'Data and analysis workers' },
+      ],
+      collection: collections.map(collection => ({
+        id: collection.collection_id,
+        label: collection.collection_id,
+        description: `${formatWholeNumber(collection.document_count)} documents`,
+      })),
+      graph: graphs.map(graph => ({
+        id: graph.graph_id,
+        label: graph.display_name || graph.graph_id,
+        description: graph.collection_id,
+      })),
+      skill: skills.map(skill => ({
+        id: asString(skill.skill_id),
+        label: asString(skill.name, asString(skill.skill_id)),
+        description: asString(skill.agent_scope, 'general'),
+      })).filter(option => option.id),
+      skill_family: uniqueList(skills.map(skill => asString(skill.version_parent || skill.skill_id)).filter(Boolean))
+        .map(familyId => {
+          const skill = skills.find(candidate => asString(candidate.version_parent || candidate.skill_id) === familyId)
+          return {
+            id: familyId,
+            label: asString(skill?.name, familyId),
+            description: 'Skill family',
+          }
+        }),
+      tool: toolCatalog.map(tool => ({
+        id: asString(tool.name),
+        label: asString(tool.name, 'tool'),
+        description: asString(tool.agent, asString(tool.description, 'Tool')),
+      })).filter(option => option.id),
+      tool_group: ['rag', 'orchestration', 'mcp', 'code', 'memory'].map(group => ({
+        id: group,
+        label: humanizeKey(group),
+        description: 'Tool group',
+      })),
+      worker_request: [
+        { id: '*', label: 'All Worker Requests', description: 'Every worker request queue' },
+        { id: 'approval', label: 'Approval Queue', description: 'Human approval workflow' },
+      ],
+    }
+    for (const key of Object.keys(options) as AccessResourceType[]) {
+      options[key] = [{ id: '*', label: `All ${accessResourceLabel(key)}s`, description: 'Wildcard selector' }, ...options[key]]
+    }
+    return options
+  }, [agentsPayload, collections, graphs, skills, toolCatalog])
+  const accessResourceLabelByTypeAndId = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const resourceType of Object.keys(accessResourceOptions) as AccessResourceType[]) {
+      for (const option of accessResourceOptions[resourceType]) {
+        map.set(`${resourceType}:${option.id}`, option.label)
+      }
+    }
+    return map
+  }, [accessResourceOptions])
+  const accessGrantRows = useMemo(() => {
+    const rows = accessPermissions.map(permission => {
+      const bindings = accessBindingsByRole.get(permission.role_id) ?? []
+      const principals = uniqueList(bindings.map(binding => principalLabel(accessPrincipalById.get(binding.principal_id))))
+      const roleName = accessRoleById.get(permission.role_id)?.name || permission.role_id
+      const selector = permission.resource_selector || '*'
+      const selectorLabel = accessResourceLabelByTypeAndId.get(`${permission.resource_type}:${selector}`) || selector
+      return {
+        key: permission.permission_id,
+        roleName,
+        resourceType: permission.resource_type,
+        resourceLabel: accessResourceLabel(permission.resource_type),
+        selector,
+        selectorLabel,
+        action: permission.action,
+        principalNames: principals,
+      }
+    })
+    return rows.filter(row => matchesTextQuery(
+      accessGrantSearch,
+      row.roleName,
+      row.resourceLabel,
+      row.selector,
+      row.selectorLabel,
+      row.action,
+      row.principalNames.join(' '),
+    ))
+  }, [accessPermissions, accessBindingsByRole, accessPrincipalById, accessRoleById, accessResourceLabelByTypeAndId, accessGrantSearch])
+  const effectiveAccessRows = useMemo(() => {
+    const resources = asRecord(asRecord(effectiveAccess?.access)?.resources) ?? {}
+    return ACCESS_RESOURCE_TYPES.map(resourceType => {
+      const payload = asRecord(resources[resourceType.key]) ?? {}
+      const useIds = asArray<string>(payload.use)
+      const manageIds = asArray<string>(payload.manage)
+      const approveIds = asArray<string>(payload.approve)
+      const deleteIds = asArray<string>(payload.delete)
+      const allFlags = [
+        Boolean(payload.use_all) ? 'use *' : '',
+        Boolean(payload.manage_all) ? 'manage *' : '',
+        Boolean(payload.approve_all) ? 'approve *' : '',
+        Boolean(payload.delete_all) ? 'delete *' : '',
+      ].filter(Boolean)
+      const labels = uniqueList([...useIds, ...manageIds, ...approveIds, ...deleteIds].map(id => (
+        accessResourceLabelByTypeAndId.get(`${resourceType.key}:${id}`) || id
+      )))
+      const why = accessPermissions
+        .filter(permission => permission.resource_type === resourceType.key)
+        .filter(permission => {
+          if (allFlags.length > 0) return true
+          return labels.length === 0
+            ? false
+            : permission.resource_selector === '*' || labels.includes(accessResourceLabelByTypeAndId.get(`${resourceType.key}:${permission.resource_selector}`) || permission.resource_selector)
+        })
+        .map(permission => `${permission.action} ${permission.resource_selector || '*'} via ${accessRoleById.get(permission.role_id)?.name || permission.role_id}`)
+      return {
+        key: resourceType.key,
+        label: `Allowed ${resourceType.label}s`,
+        allowed: [...allFlags, ...labels],
+        why: uniqueList(why),
+      }
+    })
+  }, [effectiveAccess, accessPermissions, accessRoleById, accessResourceLabelByTypeAndId])
   const selectedMcpRecord = mcpConnections.find(connection => connection.connection_id === selectedMcpConnection) ?? null
   const architectureSupported = compatibility?.sections?.architecture?.supported ?? true
   const architectureMapLayout = useMemo(() => {
@@ -1134,6 +1499,25 @@ export default function App() {
       setGraphRuns([])
     }
     return nextGraphId
+  }
+
+  async function refreshSelectedGraph(graphId: string): Promise<GraphDetailPayload | null> {
+    if (!graphId) {
+      setGraphDetail(null)
+      setGraphRuns([])
+      setGraphProgress(null)
+      return null
+    }
+    const [detail, runsPayload, progressPayload] = await Promise.all([
+      api.getGraph(token, graphId),
+      api.getGraphRuns(token, graphId),
+      api.getGraphProgress(token, graphId),
+    ])
+    setGraphDetail(detail)
+    hydrateGraphForm(detail)
+    setGraphRuns(runsPayload.runs)
+    setGraphProgress(progressPayload)
+    return detail
   }
 
   async function refreshGraphCollectionDocs(collectionId: string): Promise<Array<Record<string, unknown>>> {
@@ -1491,11 +1875,9 @@ export default function App() {
 
   useEffect(() => {
     if (!token || active !== 'graphs' || !selectedGraph) return
-    void Promise.all([api.getGraph(token, selectedGraph), api.getGraphRuns(token, selectedGraph)])
-      .then(([detail, runsPayload]) => {
-        setGraphDetail(detail)
-        hydrateGraphForm(detail)
-        setGraphRuns(runsPayload.runs)
+    void refreshSelectedGraph(selectedGraph)
+      .then(detail => {
+        if (!detail) return undefined
         const boundSkills = asArray<Record<string, unknown>>(detail.skills)
         const overlaySkill = boundSkills.find(skill => asString(skill.graph_id) === selectedGraph)
         if (overlaySkill) {
@@ -1508,6 +1890,32 @@ export default function App() {
       })
       .catch(err => setError(getMessage(err)))
   }, [active, selectedGraph, token])
+
+  useEffect(() => {
+    if (!token || active !== 'graphs' || !selectedGraph || !graphBuildRunning) return
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const progressPayload = await api.getGraphProgress(token, selectedGraph)
+        if (cancelled) return
+        setGraphProgress(progressPayload)
+        if (!progressPayload.active) {
+          await refreshSelectedGraph(selectedGraph)
+          await refreshGraphs(selectedGraph)
+        }
+      } catch (err) {
+        if (!cancelled) setError(getMessage(err))
+      }
+    }
+    void poll()
+    const intervalId = window.setInterval(() => {
+      void poll()
+    }, 60000)
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [active, selectedGraph, token, graphBuildRunning])
 
   useEffect(() => {
     if (!token || active !== 'graphs' || !graphCollectionId) {
@@ -2122,6 +2530,180 @@ export default function App() {
     }
   }
 
+  function openIngestionWizard(collectionId = '') {
+    const normalized = normalizeCollectionId(collectionId || selectedCollection || collectionDraft || graphCollectionId)
+    setWizardCollectionId(normalized)
+    if (normalized) {
+      setCollectionDraft(normalized)
+      setGraphCollectionId(normalized)
+    }
+    setIngestionWizardStep('collection')
+    setIngestionWizardOpen(true)
+  }
+
+  async function ensureWizardCollection(collectionId: string): Promise<void> {
+    const collectionExists = collections.some(collection => collection.collection_id === collectionId)
+    if (!collectionExists) {
+      await api.createCollection(token, collectionId)
+    }
+    applyCollectionSelection(collectionId)
+    await refreshCollectionWorkspace(collectionId)
+    setGraphCollectionId(collectionId)
+  }
+
+  async function ensureWizardGraphDraft(collectionId: string): Promise<string> {
+    const currentGraphId = asString(graphDraftId || selectedGraph)
+    if (currentGraphId) {
+      try {
+        const existing = await api.getGraph(token, currentGraphId)
+        if (asString(existing.graph.collection_id) === collectionId) {
+          setSelectedGraph(currentGraphId)
+          setGraphDetail(existing)
+          hydrateGraphForm(existing)
+          return currentGraphId
+        }
+      } catch (err) {
+        if (!isApiError(err) || err.status !== 404) throw err
+      }
+    }
+
+    const suggestion = await api.suggestGraph(token, {
+      collection_id: collectionId,
+      intent: graphIntent,
+      source_doc_ids: [],
+    })
+    const graphId = asString(suggestion.graph_id, graphDraftId)
+    const displayName = asString(suggestion.display_name, graphDisplayNameDraft || graphId)
+    setGraphDraftId(graphId)
+    setGraphDisplayNameDraft(displayName)
+    setGraphConfigDraft(JSON.stringify(suggestion.config_overrides ?? {}, null, 2))
+    setGraphPromptDraft(JSON.stringify(suggestion.prompt_overrides ?? {}, null, 2))
+
+    try {
+      const existing = await api.getGraph(token, graphId)
+      if (asString(existing.graph.collection_id) === collectionId) {
+        setSelectedGraph(graphId)
+        setGraphDetail(existing)
+        hydrateGraphForm(existing)
+        return graphId
+      }
+    } catch (err) {
+      if (!isApiError(err) || err.status !== 404) throw err
+    }
+
+    const created = await api.createGraph(token, {
+      graph_id: graphId,
+      display_name: displayName,
+      collection_id: collectionId,
+      source_doc_ids: [],
+      backend: 'microsoft_graphrag',
+      visibility: 'tenant',
+      config_overrides: suggestion.config_overrides ?? {},
+      prompt_overrides: suggestion.prompt_overrides ?? {},
+      graph_skill_ids: [],
+    })
+    const createdGraphId = asString(created.graph_id, graphId)
+    setSelectedGraph(createdGraphId)
+    await refreshGraphs(createdGraphId)
+    await refreshSelectedGraph(createdGraphId)
+    return createdGraphId
+  }
+
+  async function runGraphTuneForGraph(graphId: string): Promise<GraphResearchTunePayload> {
+    if (graphTuneTargets.length === 0) {
+      throw new Error('Choose at least one prompt target for Research & Tune.')
+    }
+    const result = await api.startGraphResearchTune(token, graphId, {
+      guidance: graphTuneGuidance,
+      target_prompt_files: graphTuneTargets,
+    })
+    setGraphTuneResult(result)
+    const draftFiles = Object.entries(result.prompt_drafts ?? {})
+      .filter(([, draft]) => {
+        const draftRecord = asRecord(draft)
+        const validation = asRecord(draftRecord?.validation)
+        return validation?.ok !== false
+      })
+      .map(([promptFile]) => promptFile)
+    setGraphTuneSelectedPrompts(draftFiles)
+    const runsPayload = await api.getGraphRuns(token, graphId)
+    setGraphRuns(runsPayload.runs)
+    return result
+  }
+
+  async function handleWizardRunTune() {
+    const collectionId = normalizeCollectionId(wizardCollectionId || selectedCollection || collectionDraft)
+    if (!collectionId) {
+      setError('Choose a collection before running prompt tuning.')
+      return
+    }
+    if (!wizardCreateGraph) {
+      setError('Enable graph draft creation before running prompt tuning.')
+      return
+    }
+    setGraphTuneRunning(true)
+    try {
+      await ensureWizardCollection(collectionId)
+      const graphId = await ensureWizardGraphDraft(collectionId)
+      await runGraphTuneForGraph(graphId)
+      setWizardRunTune(true)
+      setError('')
+      notifyOk('Prompt tuning run complete', graphId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Prompt tuning failed', err)
+    } finally {
+      setGraphTuneRunning(false)
+    }
+  }
+
+  async function handleWizardFinish() {
+    const collectionId = normalizeCollectionId(wizardCollectionId || selectedCollection || collectionDraft)
+    if (!collectionId) {
+      setError('Choose a collection ID before finishing the wizard.')
+      return
+    }
+    try {
+      await ensureWizardCollection(collectionId)
+      if (collectionAction === 'sync') {
+        const result = await api.syncCollection(token, collectionId)
+        setCollectionActivity(result)
+        await refreshCollectionWorkspace(collectionId)
+      }
+      if (wizardCreateGraph) {
+        const createdGraphId = await ensureWizardGraphDraft(collectionId)
+        let tuneResult = graphTuneResult
+        if (wizardRunTune && asString(tuneResult?.graph_id) !== createdGraphId) {
+          try {
+            tuneResult = await runGraphTuneForGraph(createdGraphId)
+          } catch (err) {
+            tuneResult = null
+            if (wizardRequireTuneBeforeBuild && wizardStartBuild) throw err
+            setError(getMessage(err))
+          }
+        }
+        if (wizardRunTune && wizardApplyTune && tuneResult?.run_id && graphTuneSelectedPrompts.length > 0) {
+          await api.applyGraphResearchTune(token, createdGraphId, tuneResult.run_id, graphTuneSelectedPrompts)
+          await refreshSelectedGraph(createdGraphId)
+        }
+        if (wizardStartBuild) {
+          const response = await api.buildGraph(token, createdGraphId)
+          setGraphValidation(response)
+          await refreshSelectedGraph(createdGraphId)
+        }
+        setActive('graphs')
+      } else {
+        setActive('collections')
+      }
+      setIngestionWizardOpen(false)
+      setError('')
+      notifyOk('Ingestion wizard complete', collectionId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Wizard failed', err)
+    }
+  }
+
   async function handleGraphValidate() {
     if (!selectedGraph) {
       setError('Create or select a graph first.')
@@ -2144,18 +2726,19 @@ export default function App() {
       setError('Create or select a graph first.')
       return
     }
+    if (graphBuildRunning) {
+      setError('This graph already has a build or refresh run in progress.')
+      return
+    }
+    setGraphLifecycleBusy(true)
     try {
       const response = refresh
         ? await api.refreshGraph(token, selectedGraph)
         : await api.buildGraph(token, selectedGraph)
       await refreshGraphs(selectedGraph)
-      const detail = await api.getGraph(token, selectedGraph)
-      setGraphDetail(detail)
-      hydrateGraphForm(detail)
-      const runsPayload = await api.getGraphRuns(token, selectedGraph)
-      setGraphRuns(runsPayload.runs)
+      await refreshSelectedGraph(selectedGraph)
       setGraphValidation(response)
-      try {
+      if (asString(response.operation_status) !== 'already_running') try {
         const smoke = await api.graphSmokeTest(token, selectedGraph, {
           query: graphSmokeQuery,
           methods: [],
@@ -2176,10 +2759,66 @@ export default function App() {
         })
       }
       setError('')
-      notifyOk(refresh ? 'Graph refreshed' : 'Graph built', selectedGraph)
+      notifyOk(refresh ? 'Graph refresh started' : 'Graph build started', selectedGraph)
     } catch (err) {
       setError(getMessage(err))
       notifyError(refresh ? 'Graph refresh failed' : 'Graph build failed', err)
+    } finally {
+      setGraphLifecycleBusy(false)
+    }
+  }
+
+  async function handleGraphCancelRun() {
+    if (!selectedGraph || !activeGraphRun?.run_id) {
+      setError('No active graph run is available to cancel.')
+      return
+    }
+    setGraphLifecycleBusy(true)
+    try {
+      const payload = await api.cancelGraphRun(token, selectedGraph, activeGraphRun.run_id)
+      setGraphValidation(payload)
+      await refreshGraphs(selectedGraph)
+      await refreshSelectedGraph(selectedGraph)
+      setError('')
+      notifyOk('Graph run cancelled', activeGraphRun.run_id)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Cancel graph run failed', err)
+    } finally {
+      setGraphLifecycleBusy(false)
+    }
+  }
+
+  async function handleDeleteGraph() {
+    if (!selectedGraph) {
+      setError('Select a graph before deleting it.')
+      return
+    }
+    if (graphBuildRunning) {
+      setError('Cancel the active graph run before deleting this graph.')
+      return
+    }
+    setGraphLifecycleBusy(true)
+    try {
+      const payload = await api.deleteGraph(token, selectedGraph, { delete_artifacts: deleteGraphArtifacts })
+      const deletedGraphId = selectedGraph
+      const nextGraphId = await refreshGraphs()
+      if (nextGraphId) {
+        await refreshSelectedGraph(nextGraphId)
+      } else {
+        setGraphDetail(null)
+        setGraphRuns([])
+        setGraphProgress(null)
+      }
+      setGraphValidation(payload)
+      setDeleteGraphArtifacts(false)
+      setError('')
+      notifyOk('Graph deleted', deletedGraphId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Delete graph failed', err)
+    } finally {
+      setGraphLifecycleBusy(false)
     }
   }
 
@@ -2246,21 +2885,7 @@ export default function App() {
     }
     setGraphTuneRunning(true)
     try {
-      const result = await api.startGraphResearchTune(token, selectedGraph, {
-        guidance: graphTuneGuidance,
-        target_prompt_files: graphTuneTargets,
-      })
-      setGraphTuneResult(result)
-      const draftFiles = Object.entries(result.prompt_drafts ?? {})
-        .filter(([, draft]) => {
-          const draftRecord = asRecord(draft)
-          const validation = asRecord(draftRecord?.validation)
-          return validation?.ok !== false
-        })
-        .map(([promptFile]) => promptFile)
-      setGraphTuneSelectedPrompts(draftFiles)
-      const runsPayload = await api.getGraphRuns(token, selectedGraph)
-      setGraphRuns(runsPayload.runs)
+      await runGraphTuneForGraph(selectedGraph)
       setError('')
     } catch (err) {
       setError(getMessage(err))
@@ -2494,6 +3119,251 @@ export default function App() {
       setError('')
     } catch (err) {
       setError(getMessage(err))
+    }
+  }
+
+  function setAccessWizardDefaults(mode: Exclude<AccessWizardMode, null>) {
+    setAccessWizard(mode)
+    setAccessWizardPreview(null)
+    if (mode === 'setup') {
+      const firstGroup = accessGroups[0]?.principal_id ?? ''
+      const preset = ACCESS_PRESETS.find(item => item.id === setupPresetId) ?? ACCESS_PRESETS[0]
+      setAccessWizardStep('group')
+      setSetupGroupMode(firstGroup ? 'existing' : 'create')
+      setSetupGroupId(current => current || firstGroup)
+      setSetupResourceType(preset.resourceType)
+      setSetupActions(preset.actions)
+      setSetupResourceSelectors(current => current.length > 0 ? current : ['*'])
+      return
+    }
+    if (mode === 'grant') {
+      setAccessWizardStep('resource')
+      setGrantPrincipalIds(current => current.length > 0 ? current : accessGroups[0] ? [accessGroups[0].principal_id] : [])
+      setGrantResourceSelectors(current => current.length > 0 ? current : ['*'])
+      return
+    }
+    if (mode === 'user') {
+      setAccessWizardStep('profile')
+      return
+    }
+    setAccessWizardStep('details')
+  }
+
+  function accessWizardSteps(): string[] {
+    if (accessWizard === 'setup') return ['group', 'preset', 'members', 'resources', 'preview', 'review']
+    if (accessWizard === 'grant') return ['resource', 'principals', 'actions', 'review']
+    if (accessWizard === 'user') return ['profile', 'groups', 'preview', 'review']
+    if (accessWizard === 'group') return ['details', 'role', 'members', 'review']
+    return []
+  }
+
+  function toggleSetupMember(memberId: string) {
+    setSetupMemberIds(current => current.includes(memberId)
+      ? current.filter(id => id !== memberId)
+      : [...current, memberId])
+  }
+
+  function toggleSetupSelector(selector: string) {
+    setSetupResourceSelectors(current => current.includes(selector)
+      ? current.filter(id => id !== selector)
+      : [...current, selector])
+  }
+
+  function toggleSetupAction(action: AccessAction) {
+    setSetupActions(current => current.includes(action)
+      ? current.filter(item => item !== action)
+      : [...current, action])
+  }
+
+  function toggleGrantSelector(selector: string) {
+    setGrantResourceSelectors(current => current.includes(selector)
+      ? current.filter(id => id !== selector)
+      : [...current, selector])
+  }
+
+  function toggleGrantPrincipal(principalId: string) {
+    setGrantPrincipalIds(current => current.includes(principalId)
+      ? current.filter(id => id !== principalId)
+      : [...current, principalId])
+  }
+
+  function toggleGrantAction(action: AccessAction) {
+    setGrantActions(current => current.includes(action)
+      ? current.filter(item => item !== action)
+      : [...current, action])
+  }
+
+  function toggleManageUserGroup(groupId: string) {
+    setManageUserGroupIds(current => current.includes(groupId)
+      ? current.filter(id => id !== groupId)
+      : [...current, groupId])
+  }
+
+  function toggleCreateGroupMember(memberId: string) {
+    setCreateGroupMemberIds(current => current.includes(memberId)
+      ? current.filter(id => id !== memberId)
+      : [...current, memberId])
+  }
+
+  function normalizedAccessSelectors(selectors: string[]): string[] {
+    const cleaned = uniqueList(selectors.filter(Boolean))
+    return cleaned.length > 0 ? cleaned : ['*']
+  }
+
+  async function createAccessRoleWithPermissions(options: {
+    name: string
+    description: string
+    resourceType: AccessResourceType
+    selectors: string[]
+    actions: AccessAction[]
+  }): Promise<string> {
+    const rolePayload = await api.createAccessRole(token, {
+      name: options.name,
+      description: options.description,
+    })
+    const roleId = rolePayload.role.role_id
+    const selectors = normalizedAccessSelectors(options.selectors)
+    const actions = options.actions.length > 0 ? options.actions : ['use']
+    for (const selector of selectors) {
+      for (const action of actions) {
+        await api.createAccessPermission(token, {
+          role_id: roleId,
+          resource_type: options.resourceType,
+          action,
+          resource_selector: selector,
+        })
+      }
+    }
+    return roleId
+  }
+
+  async function handleAccessWizardPreview() {
+    const selectedUserId = accessWizard === 'user' ? '' : setupMemberIds[0]
+    const selectedUser = accessPrincipalById.get(selectedUserId)
+    const email = accessWizard === 'user' ? manageUserEmail.trim() : asString(selectedUser?.email_normalized)
+    if (!email) {
+      setError('Choose or enter a user email before previewing access.')
+      return
+    }
+    try {
+      const payload = await api.getEffectiveAccess(token, email)
+      setAccessWizardPreview(payload)
+      setError('')
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Preview access failed', err)
+    }
+  }
+
+  async function handleFinishAccessWizard() {
+    try {
+      if (accessWizard === 'setup') {
+        const preset = ACCESS_PRESETS.find(item => item.id === setupPresetId) ?? ACCESS_PRESETS[0]
+        let groupId = setupGroupId
+        let groupName = principalLabel(accessPrincipalById.get(groupId))
+        if (setupGroupMode === 'create') {
+          const name = setupGroupName.trim()
+          if (!name) throw new Error('Provide a group name before applying setup.')
+          const payload = await api.createAccessPrincipal(token, {
+            principal_type: 'group',
+            provider: 'system',
+            display_name: name,
+            metadata_json: { purpose: setupGroupPurpose },
+            active: true,
+          })
+          groupId = payload.principal.principal_id
+          groupName = principalLabel(payload.principal)
+        }
+        if (!groupId) throw new Error('Choose or create a group before applying setup.')
+        const roleId = await createAccessRoleWithPermissions({
+          name: `${groupName} ${preset.label}`,
+          description: `${preset.description} Created from the Access Setup Wizard.`,
+          resourceType: setupResourceType,
+          selectors: setupResourceSelectors,
+          actions: setupActions,
+        })
+        await api.createAccessBinding(token, { role_id: roleId, principal_id: groupId })
+        for (const memberId of setupMemberIds) {
+          await api.createAccessMembership(token, {
+            parent_principal_id: groupId,
+            child_principal_id: memberId,
+          })
+        }
+        await refreshAccessData()
+        setAccessTab('groups')
+        notifyOk('Access setup applied', groupName)
+      } else if (accessWizard === 'grant') {
+        if (grantPrincipalIds.length === 0) throw new Error('Choose at least one user or group.')
+        const selectorLabel = grantResourceSelectors.length === 1
+          ? (accessResourceLabelByTypeAndId.get(`${grantResourceType}:${grantResourceSelectors[0]}`) || grantResourceSelectors[0])
+          : `${grantResourceSelectors.length || 1} resources`
+        const roleId = await createAccessRoleWithPermissions({
+          name: `${accessResourceLabel(grantResourceType)} ${shortId(selectorLabel)} Grant`,
+          description: `Resource-centric grant created from the Grant Resource Access Wizard.`,
+          resourceType: grantResourceType,
+          selectors: grantResourceSelectors,
+          actions: grantActions,
+        })
+        for (const principalId of grantPrincipalIds) {
+          await api.createAccessBinding(token, { role_id: roleId, principal_id: principalId })
+        }
+        await refreshAccessData()
+        setAccessTab('grants')
+        notifyOk('Resource access granted')
+      } else if (accessWizard === 'user') {
+        const email = manageUserEmail.trim()
+        if (!email) throw new Error('Provide a user email before saving.')
+        const payload = await api.createAccessPrincipal(token, {
+          principal_type: 'user',
+          provider: 'email',
+          email_normalized: email,
+          display_name: manageUserDisplayName.trim() || email,
+          metadata_json: { system_role: manageUserSystemRole },
+          active: manageUserSystemRole !== 'pending',
+        })
+        for (const groupId of manageUserGroupIds) {
+          await api.createAccessMembership(token, {
+            parent_principal_id: groupId,
+            child_principal_id: payload.principal.principal_id,
+          })
+        }
+        setAccessPreviewEmail(email)
+        await refreshAccessData()
+        setAccessTab('users')
+        notifyOk('User saved', email)
+      } else if (accessWizard === 'group') {
+        const name = createGroupName.trim()
+        if (!name) throw new Error('Provide a group name before saving.')
+        const payload = await api.createAccessPrincipal(token, {
+          principal_type: 'group',
+          provider: 'system',
+          display_name: name,
+          metadata_json: { purpose: createGroupPurpose },
+          active: true,
+        })
+        if (createGroupRoleId) {
+          await api.createAccessBinding(token, {
+            role_id: createGroupRoleId,
+            principal_id: payload.principal.principal_id,
+          })
+        }
+        for (const memberId of createGroupMemberIds) {
+          await api.createAccessMembership(token, {
+            parent_principal_id: payload.principal.principal_id,
+            child_principal_id: memberId,
+          })
+        }
+        await refreshAccessData()
+        setAccessTab('groups')
+        notifyOk('Group created', name)
+      }
+      setAccessWizard(null)
+      setAccessWizardStep('')
+      setAccessWizardPreview(null)
+      setError('')
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Access wizard failed', err)
     }
   }
 
@@ -2926,7 +3796,7 @@ export default function App() {
               title="Reload Summary"
               subtitle="What changed most recently and whether it completed cleanly."
               open={dashboardReloadOpen}
-              onToggle={() => setDashboardReloadOpen(!dashboardReloadOpen)}
+              onToggle={() => setDashboardReloadOpen(open => !open)}
             >
               {overview.last_reload ? (
                 <div className="timeline-card">
@@ -2962,7 +3832,7 @@ export default function App() {
               title="Activity Feed"
               subtitle="Recent audit events and operator-visible changes across the control plane."
               open={dashboardActivityOpen}
-              onToggle={() => setDashboardActivityOpen(!dashboardActivityOpen)}
+              onToggle={() => setDashboardActivityOpen(open => !open)}
             >
               {auditEvents.length > 0 ? (
                 <div className="timeline-list">
@@ -3127,7 +3997,7 @@ export default function App() {
                 title={selectedArchitectureNode ? 'Node Inspector' : selectedArchitecturePath ? 'Path Inspector' : 'Architecture Notes'}
                 subtitle="A plain-language explanation of the selected node or path, plus the live capabilities attached to it."
                 open={architectureInspectorOpen}
-                onToggle={() => setArchitectureInspectorOpen(!architectureInspectorOpen)}
+                onToggle={() => setArchitectureInspectorOpen(open => !open)}
               >
                 {selectedArchitectureNode ? (
                   <>
@@ -3932,7 +4802,7 @@ export default function App() {
             title="Preview"
             subtitle="Readable validation output with before and after values, plus reload scope."
             open={configPreviewOpen}
-            onToggle={() => setConfigPreviewOpen(!configPreviewOpen)}
+            onToggle={() => setConfigPreviewOpen(open => !open)}
           >
             {configPreview ? (
               <>
@@ -4032,7 +4902,7 @@ export default function App() {
               title="Agent Editor"
               subtitle="Adjust editable overlay fields, then save the overlay before reloading agents."
               open={agentEditorOpen}
-              onToggle={() => setAgentEditorOpen(!agentEditorOpen)}
+              onToggle={() => setAgentEditorOpen(open => !open)}
             >
               {agentDetail ? (
                 <>
@@ -4074,7 +4944,7 @@ export default function App() {
                 title="Agent Inspector"
                 subtitle="Operational summary for the selected agent, including tools, workers, and pinned skills."
                 open={agentInspectorOpen}
-                onToggle={() => setAgentInspectorOpen(!agentInspectorOpen)}
+                onToggle={() => setAgentInspectorOpen(open => !open)}
               >
                 {agentDetail ? (
                   <>
@@ -4116,29 +4986,73 @@ export default function App() {
           </div>
         ) : (
           <div className="content-stack">
-            <SurfaceCard title="Tool Catalog" subtitle="Current tool contracts available to the runtime, grouped as compact operator-friendly cards.">
-              {agentsPayload.tools.length > 0 ? (
-                <div className="chip-grid">
-                  {agentsPayload.tools.map(tool => (
-                    <div key={asString(tool.name)} className="tool-card">
-                      <div className="tool-card-head">
-                        <strong>{asString(tool.name)}</strong>
-                        <StatusBadge tone={Boolean(tool.read_only) ? 'ok' : Boolean(tool.destructive) ? 'danger' : 'neutral'}>
-                          {Boolean(tool.read_only) ? 'Read only' : Boolean(tool.destructive) ? 'Destructive' : 'Mutable'}
-                        </StatusBadge>
-                      </div>
-                      <p>{asString(tool.description, 'No description')}</p>
-                      <div className="badge-cluster">
-                        <StatusBadge tone="neutral">{asString(tool.group, 'general')}</StatusBadge>
-                        <StatusBadge tone={Boolean(tool.background_safe) ? 'ok' : 'warning'}>
-                          {boolLabel(Boolean(tool.background_safe), 'Background safe', 'Foreground only')}
-                        </StatusBadge>
-                        <StatusBadge tone={Boolean(tool.requires_workspace) ? 'warning' : 'neutral'}>
-                          {boolLabel(Boolean(tool.requires_workspace), 'Needs workspace', 'No workspace')}
-                        </StatusBadge>
-                      </div>
+            <SurfaceCard title="Tool Catalog" subtitle="Current tool contracts available to the runtime, organized by catalog tags.">
+              {toolCatalog.length > 0 ? (
+                <div className="tool-catalog">
+                  <div className="tool-catalog-toolbar">
+                    <div className="tool-catalog-summary">
+                      <span><strong>{filteredToolCatalogItems.length}</strong> shown</span>
+                      <span><strong>{groupedToolCatalog.length}</strong> groups</span>
+                      <span><strong>{toolTagOptions.length}</strong> tags</span>
                     </div>
-                  ))}
+                    <div className="tool-tag-filter-row" aria-label="Tool tag filters">
+                      <button
+                        type="button"
+                        className="filter-chip-btn tool-tag-filter-btn"
+                        aria-pressed={!activeToolTag}
+                        onClick={() => setToolTagFilter('')}
+                      >
+                        <FilterChip label="All" count={toolCatalog.length} tone={!activeToolTag ? 'accent' : 'neutral'} />
+                      </button>
+                      {toolTagOptions.map(option => (
+                        <button
+                          key={option.tag}
+                          type="button"
+                          className="filter-chip-btn tool-tag-filter-btn"
+                          aria-pressed={activeToolTag === option.tag}
+                          onClick={() => setToolTagFilter(activeToolTag === option.tag ? '' : option.tag)}
+                        >
+                          <FilterChip label={toolTagLabel(option.tag)} count={option.count} tone={activeToolTag === option.tag ? 'accent' : 'neutral'} />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="tool-tag-groups">
+                    {groupedToolCatalog.map(group => (
+                      <section key={group.tag} className="tool-tag-group" aria-labelledby={`tool-tag-group-${group.tag.replace(/[^a-zA-Z0-9_-]/g, '-')}`}>
+                        <div className="tool-tag-group-head">
+                          <h4 id={`tool-tag-group-${group.tag.replace(/[^a-zA-Z0-9_-]/g, '-')}`}>{toolTagLabel(group.tag)}</h4>
+                          <StatusBadge tone="neutral">{group.items.length} tools</StatusBadge>
+                        </div>
+                        <div className="tool-card-grid">
+                          {group.items.map(({ tool, tags }) => (
+                            <div key={asString(tool.name)} className="tool-card">
+                              <div className="tool-card-head">
+                                <strong>{asString(tool.name)}</strong>
+                                <StatusBadge tone={Boolean(tool.read_only) ? 'ok' : Boolean(tool.destructive) ? 'danger' : 'neutral'}>
+                                  {Boolean(tool.read_only) ? 'Read only' : Boolean(tool.destructive) ? 'Destructive' : 'Mutable'}
+                                </StatusBadge>
+                              </div>
+                              <p>{asString(tool.description, 'No description')}</p>
+                              <div className="tool-card-tags">
+                                {tags.map(tag => (
+                                  <button
+                                    key={tag}
+                                    type="button"
+                                    className="filter-chip-btn tool-tag-filter-btn"
+                                    aria-pressed={activeToolTag === tag}
+                                    onClick={() => setToolTagFilter(activeToolTag === tag ? '' : tag)}
+                                  >
+                                    <FilterChip label={toolTagLabel(tag)} tone={activeToolTag === tag ? 'accent' : 'neutral'} />
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
                 </div>
               ) : (
                 <EmptyState title="No tools registered" body="Tool metadata will appear here after the runtime publishes its current tool catalog." />
@@ -4226,7 +5140,7 @@ export default function App() {
                 title="Prompt Summary"
                 subtitle="Quick context for the selected prompt before you dive into the compare tabs."
                 open={promptSummaryOpen}
-                onToggle={() => setPromptSummaryOpen(!promptSummaryOpen)}
+              onToggle={() => setPromptSummaryOpen(open => !open)}
               >
                 {promptDetail ? (
                   <div className="summary-list">
@@ -4310,13 +5224,30 @@ export default function App() {
                 aria-label="Collection ID"
                 value={collectionDraft}
                 onChange={event => setCollectionDraft(event.target.value)}
-                placeholder="rfp-corpus"
+                placeholder="collection-id"
               />
             </label>
 
             <ActionBar>
+              <ActionButton tone="secondary" onClick={() => openIngestionWizard()}>
+                Ingestion Wizard
+              </ActionButton>
               <ActionButton tone="secondary" onClick={() => void handleUseCollection()}>Load Workspace</ActionButton>
               <ActionButton tone="primary" onClick={() => void handleCreateCollection()}>Create Collection</ActionButton>
+              <ActionButton
+                tone="secondary"
+                onClick={() => {
+                  const collectionId = normalizeCollectionId(selectedCollection || collectionDraft)
+                  setGraphCollectionId(collectionId)
+                  setGraphDraftId('')
+                  setGraphDisplayNameDraft('')
+                  setActive('graphs')
+                  if (collectionId) void refreshGraphCollectionDocs(collectionId)
+                }}
+                disabled={!selectedCollectionCanBuildGraph}
+              >
+                Build Graph
+              </ActionButton>
               <ActionButton
                 tone="destructive"
                 onClick={() => askConfirm({
@@ -4927,7 +5858,7 @@ export default function App() {
                 </>
               )}
               open={collectionViewerOpen}
-              onToggle={() => setCollectionViewerOpen(!collectionViewerOpen)}
+              onToggle={() => setCollectionViewerOpen(open => !open)}
             >
               {docDetail && documentRecord ? (
                 <>
@@ -5071,7 +6002,7 @@ export default function App() {
               title="Collection Inspector"
               subtitle="Expand the technical view only when you need tables, dimensions, provider details, or graph metadata."
               open={collectionInspectorOpen}
-              onToggle={() => setCollectionInspectorOpen(!collectionInspectorOpen)}
+              onToggle={() => setCollectionInspectorOpen(open => !open)}
             >
               {selectedCollectionMeta ? (
                 <>
@@ -5339,7 +6270,7 @@ export default function App() {
                 </>
               )}
               open={uploadViewerOpen}
-              onToggle={() => setUploadViewerOpen(!uploadViewerOpen)}
+              onToggle={() => setUploadViewerOpen(open => !open)}
             >
               {uploadDocDetail && uploadDocumentRecord ? (
                 <>
@@ -5461,7 +6392,7 @@ export default function App() {
                 title="Skill Status"
                 subtitle="Metadata and activation posture for the selected skill stay here so the editor can breathe."
                 open={skillSummaryOpen}
-                onToggle={() => setSkillSummaryOpen(!skillSummaryOpen)}
+                onToggle={() => setSkillSummaryOpen(open => !open)}
               >
                 {creatingSkill || skillDetail ? (
                   <>
@@ -5662,11 +6593,15 @@ export default function App() {
               subtitle="Admin-managed graphs are tenant-visible once built. Drafts stay here until you validate and index them."
             >
               <ActionBar>
+                <ActionButton tone="secondary" onClick={() => openIngestionWizard(graphCollectionId)}>
+                  Ingestion Wizard
+                </ActionButton>
                 <ActionButton tone="secondary" onClick={() => {
                   setSelectedGraph('')
                   setGraphDetail(null)
                   setGraphValidation(null)
                   setGraphRuns([])
+                  setGraphProgress(null)
                   setGraphDraftId('')
                   setGraphDisplayNameDraft('')
                   setGraphPromptDraft('{}')
@@ -5821,9 +6756,28 @@ export default function App() {
                   <ActionButton tone="secondary" onClick={() => void handleGraphSuggest()}>Suggest Defaults</ActionButton>
                   <ActionButton tone="primary" onClick={() => void handleGraphCreate()}>Save Draft</ActionButton>
                   <ActionButton tone="secondary" onClick={() => void handleGraphValidate()} disabled={!selectedGraph}>Run Preflight</ActionButton>
-                  <ActionButton tone="ghost" onClick={() => void handleGraphBuild(false)} disabled={!selectedGraph}>Build</ActionButton>
-                  <ActionButton tone="ghost" onClick={() => void handleGraphBuild(true)} disabled={!selectedGraph}>Refresh</ActionButton>
+                  <ActionButton tone="ghost" onClick={() => void handleGraphBuild(false)} disabled={!selectedGraph || graphBuildRunning || graphLifecycleBusy}>Build</ActionButton>
+                  <ActionButton tone="ghost" onClick={() => void handleGraphBuild(true)} disabled={!selectedGraph || graphBuildRunning || graphLifecycleBusy}>Refresh</ActionButton>
+                  <ActionButton
+                    tone="destructive"
+                    onClick={() => askConfirm({
+                      title: 'Cancel active graph run?',
+                      description: `Cancel ${activeGraphRun?.operation ?? 'the active run'} for "${selectedGraph}". The current GraphRAG process will be stopped.`,
+                      confirmLabel: 'Cancel Run',
+                      run: handleGraphCancelRun,
+                    })}
+                    disabled={!activeGraphRun || graphLifecycleBusy}
+                  >
+                    Cancel Run
+                  </ActionButton>
                 </ActionBar>
+
+                {graphBuildRunning && (
+                  <div className="inline-alert inline-alert-warning">
+                    <span>Build in progress</span>
+                    <strong>{activeGraphRun ? `${activeGraphRun.operation} ${shortId(activeGraphRun.run_id)}` : 'Waiting for progress update'}</strong>
+                  </div>
+                )}
 
                 {graphAssistantFriendly && (
                   <div className="preview-card collection-result-card">
@@ -5887,7 +6841,7 @@ export default function App() {
                     type="button"
                     className="collapsible-toggle"
                     aria-expanded={graphAdvancedOpen}
-                    onClick={() => setGraphAdvancedOpen(!graphAdvancedOpen)}
+                    onClick={() => setGraphAdvancedOpen(open => !open)}
                   >
                     {graphAdvancedOpen ? 'Hide Advanced GraphRAG JSON' : 'Show Advanced GraphRAG JSON'}
                   </button>
@@ -6108,10 +7062,11 @@ export default function App() {
             </div>
 
             <CollapsibleSurfaceCard
+              className="graph-inspector-card"
               title={selectedGraph ? 'Graph Inspector' : 'Graph Notes'}
               subtitle="Review build state, query readiness, recent runs, logs, and any validation payload without leaving the workspace."
               open={graphInspectorOpen}
-              onToggle={() => setGraphInspectorOpen(!graphInspectorOpen)}
+              onToggle={() => setGraphInspectorOpen(open => !open)}
             >
               {graphDetail ? (
                 <>
@@ -6140,6 +7095,57 @@ export default function App() {
                       <strong>{selectedGraphGrantSummary.principalNames.length > 0 ? shortList(selectedGraphGrantSummary.principalNames) : 'No current grants'}</strong>
                     </div>
                   </div>
+                  <div className="collection-action-panel collection-action-panel-compact">
+                    <label className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={deleteGraphArtifacts}
+                        onChange={event => setDeleteGraphArtifacts(event.target.checked)}
+                      />
+                      <span>Delete on-disk GraphRAG artifacts too</span>
+                    </label>
+                    <ActionButton
+                      tone="destructive"
+                      onClick={() => askConfirm({
+                        title: 'Delete this graph?',
+                        description: deleteGraphArtifacts
+                          ? `Delete "${graphDetail.graph.display_name || graphDetail.graph.graph_id}" and remove its on-disk GraphRAG artifacts. This cannot be undone.`
+                          : `Delete "${graphDetail.graph.display_name || graphDetail.graph.graph_id}" from the catalog and keep on-disk GraphRAG artifacts.`,
+                        confirmLabel: 'Delete Graph',
+                        run: handleDeleteGraph,
+                      })}
+                      disabled={!selectedGraph || graphBuildRunning || graphLifecycleBusy}
+                    >
+                      Delete Graph
+                    </ActionButton>
+                  </div>
+                  {graphProgress && (
+                    <div className="graph-progress-panel">
+                      <div className="tool-card-head">
+                        <strong>Build Progress</strong>
+                        <StatusBadge tone={graphProgress.active ? 'accent' : toneForStatus(graphProgress.status)}>
+                          {graphProgress.active ? 'Live polling' : humanizeKey(asString(graphProgress.status, 'idle'))}
+                        </StatusBadge>
+                      </div>
+                      <div className="progress-track" aria-label="Graph build progress">
+                        <span style={{ width: `${Math.max(0, Math.min(100, Number(graphProgress.percent || 0)))}%` }} />
+                      </div>
+                      <div className="summary-row">
+                        <span>{asString(graphProgress.workflow, 'Waiting for workflow')}</span>
+                        <strong>{formatPercent((Number(graphProgress.percent || 0)) / 100)}</strong>
+                      </div>
+                      <div className="stage-list">
+                        {graphProgress.stages.map(stage => (
+                          <span key={stage.id} className={`stage-chip stage-chip-${asString(stage.state, 'pending')}`}>
+                            {stage.label}
+                          </span>
+                        ))}
+                      </div>
+                      {asString(graphProgress.log_tail) && (
+                        <div className="code-panel code-panel-scroll">{asString(graphProgress.log_tail)}</div>
+                      )}
+                    </div>
+                  )}
                   <DetailTabs
                     tabs={[
                       {
@@ -6175,9 +7181,9 @@ export default function App() {
                       {
                         id: 'logs',
                         label: 'Logs',
-                        content: asArray<Record<string, unknown>>(graphDetail.logs).length > 0 ? (
+                        content: asArray<Record<string, unknown>>(graphProgress?.logs ?? graphDetail.logs).length > 0 ? (
                           <div className="field-stack">
-                            {asArray<Record<string, unknown>>(graphDetail.logs).map(log => (
+                            {asArray<Record<string, unknown>>(graphProgress?.logs ?? graphDetail.logs).map(log => (
                               <div key={asString(log.path)} className="preview-card">
                                 <div className="tool-card-head">
                                   <strong>{asString(log.name, 'log')}</strong>
@@ -6305,346 +7311,320 @@ export default function App() {
 
       {active === 'access' && (
         <div className="content-stack">
-          <div className="card-grid">
-            <SurfaceCard title="Principals" subtitle="Email-backed users today, placeholder groups for future IdP sync.">
-              <div className="form-grid form-grid-compact">
-                <label className="field">
-                  <span>Principal Type</span>
-                  <select value={principalDraftType} onChange={event => setPrincipalDraftType(event.target.value as 'user' | 'group')}>
-                    <option value="user">User</option>
-                    <option value="group">Group</option>
-                  </select>
-                </label>
-                {principalDraftType === 'user' && (
-                  <label className="field">
-                    <span>Provider</span>
-                    <select value={principalDraftProvider} onChange={event => setPrincipalDraftProvider(event.target.value)}>
-                      <option value="email">Email</option>
-                      <option value="entra">Future Entra</option>
-                    </select>
-                  </label>
-                )}
-                <label className="field">
-                  <span>{principalDraftType === 'user' ? 'Email' : 'Group Name'}</span>
-                  <input value={principalDraftValue} onChange={event => setPrincipalDraftValue(event.target.value)} placeholder={principalDraftType === 'user' ? 'alex@example.com' : 'Finance Analysts'} />
-                </label>
-              </div>
-              <ActionBar>
-                <ActionButton tone="secondary" onClick={() => void handleCreatePrincipal()}>Save Principal</ActionButton>
-              </ActionBar>
-              {accessPrincipals.length > 0 ? (
-                <div className="timeline-list">
-                  {accessPrincipals.map(principal => (
-                    <article key={principal.principal_id} className="timeline-item">
-                      <div className="timeline-dot" aria-hidden="true" />
-                      <div>
-                        <strong>{principal.display_name || principal.email_normalized || principal.principal_id}</strong>
-                        <p>{humanizeKey(principal.principal_type)} • {principal.provider || 'system'}</p>
-                        <span>{principal.email_normalized || principal.principal_id}</span>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="No principals yet" body="Add an email user or a placeholder group to start assigning roles." />
-              )}
-            </SurfaceCard>
+          <SectionHeader
+            eyebrow="Open WebUI-inspired RBAC"
+            title="Access Control"
+            description="Manage users, groups, roles, resource grants, and effective access through guided workflows instead of one flat policy dump."
+            actions={(
+              <>
+                <ActionButton tone="primary" onClick={() => setAccessWizardDefaults('setup')}>Access Setup Wizard</ActionButton>
+                <ActionButton tone="secondary" onClick={() => setAccessWizardDefaults('grant')}>Grant Resource Access</ActionButton>
+              </>
+            )}
+          />
+          <SectionTabs
+            tabs={ACCESS_TABS}
+            active={accessTab}
+            onChange={tab => setAccessTab(tab as AccessTab)}
+            ariaLabel="Access workspace"
+          />
 
-            <SurfaceCard title="Roles" subtitle="Reusable permission bundles for collections, graphs, tools, and skill families.">
-              <div className="field-stack">
-                <label className="field">
-                  <span>Role Name</span>
-                  <input value={roleDraftName} onChange={event => setRoleDraftName(event.target.value)} placeholder="finance-analyst" />
-                </label>
-                <label className="field">
-                  <span>Description</span>
-                  <input value={roleDraftDescription} onChange={event => setRoleDraftDescription(event.target.value)} placeholder="Access to finance KBs and graph skills" />
-                </label>
+          {accessTab === 'overview' && (
+            <div className="content-stack">
+              <div className="stats-grid">
+                <StatCard label="Users" value={accessPrincipals.filter(principal => principal.principal_type === 'user').length} caption="Email-backed principals" />
+                <StatCard label="Groups" value={accessGroups.length} caption="Preferred grant target" />
+                <StatCard label="Roles" value={accessRoles.length} caption="Reusable permission bundles" />
+                <StatCard label="Resource Grants" value={accessPermissions.length} caption="Additive permissions" />
               </div>
-              <ActionBar>
-                <ActionButton tone="secondary" onClick={() => void handleCreateRole()}>Save Role</ActionButton>
-              </ActionBar>
-              {accessRoles.length > 0 ? (
-                <div className="timeline-list">
-                  {accessRoles.map(role => (
-                    <article key={role.role_id} className="timeline-item">
-                      <div className="timeline-dot" aria-hidden="true" />
-                      <div>
-                        <strong>{role.name}</strong>
-                        <p>{role.description || 'No description'}</p>
-                        <span>{role.role_id}</span>
-                      </div>
-                      <ActionButton
-                        tone="destructive"
-                        onClick={() => askConfirm({
-                          title: 'Delete this role?',
-                          description: `Remove "${role.name}". Existing bindings using this role will also be removed.`,
-                          confirmLabel: 'Delete',
-                          run: () => api.deleteAccessRole(token, role.role_id)
-                            .then(() => { notifyOk('Role deleted', role.name); return refreshAccessData() })
-                            .catch(err => { notifyError('Delete role failed', err); setError(getMessage(err)) }),
-                        })}
-                      >
-                        Delete
-                      </ActionButton>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="No roles yet" body="Create roles before adding permissions or bindings." />
-              )}
-            </SurfaceCard>
-          </div>
+              <div className="card-grid">
+                <SurfaceCard title="Recommended Workflow" subtitle="Group-first access keeps policy readable as the runtime grows.">
+                  <div className="summary-list">
+                    <div className="summary-row">
+                      <span>1. Create groups</span>
+                      <strong>Permission, team, or admin groups</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>2. Bind presets</span>
+                      <strong>KB reader, graph builder, agent operator</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>3. Preview access</span>
+                      <strong>Check effective permissions before users test</strong>
+                    </div>
+                  </div>
+                  <ActionBar>
+                    <ActionButton tone="primary" onClick={() => setAccessWizardDefaults('setup')}>Start Guided Setup</ActionButton>
+                    <ActionButton tone="secondary" onClick={() => setAccessWizardDefaults('group')}>Create Group</ActionButton>
+                    <ActionButton tone="secondary" onClick={() => setAccessWizardDefaults('user')}>Manage User</ActionButton>
+                  </ActionBar>
+                </SurfaceCard>
+                <SurfaceCard title="Recent Policy Shape" subtitle="A compact readout before diving into matrix-level detail.">
+                  <div className="summary-list">
+                    <div className="summary-row">
+                      <span>Direct user bindings</span>
+                      <strong>{formatWholeNumber(accessBindings.filter(binding => accessPrincipalById.get(binding.principal_id)?.principal_type === 'user').length)}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Group bindings</span>
+                      <strong>{formatWholeNumber(accessBindings.filter(binding => accessPrincipalById.get(binding.principal_id)?.principal_type === 'group').length)}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Memberships</span>
+                      <strong>{formatWholeNumber(accessMemberships.length)}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Wildcard grants</span>
+                      <strong>{formatWholeNumber(accessPermissions.filter(permission => permission.resource_selector === '*').length)}</strong>
+                    </div>
+                  </div>
+                </SurfaceCard>
+              </div>
+            </div>
+          )}
 
-          <div className="card-grid">
-            <SurfaceCard title="Bindings" subtitle="Attach roles to users or groups. Disabled bindings are ignored at runtime.">
-              <div className="form-grid form-grid-compact">
-                <label className="field">
-                  <span>Role</span>
-                  <select value={bindingRoleId} onChange={event => setBindingRoleId(event.target.value)}>
-                    <option value="">Choose a role</option>
-                    {accessRoles.map(role => <option key={role.role_id} value={role.role_id}>{role.name}</option>)}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Principal</span>
-                  <select value={bindingPrincipalId} onChange={event => setBindingPrincipalId(event.target.value)}>
-                    <option value="">Choose a principal</option>
-                    {accessPrincipals.map(principal => (
-                      <option key={principal.principal_id} value={principal.principal_id}>
-                        {principal.display_name || principal.email_normalized || principal.principal_id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+          {accessTab === 'users' && (
+            <SurfaceCard title="Users" subtitle="Create users, assign a simple system status, add them to groups, and preview effective access.">
               <ActionBar>
-                <ActionButton tone="secondary" onClick={() => void handleCreateBinding()}>Add Binding</ActionButton>
+                <ActionButton tone="primary" onClick={() => setAccessWizardDefaults('user')}>Manage User</ActionButton>
+                <ActionButton tone="secondary" onClick={() => setAccessWizardDefaults('setup')}>Add To Setup Wizard</ActionButton>
               </ActionBar>
-              {accessBindings.length > 0 ? (
-                <div className="timeline-list">
-                  {accessBindings.map(binding => (
-                    <article key={binding.binding_id} className="timeline-item">
-                      <div className="timeline-dot" aria-hidden="true" />
-                      <div>
-                        <strong>{accessRoles.find(role => role.role_id === binding.role_id)?.name || binding.role_id}</strong>
-                        <p>{accessPrincipals.find(principal => principal.principal_id === binding.principal_id)?.display_name || binding.principal_id}</p>
-                        <span>{binding.disabled ? 'Disabled' : 'Active'}</span>
-                      </div>
-                      <ActionButton
-                        tone="destructive"
-                        onClick={() => askConfirm({
-                          title: 'Remove this binding?',
-                          description: 'The principal will lose access granted via this role until a new binding is created.',
-                          confirmLabel: 'Remove',
-                          run: () => api.deleteAccessBinding(token, binding.binding_id)
-                            .then(() => { notifyOk('Binding removed'); return refreshAccessData() })
-                            .catch(err => { notifyError('Remove binding failed', err); setError(getMessage(err)) }),
-                        })}
-                      >
-                        Remove
-                      </ActionButton>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="No bindings yet" body="Bindings connect principals to roles and drive effective runtime access." />
-              )}
-            </SurfaceCard>
-
-            <SurfaceCard title="Memberships" subtitle="Model group membership now so Entra group sync has a clean landing zone later.">
-              <div className="form-grid form-grid-compact">
-                <label className="field">
-                  <span>Group</span>
-                  <select value={membershipParentId} onChange={event => setMembershipParentId(event.target.value)}>
-                    <option value="">Choose a group</option>
-                    {accessPrincipals.filter(principal => principal.principal_type === 'group').map(principal => (
-                      <option key={principal.principal_id} value={principal.principal_id}>
-                        {principal.display_name || principal.principal_id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Member</span>
-                  <select value={membershipChildId} onChange={event => setMembershipChildId(event.target.value)}>
-                    <option value="">Choose a member</option>
-                    {accessPrincipals.filter(principal => principal.principal_id !== membershipParentId).map(principal => (
-                      <option key={principal.principal_id} value={principal.principal_id}>
-                        {principal.display_name || principal.email_normalized || principal.principal_id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <ActionBar>
-                <ActionButton tone="secondary" onClick={() => void handleCreateMembership()}>Add Membership</ActionButton>
-              </ActionBar>
-              {accessMemberships.length > 0 ? (
-                <div className="timeline-list">
-                  {accessMemberships.map(membership => (
-                    <article key={membership.membership_id} className="timeline-item">
-                      <div className="timeline-dot" aria-hidden="true" />
-                      <div>
-                        <strong>{accessPrincipals.find(principal => principal.principal_id === membership.parent_principal_id)?.display_name || membership.parent_principal_id}</strong>
-                        <p>{accessPrincipals.find(principal => principal.principal_id === membership.child_principal_id)?.display_name || membership.child_principal_id}</p>
-                        <span>{formatTimestamp(membership.created_at)}</span>
-                      </div>
-                      <ActionButton
-                        tone="destructive"
-                        onClick={() => askConfirm({
-                          title: 'Remove this membership?',
-                          description: 'Detaches the member from the group. Inherited access will be revoked.',
-                          confirmLabel: 'Remove',
-                          run: () => api.deleteAccessMembership(token, membership.membership_id)
-                            .then(() => { notifyOk('Membership removed'); return refreshAccessData() })
-                            .catch(err => { notifyError('Remove membership failed', err); setError(getMessage(err)) }),
-                        })}
-                      >
-                        Remove
-                      </ActionButton>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState title="No memberships yet" body="Use memberships to assign users into placeholder groups now and future synced groups later." />
-              )}
-            </SurfaceCard>
-          </div>
-
-          <div className="card-grid">
-            <SurfaceCard title="Permissions" subtitle="Grant `use` or `manage` at the role level, with exact ids or `*` for a wildcard.">
-              <div className="form-grid form-grid-compact">
-                <label className="field">
-                  <span>Role</span>
-                  <select value={permissionRoleId} onChange={event => setPermissionRoleId(event.target.value)}>
-                    <option value="">Choose a role</option>
-                    {accessRoles.map(role => <option key={role.role_id} value={role.role_id}>{role.name}</option>)}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Resource Type</span>
-                  <select value={permissionResourceType} onChange={event => setPermissionResourceType(event.target.value as AccessResourceType)}>
-                    <option value="collection">Collection</option>
-                    <option value="graph">Graph</option>
-                    <option value="tool">Tool</option>
-                    <option value="skill_family">Skill Family</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>
-                    Action{' '}
-                    <Tooltip content="Use: can invoke the resource (run pipeline, query collection). Manage: can modify or delete the resource and grant others access.">
-                      <span className="help-cue" aria-label="Action help">?</span>
-                    </Tooltip>
-                  </span>
-                  <select value={permissionAction} onChange={event => setPermissionAction(event.target.value as 'use' | 'manage')}>
-                    <option value="use">Use</option>
-                    <option value="manage">Manage</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Resource Selector</span>
-                  <select value={permissionSelector} onChange={event => setPermissionSelector(event.target.value)}>
-                    <option value="">*</option>
-                    {permissionResourceType === 'collection' && collections.map(collection => (
-                      <option key={collection.collection_id} value={collection.collection_id}>{collection.collection_id}</option>
-                    ))}
-                    {permissionResourceType === 'graph' && graphs.map(graph => (
-                      <option key={graph.graph_id} value={graph.graph_id}>{graph.display_name || graph.graph_id}</option>
-                    ))}
-                    {permissionResourceType === 'tool' && toolCatalog.map(tool => (
-                      <option key={asString(tool.name)} value={asString(tool.name)}>{asString(tool.name)}</option>
-                    ))}
-                    {permissionResourceType === 'skill_family' && skills.map(skill => {
-                      const familyId = asString(skill.version_parent || skill.skill_id)
-                      return <option key={`${familyId}-${asString(skill.skill_id)}`} value={familyId}>{asString(skill.name, familyId)}</option>
-                    })}
-                  </select>
-                </label>
-              </div>
-              <ActionBar>
-                <ActionButton tone="secondary" onClick={() => void handleCreatePermission()}>Add Permission</ActionButton>
-              </ActionBar>
-              <DataTable<AccessRolePermission>
-                ariaLabel="Permissions"
-                rows={accessPermissions}
-                rowKey={permission => permission.permission_id}
+              <ResourceSearch value={accessUserSearch} onChange={setAccessUserSearch} placeholder="Search users" />
+              <DataTable<AccessPrincipal>
+                ariaLabel="Access users"
+                rows={accessUsers}
+                rowKey={principal => principal.principal_id}
                 columns={[
                   {
-                    key: 'role',
-                    header: 'Role',
+                    key: 'user',
+                    header: 'User',
                     sortable: true,
-                    accessor: permission => accessRoles.find(role => role.role_id === permission.role_id)?.name || permission.role_id,
-                    render: permission => (
-                      <strong>{accessRoles.find(role => role.role_id === permission.role_id)?.name || permission.role_id}</strong>
+                    accessor: principal => principalLabel(principal),
+                    render: principal => (
+                      <div>
+                        <strong>{principalLabel(principal)}</strong>
+                        <p>{principal.email_normalized || principal.principal_id}</p>
+                      </div>
                     ),
                   },
                   {
-                    key: 'resource_type',
-                    header: 'Resource',
+                    key: 'status',
+                    header: 'System Status',
                     sortable: true,
-                    accessor: permission => accessResourceLabel(permission.resource_type),
-                    render: permission => accessResourceLabel(permission.resource_type),
+                    accessor: principal => principalSystemRole(principal),
+                    render: principal => <StatusBadge tone={principalSystemRole(principal) === 'pending' ? 'warning' : principalSystemRole(principal) === 'admin' ? 'accent' : 'neutral'}>{principalSystemRole(principal)}</StatusBadge>,
                   },
                   {
-                    key: 'action',
-                    header: 'Action',
-                    sortable: true,
-                    accessor: permission => permission.action,
-                    render: permission => (
-                      <StatusBadge tone={permission.action === 'manage' ? 'accent' : 'neutral'}>
-                        {permission.action}
-                      </StatusBadge>
-                    ),
+                    key: 'groups',
+                    header: 'Groups',
+                    render: principal => shortList(accessMemberships
+                      .filter(membership => membership.child_principal_id === principal.principal_id)
+                      .map(membership => principalLabel(accessPrincipalById.get(membership.parent_principal_id)))),
                   },
                   {
-                    key: 'selector',
-                    header: 'Selector',
-                    sortable: true,
-                    accessor: permission => permission.resource_selector,
-                    render: permission => <code>{permission.resource_selector || '*'}</code>,
+                    key: 'active',
+                    header: 'Active',
+                    render: principal => <StatusBadge tone={principal.active ? 'ok' : 'warning'}>{principal.active ? 'Active' : 'Pending'}</StatusBadge>,
                   },
                 ]}
-                rowActions={permission => [
+                emptyState={<EmptyState title="No users" body="Create a user with the Manage User wizard." />}
+              />
+            </SurfaceCard>
+          )}
+
+          {accessTab === 'groups' && (
+            <SurfaceCard title="Groups" subtitle="Groups are the preferred place to attach roles and resource grants. Direct user grants should stay rare.">
+              <ActionBar>
+                <ActionButton tone="primary" onClick={() => setAccessWizardDefaults('group')}>Create Group</ActionButton>
+                <ActionButton tone="secondary" onClick={() => setAccessWizardDefaults('setup')}>Access Setup Wizard</ActionButton>
+              </ActionBar>
+              <ResourceSearch value={accessGroupSearch} onChange={setAccessGroupSearch} placeholder="Search groups" />
+              <DataTable<AccessPrincipal>
+                ariaLabel="Access groups"
+                rows={accessGroups}
+                rowKey={principal => principal.principal_id}
+                columns={[
                   {
-                    label: 'Copy permission ID',
-                    onSelect: () => {
-                      void navigator.clipboard?.writeText(permission.permission_id)
-                      notifyOk('Permission ID copied')
+                    key: 'group',
+                    header: 'Group',
+                    sortable: true,
+                    accessor: principal => principalLabel(principal),
+                    render: principal => (
+                      <div>
+                        <strong>{principalLabel(principal)}</strong>
+                        <p>{groupPurposeLabel(groupPurpose(principal))}</p>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'members',
+                    header: 'Members',
+                    render: principal => formatWholeNumber(accessMembershipsByGroup.get(principal.principal_id)?.length ?? 0),
+                  },
+                  {
+                    key: 'roles',
+                    header: 'Bound Roles',
+                    render: principal => shortList(accessBindings
+                      .filter(binding => binding.principal_id === principal.principal_id && !binding.disabled)
+                      .map(binding => accessRoleById.get(binding.role_id)?.name || binding.role_id)),
+                  },
+                  {
+                    key: 'purpose',
+                    header: 'Purpose',
+                    render: principal => <StatusBadge tone={groupPurpose(principal) === 'admin' ? 'accent' : groupPurpose(principal) === 'team' ? 'neutral' : 'ok'}>{groupPurposeLabel(groupPurpose(principal))}</StatusBadge>,
+                  },
+                ]}
+                emptyState={<EmptyState title="No groups" body="Create a permission group before assigning resource access." />}
+              />
+            </SurfaceCard>
+          )}
+
+          {accessTab === 'roles' && (
+            <div className="content-stack">
+              <div className="card-grid">
+                {ACCESS_PRESETS.filter(preset => preset.id !== 'custom').map(preset => (
+                  <SurfaceCard key={preset.id} title={preset.label} subtitle={preset.description}>
+                    <div className="badge-cluster">
+                      <StatusBadge tone="neutral">{accessResourceLabel(preset.resourceType)}</StatusBadge>
+                      {preset.actions.map(action => <StatusBadge key={action} tone={action === 'manage' ? 'accent' : 'neutral'}>{action}</StatusBadge>)}
+                    </div>
+                    <ActionBar>
+                      <ActionButton
+                        tone="secondary"
+                        onClick={() => {
+                          setSetupPresetId(preset.id)
+                          setSetupResourceType(preset.resourceType)
+                          setSetupActions(preset.actions)
+                          setAccessWizardDefaults('setup')
+                        }}
+                      >
+                        Use Preset
+                      </ActionButton>
+                    </ActionBar>
+                  </SurfaceCard>
+                ))}
+              </div>
+              <SurfaceCard title="Roles" subtitle="Reusable permission bundles still exist underneath the friendly group and grant workflows.">
+                <div className="form-grid form-grid-compact">
+                  <label className="field">
+                    <span>Role Name</span>
+                    <input value={roleDraftName} onChange={event => setRoleDraftName(event.target.value)} placeholder="finance-analyst" />
+                  </label>
+                  <label className="field">
+                    <span>Description</span>
+                    <input value={roleDraftDescription} onChange={event => setRoleDraftDescription(event.target.value)} placeholder="Access to finance KBs and graph skills" />
+                  </label>
+                </div>
+                <ActionBar>
+                  <ActionButton tone="secondary" onClick={() => void handleCreateRole()}>Save Role</ActionButton>
+                </ActionBar>
+                <DataTable<AccessRole>
+                  ariaLabel="Access roles"
+                  rows={accessRoles}
+                  rowKey={role => role.role_id}
+                  columns={[
+                    { key: 'name', header: 'Role', sortable: true, accessor: role => role.name, render: role => <strong>{role.name}</strong> },
+                    { key: 'description', header: 'Description', render: role => role.description || 'No description' },
+                    { key: 'permissions', header: 'Permissions', render: role => formatWholeNumber(accessPermissions.filter(permission => permission.role_id === role.role_id).length) },
+                    { key: 'bindings', header: 'Bindings', render: role => formatWholeNumber(accessBindings.filter(binding => binding.role_id === role.role_id && !binding.disabled).length) },
+                  ]}
+                  rowActions={role => [
+                    {
+                      label: 'Delete role',
+                      tone: 'danger',
+                      onSelect: () => askConfirm({
+                        title: 'Delete this role?',
+                        description: `Remove "${role.name}". Existing bindings using this role will also be removed.`,
+                        confirmLabel: 'Delete',
+                        run: () => api.deleteAccessRole(token, role.role_id)
+                          .then(() => { notifyOk('Role deleted', role.name); return refreshAccessData() })
+                          .catch(err => { notifyError('Delete role failed', err); setError(getMessage(err)) }),
+                      }),
                     },
-                  },
-                  {
-                    label: 'Remove permission',
-                    tone: 'danger',
-                    onSelect: () => askConfirm({
-                      title: 'Remove this permission?',
-                      description: 'The role will lose this grant. Effective access for bound principals will narrow.',
-                      confirmLabel: 'Remove',
-                      run: () => api.deleteAccessPermission(token, permission.permission_id)
-                        .then(() => { notifyOk('Permission removed'); return refreshAccessData() })
-                        .catch(err => { notifyError('Remove permission failed', err); setError(getMessage(err)) }),
-                    }),
-                  },
-                ]}
-                emptyState={<EmptyState title="No permissions yet" body="Permissions define what each role can use or manage in the runtime." />}
-              />
-            </SurfaceCard>
+                  ]}
+                  emptyState={<EmptyState title="No roles yet" body="Create a role or use a preset from the cards above." />}
+                />
+              </SurfaceCard>
+            </div>
+          )}
 
-            <SurfaceCard
-              title="Access Matrix"
-              subtitle="Who has access to what, at a glance. Click a cell for the source of the grant."
-              className="rbac-matrix-card"
-            >
-              <RbacMatrix
-                principals={accessPrincipals}
-                roles={accessRoles}
-                bindings={accessBindings}
-                permissions={accessPermissions}
-              />
-            </SurfaceCard>
+          {accessTab === 'grants' && (
+            <div className="content-stack">
+              <SurfaceCard title="Resource Grants" subtitle="Resource-centric grants read like normalized ACLs, then write through existing roles and bindings.">
+                <ActionBar>
+                  <ActionButton tone="primary" onClick={() => setAccessWizardDefaults('grant')}>Grant Resource Access</ActionButton>
+                </ActionBar>
+                <ResourceSearch value={accessGrantSearch} onChange={setAccessGrantSearch} placeholder="Search grants" />
+                <DataTable<(typeof accessGrantRows)[number]>
+                  ariaLabel="Resource grants"
+                  rows={accessGrantRows}
+                  rowKey={row => row.key}
+                  columns={[
+                    { key: 'resource', header: 'Resource', sortable: true, accessor: row => row.resourceLabel, render: row => <strong>{row.resourceLabel}</strong> },
+                    { key: 'selector', header: 'Selector', sortable: true, accessor: row => row.selectorLabel, render: row => <code>{row.selectorLabel}</code> },
+                    { key: 'action', header: 'Action', sortable: true, accessor: row => row.action, render: row => <StatusBadge tone={row.action === 'manage' ? 'accent' : row.action === 'approve' ? 'warning' : 'neutral'}>{row.action}</StatusBadge> },
+                    { key: 'principals', header: 'Who', render: row => row.principalNames.length > 0 ? shortList(row.principalNames) : 'No active bindings' },
+                    { key: 'role', header: 'Via Role', render: row => row.roleName },
+                  ]}
+                  rowActions={row => [
+                    {
+                      label: 'Remove permission',
+                      tone: 'danger',
+                      onSelect: () => askConfirm({
+                        title: 'Remove this permission?',
+                        description: 'The role will lose this grant. Effective access for bound principals will narrow.',
+                        confirmLabel: 'Remove',
+                        run: () => api.deleteAccessPermission(token, row.key)
+                          .then(() => { notifyOk('Permission removed'); return refreshAccessData() })
+                          .catch(err => { notifyError('Remove permission failed', err); setError(getMessage(err)) }),
+                      }),
+                    },
+                  ]}
+                  emptyState={<EmptyState title="No grants" body="Use the Grant Resource Access wizard to add a resource-centric grant." />}
+                />
+              </SurfaceCard>
 
-            <SurfaceCard title="Effective Access" subtitle="Preview the resolved principal graph and effective grants for any email before testing in OpenWebUI.">
+              <SurfaceCard title="Manual Permission Entry" subtitle="Advanced escape hatch for exact role, resource, action, and selector writes.">
+                <div className="form-grid form-grid-compact">
+                  <label className="field">
+                    <span>Role</span>
+                    <select value={permissionRoleId} onChange={event => setPermissionRoleId(event.target.value)}>
+                      <option value="">Choose a role</option>
+                      {accessRoles.map(role => <option key={role.role_id} value={role.role_id}>{role.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Resource Type</span>
+                    <select value={permissionResourceType} onChange={event => setPermissionResourceType(event.target.value as AccessResourceType)}>
+                      {ACCESS_RESOURCE_TYPES.map(resourceType => (
+                        <option key={resourceType.key} value={resourceType.key}>{resourceType.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Action</span>
+                    <select value={permissionAction} onChange={event => setPermissionAction(event.target.value as AccessAction)}>
+                      {ACCESS_ACTIONS.map(action => <option key={action.key} value={action.key}>{action.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Resource Selector</span>
+                    <select value={permissionSelector} onChange={event => setPermissionSelector(event.target.value)}>
+                      {accessResourceOptions[permissionResourceType].map(option => (
+                        <option key={option.id} value={option.id === '*' ? '' : option.id}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <ActionBar>
+                  <ActionButton tone="secondary" onClick={() => void handleCreatePermission()}>Add Permission</ActionButton>
+                </ActionBar>
+              </SurfaceCard>
+            </div>
+          )}
+
+          {accessTab === 'effective' && (
+            <SurfaceCard title="Effective Access" subtitle="Preview the resolved principal graph and explain the grants before showing raw JSON.">
               <label className="field">
                 <span>User Email</span>
                 <input value={accessPreviewEmail} onChange={event => setAccessPreviewEmail(event.target.value)} placeholder="alex@example.com" />
@@ -6653,7 +7633,7 @@ export default function App() {
                 <ActionButton tone="primary" onClick={() => void handleLoadEffectiveAccess()}>Preview Access</ActionButton>
               </ActionBar>
               {effectiveAccess ? (
-                <>
+                <div className="field-stack">
                   <div className="summary-list">
                     <div className="summary-row">
                       <span>Preview Email</span>
@@ -6664,15 +7644,456 @@ export default function App() {
                       <strong>{boolLabel(Boolean(asRecord(effectiveAccess.access)?.authz_enabled), 'Yes', 'No')}</strong>
                     </div>
                   </div>
+                  <div className="card-grid">
+                    {effectiveAccessRows.map(row => (
+                      <div key={row.key} className="preview-card">
+                        <div className="tool-card-head">
+                          <strong>{row.label}</strong>
+                          <StatusBadge tone={row.allowed.length > 0 ? 'ok' : 'warning'}>{row.allowed.length > 0 ? 'Allowed' : 'No Grant'}</StatusBadge>
+                        </div>
+                        <p>{row.allowed.length > 0 ? shortList(row.allowed.slice(0, 6)) : 'Blocked / No Grant'}</p>
+                        <Popover
+                          ariaLabel={`${row.label} why`}
+                          trigger={({ toggle, ref }) => (
+                            <button type="button" ref={el => ref(el)} onClick={toggle} className="icon-btn icon-btn-ghost">Why?</button>
+                          )}
+                        >
+                          <div className="field-stack">
+                            <strong>{row.label}</strong>
+                            {row.why.length > 0 ? row.why.slice(0, 8).map(reason => <p key={reason}>{reason}</p>) : <p>No matching role permission was found in the local grant table.</p>}
+                          </div>
+                        </Popover>
+                      </div>
+                    ))}
+                  </div>
                   <JsonInspector label="Effective access snapshot" value={effectiveAccess.access} />
-                </>
+                </div>
               ) : (
                 <EmptyState title="No preview yet" body="Choose a user email to inspect the exact access snapshot the runtime will resolve." />
               )}
             </SurfaceCard>
-          </div>
+          )}
+
+          {accessTab === 'advanced' && (
+            <div className="content-stack">
+              <SurfaceCard
+                title="Access Matrix"
+                subtitle="Advanced comparison view. Click a cell for the source of a grant."
+                className="rbac-matrix-card"
+              >
+                <RbacMatrix
+                  principals={accessPrincipals}
+                  roles={accessRoles}
+                  bindings={accessBindings}
+                  permissions={accessPermissions}
+                />
+              </SurfaceCard>
+              <div className="card-grid">
+                <SurfaceCard title="Bindings" subtitle="Role attachments to users and groups.">
+                  <DataTable<AccessRoleBinding>
+                    ariaLabel="Access bindings"
+                    rows={accessBindings}
+                    rowKey={binding => binding.binding_id}
+                    columns={[
+                      { key: 'role', header: 'Role', render: binding => accessRoleById.get(binding.role_id)?.name || binding.role_id },
+                      { key: 'principal', header: 'Principal', render: binding => principalLabel(accessPrincipalById.get(binding.principal_id)) },
+                      { key: 'status', header: 'Status', render: binding => <StatusBadge tone={binding.disabled ? 'warning' : 'ok'}>{binding.disabled ? 'Disabled' : 'Active'}</StatusBadge> },
+                    ]}
+                    rowActions={binding => [
+                      {
+                        label: 'Remove binding',
+                        tone: 'danger',
+                        onSelect: () => askConfirm({
+                          title: 'Remove this binding?',
+                          description: 'The principal will lose access granted via this role until a new binding is created.',
+                          confirmLabel: 'Remove',
+                          run: () => api.deleteAccessBinding(token, binding.binding_id)
+                            .then(() => { notifyOk('Binding removed'); return refreshAccessData() })
+                            .catch(err => { notifyError('Remove binding failed', err); setError(getMessage(err)) }),
+                        }),
+                      },
+                    ]}
+                    emptyState={<EmptyState title="No bindings yet" body="Bindings connect principals to roles and drive effective runtime access." />}
+                  />
+                </SurfaceCard>
+                <SurfaceCard title="Memberships" subtitle="Group membership edges.">
+                  <DataTable<AccessMembership>
+                    ariaLabel="Access memberships"
+                    rows={accessMemberships}
+                    rowKey={membership => membership.membership_id}
+                    columns={[
+                      { key: 'group', header: 'Group', render: membership => principalLabel(accessPrincipalById.get(membership.parent_principal_id)) },
+                      { key: 'member', header: 'Member', render: membership => principalLabel(accessPrincipalById.get(membership.child_principal_id)) },
+                      { key: 'created', header: 'Created', render: membership => formatTimestamp(membership.created_at) },
+                    ]}
+                    rowActions={membership => [
+                      {
+                        label: 'Remove membership',
+                        tone: 'danger',
+                        onSelect: () => askConfirm({
+                          title: 'Remove this membership?',
+                          description: 'Detaches the member from the group. Inherited access will be revoked.',
+                          confirmLabel: 'Remove',
+                          run: () => api.deleteAccessMembership(token, membership.membership_id)
+                            .then(() => { notifyOk('Membership removed'); return refreshAccessData() })
+                            .catch(err => { notifyError('Remove membership failed', err); setError(getMessage(err)) }),
+                        }),
+                      },
+                    ]}
+                    emptyState={<EmptyState title="No memberships yet" body="Use groups to assign users into policy bundles." />}
+                  />
+                </SurfaceCard>
+              </div>
+            </div>
+          )}
         </div>
       )}
+
+      <Dialog
+        open={accessWizard !== null}
+        onClose={() => setAccessWizard(null)}
+        title={
+          accessWizard === 'setup' ? 'Access Setup Wizard'
+            : accessWizard === 'grant' ? 'Grant Resource Access'
+              : accessWizard === 'user' ? 'Manage User'
+                : 'Create Group'
+        }
+        description="Guided RBAC changes use the existing principals, roles, memberships, bindings, and permissions APIs."
+        size="lg"
+        footer={(() => {
+          const steps = accessWizardSteps()
+          const index = Math.max(0, steps.indexOf(accessWizardStep))
+          const isLast = steps.length === 0 || index === steps.length - 1
+          return (
+            <>
+              <ActionButton
+                tone="ghost"
+                disabled={index <= 0}
+                onClick={() => setAccessWizardStep(steps[Math.max(0, index - 1)] ?? '')}
+              >
+                Back
+              </ActionButton>
+              {isLast ? (
+                <ActionButton tone="primary" onClick={() => void handleFinishAccessWizard()}>
+                  Apply
+                </ActionButton>
+              ) : (
+                <ActionButton
+                  tone="primary"
+                  onClick={() => setAccessWizardStep(steps[Math.min(steps.length - 1, index + 1)] ?? '')}
+                >
+                  Next
+                </ActionButton>
+              )}
+            </>
+          )
+        })()}
+      >
+        <div className="wizard-shell">
+          <div className="stage-list">
+            {accessWizardSteps().map(step => (
+              <button
+                key={step}
+                type="button"
+                className={`stage-chip ${accessWizardStep === step ? 'stage-chip-active' : 'stage-chip-pending'}`}
+                onClick={() => setAccessWizardStep(step)}
+              >
+                {humanizeKey(step)}
+              </button>
+            ))}
+          </div>
+
+          {accessWizard === 'setup' && accessWizardStep === 'group' && (
+            <div className="field-stack">
+              <SegmentedControl<'existing' | 'create'>
+                ariaLabel="Setup group mode"
+                value={setupGroupMode}
+                onChange={setSetupGroupMode}
+                options={[
+                  { value: 'existing', label: 'Existing Group' },
+                  { value: 'create', label: 'Create Group' },
+                ]}
+              />
+              {setupGroupMode === 'existing' ? (
+                <label className="field">
+                  <span>Group</span>
+                  <select value={setupGroupId} onChange={event => setSetupGroupId(event.target.value)}>
+                    <option value="">Choose a group</option>
+                    {accessGroups.map(group => <option key={group.principal_id} value={group.principal_id}>{principalLabel(group)}</option>)}
+                  </select>
+                </label>
+              ) : (
+                <>
+                  <label className="field">
+                    <span>Group Name</span>
+                    <input value={setupGroupName} onChange={event => setSetupGroupName(event.target.value)} placeholder="Finance Analysts" />
+                  </label>
+                  <SegmentedControl<AccessGroupPurpose>
+                    ariaLabel="Setup group purpose"
+                    value={setupGroupPurpose}
+                    onChange={setSetupGroupPurpose}
+                    options={ACCESS_GROUP_PURPOSES.map(purpose => ({ value: purpose.key, label: purpose.label }))}
+                  />
+                </>
+              )}
+            </div>
+          )}
+
+          {accessWizard === 'setup' && accessWizardStep === 'preset' && (
+            <div className="checkbox-list">
+              {ACCESS_PRESETS.map(preset => (
+                <label key={preset.id} className={setupPresetId === preset.id ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                  <input
+                    type="radio"
+                    name="setup-preset"
+                    checked={setupPresetId === preset.id}
+                    onChange={() => {
+                      setSetupPresetId(preset.id)
+                      setSetupResourceType(preset.resourceType)
+                      setSetupActions(preset.actions)
+                    }}
+                  />
+                  <span className="checkbox-copy">
+                    <strong>{preset.label}</strong>
+                    <span>{preset.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          {accessWizard === 'setup' && accessWizardStep === 'members' && (
+            <div className="checkbox-list">
+              {accessPrincipals.filter(principal => principal.principal_type === 'user').map(user => (
+                <label key={user.principal_id} className={setupMemberIds.includes(user.principal_id) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                  <input type="checkbox" checked={setupMemberIds.includes(user.principal_id)} onChange={() => toggleSetupMember(user.principal_id)} />
+                  <span className="checkbox-copy">
+                    <strong>{principalLabel(user)}</strong>
+                    <span>{user.email_normalized}</span>
+                  </span>
+                </label>
+              ))}
+              {accessUsers.length === 0 && <EmptyState title="No users yet" body="You can apply the group and add members later from Manage User." />}
+            </div>
+          )}
+
+          {accessWizard === 'setup' && accessWizardStep === 'resources' && (
+            <div className="field-stack">
+              <label className="field">
+                <span>Resource Type</span>
+                <select value={setupResourceType} onChange={event => setSetupResourceType(event.target.value as AccessResourceType)}>
+                  {ACCESS_RESOURCE_TYPES.map(resourceType => <option key={resourceType.key} value={resourceType.key}>{resourceType.label}</option>)}
+                </select>
+              </label>
+              <div className="checkbox-list">
+                {accessResourceOptions[setupResourceType].map(option => (
+                  <label key={option.id} className={setupResourceSelectors.includes(option.id) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                    <input type="checkbox" checked={setupResourceSelectors.includes(option.id)} onChange={() => toggleSetupSelector(option.id)} />
+                    <span className="checkbox-copy">
+                      <strong>{option.label}</strong>
+                      <span>{option.description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <span className="field-label">Actions</span>
+              <div className="checkbox-list">
+                {ACCESS_ACTIONS.map(action => (
+                  <label key={action.key} className={setupActions.includes(action.key) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                    <input type="checkbox" checked={setupActions.includes(action.key)} onChange={() => toggleSetupAction(action.key)} />
+                    <span className="checkbox-copy">
+                      <strong>{action.label}</strong>
+                      <span>{action.key === 'use' ? 'Invoke or query the resource' : action.key === 'manage' ? 'Modify settings or grants' : action.key === 'approve' ? 'Approve workflow requests' : 'Delete resource state'}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {accessWizard === 'setup' && accessWizardStep === 'preview' && (
+            <div className="field-stack">
+              <EmptyState title="Preview Current Access" body="Preview a selected member before applying changes, then compare again after the setup is saved." />
+              <ActionBar>
+                <ActionButton tone="secondary" onClick={() => void handleAccessWizardPreview()} disabled={setupMemberIds.length === 0}>Preview Selected User</ActionButton>
+              </ActionBar>
+              {accessWizardPreview && <JsonInspector label={`Current access for ${accessWizardPreview.email}`} value={accessWizardPreview.access} />}
+            </div>
+          )}
+
+          {accessWizard === 'setup' && accessWizardStep === 'review' && (
+            <div className="summary-list">
+              <div className="summary-row"><span>Group</span><strong>{setupGroupMode === 'create' ? setupGroupName || 'New group' : principalLabel(accessPrincipalById.get(setupGroupId))}</strong></div>
+              <div className="summary-row"><span>Preset</span><strong>{ACCESS_PRESETS.find(preset => preset.id === setupPresetId)?.label}</strong></div>
+              <div className="summary-row"><span>Members</span><strong>{formatWholeNumber(setupMemberIds.length)}</strong></div>
+              <div className="summary-row"><span>Resource</span><strong>{accessResourceLabel(setupResourceType)} / {formatWholeNumber(normalizedAccessSelectors(setupResourceSelectors).length)} selector(s)</strong></div>
+              <div className="summary-row"><span>Actions</span><strong>{shortList(setupActions)}</strong></div>
+            </div>
+          )}
+
+          {accessWizard === 'grant' && accessWizardStep === 'resource' && (
+            <div className="field-stack">
+              <label className="field">
+                <span>Resource Type</span>
+                <select value={grantResourceType} onChange={event => setGrantResourceType(event.target.value as AccessResourceType)}>
+                  {ACCESS_RESOURCE_TYPES.map(resourceType => <option key={resourceType.key} value={resourceType.key}>{resourceType.label}</option>)}
+                </select>
+              </label>
+              <div className="checkbox-list">
+                {accessResourceOptions[grantResourceType].map(option => (
+                  <label key={option.id} className={grantResourceSelectors.includes(option.id) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                    <input type="checkbox" checked={grantResourceSelectors.includes(option.id)} onChange={() => toggleGrantSelector(option.id)} />
+                    <span className="checkbox-copy">
+                      <strong>{option.label}</strong>
+                      <span>{option.description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {accessWizard === 'grant' && accessWizardStep === 'principals' && (
+            <div className="checkbox-list">
+              {accessPrincipals.map(principal => (
+                <label key={principal.principal_id} className={grantPrincipalIds.includes(principal.principal_id) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                  <input type="checkbox" checked={grantPrincipalIds.includes(principal.principal_id)} onChange={() => toggleGrantPrincipal(principal.principal_id)} />
+                  <span className="checkbox-copy">
+                    <strong>{principalLabel(principal)}</strong>
+                    <span>{principal.principal_type === 'group' ? groupPurposeLabel(groupPurpose(principal)) : principal.email_normalized}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          {accessWizard === 'grant' && accessWizardStep === 'actions' && (
+            <div className="checkbox-list">
+              {ACCESS_ACTIONS.map(action => (
+                <label key={action.key} className={grantActions.includes(action.key) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                  <input type="checkbox" checked={grantActions.includes(action.key)} onChange={() => toggleGrantAction(action.key)} />
+                  <span className="checkbox-copy">
+                    <strong>{action.label}</strong>
+                    <span>{action.key === 'use' ? 'Invoke or query the resource' : action.key === 'manage' ? 'Modify settings or grants' : action.key === 'approve' ? 'Approve workflow requests' : 'Delete resource state'}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          {accessWizard === 'grant' && accessWizardStep === 'review' && (
+            <div className="summary-list">
+              <div className="summary-row"><span>Resource Type</span><strong>{accessResourceLabel(grantResourceType)}</strong></div>
+              <div className="summary-row"><span>Selectors</span><strong>{formatWholeNumber(normalizedAccessSelectors(grantResourceSelectors).length)}</strong></div>
+              <div className="summary-row"><span>Principals</span><strong>{formatWholeNumber(grantPrincipalIds.length)}</strong></div>
+              <div className="summary-row"><span>Actions</span><strong>{shortList(grantActions)}</strong></div>
+            </div>
+          )}
+
+          {accessWizard === 'user' && accessWizardStep === 'profile' && (
+            <div className="field-stack">
+              <label className="field">
+                <span>User Email</span>
+                <input value={manageUserEmail} onChange={event => setManageUserEmail(event.target.value)} placeholder="alex@example.com" />
+              </label>
+              <label className="field">
+                <span>Display Name</span>
+                <input value={manageUserDisplayName} onChange={event => setManageUserDisplayName(event.target.value)} placeholder="Alex Analyst" />
+              </label>
+              <SegmentedControl<'admin' | 'user' | 'pending'>
+                ariaLabel="User system status"
+                value={manageUserSystemRole}
+                onChange={setManageUserSystemRole}
+                options={[
+                  { value: 'user', label: 'User' },
+                  { value: 'admin', label: 'Admin' },
+                  { value: 'pending', label: 'Pending' },
+                ]}
+              />
+            </div>
+          )}
+
+          {accessWizard === 'user' && accessWizardStep === 'groups' && (
+            <div className="checkbox-list">
+              {accessGroups.map(group => (
+                <label key={group.principal_id} className={manageUserGroupIds.includes(group.principal_id) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                  <input type="checkbox" checked={manageUserGroupIds.includes(group.principal_id)} onChange={() => toggleManageUserGroup(group.principal_id)} />
+                  <span className="checkbox-copy">
+                    <strong>{principalLabel(group)}</strong>
+                    <span>{groupPurposeLabel(groupPurpose(group))}</span>
+                  </span>
+                </label>
+              ))}
+              {accessGroups.length === 0 && <EmptyState title="No groups yet" body="Create a group first, or save the user without group membership." />}
+            </div>
+          )}
+
+          {accessWizard === 'user' && accessWizardStep === 'preview' && (
+            <div className="field-stack">
+              <ActionBar>
+                <ActionButton tone="secondary" onClick={() => void handleAccessWizardPreview()} disabled={!manageUserEmail.trim()}>Preview Current Access</ActionButton>
+              </ActionBar>
+              {accessWizardPreview ? <JsonInspector label={`Current access for ${accessWizardPreview.email}`} value={accessWizardPreview.access} /> : <EmptyState title="No preview yet" body="Preview the current email before saving the user or memberships." />}
+            </div>
+          )}
+
+          {accessWizard === 'user' && accessWizardStep === 'review' && (
+            <div className="summary-list">
+              <div className="summary-row"><span>User</span><strong>{manageUserDisplayName || manageUserEmail || 'New user'}</strong></div>
+              <div className="summary-row"><span>System Status</span><strong>{manageUserSystemRole}</strong></div>
+              <div className="summary-row"><span>Groups</span><strong>{formatWholeNumber(manageUserGroupIds.length)}</strong></div>
+            </div>
+          )}
+
+          {accessWizard === 'group' && accessWizardStep === 'details' && (
+            <div className="field-stack">
+              <label className="field">
+                <span>Group Name</span>
+                <input value={createGroupName} onChange={event => setCreateGroupName(event.target.value)} placeholder="Finance Analysts" />
+              </label>
+              <SegmentedControl<AccessGroupPurpose>
+                ariaLabel="Create group purpose"
+                value={createGroupPurpose}
+                onChange={setCreateGroupPurpose}
+                options={ACCESS_GROUP_PURPOSES.map(purpose => ({ value: purpose.key, label: purpose.label }))}
+              />
+            </div>
+          )}
+
+          {accessWizard === 'group' && accessWizardStep === 'role' && (
+            <label className="field">
+              <span>Optional Starting Role</span>
+              <select value={createGroupRoleId} onChange={event => setCreateGroupRoleId(event.target.value)}>
+                <option value="">No role yet</option>
+                {accessRoles.map(role => <option key={role.role_id} value={role.role_id}>{role.name}</option>)}
+              </select>
+            </label>
+          )}
+
+          {accessWizard === 'group' && accessWizardStep === 'members' && (
+            <div className="checkbox-list">
+              {accessPrincipals.filter(principal => principal.principal_type === 'user').map(user => (
+                <label key={user.principal_id} className={createGroupMemberIds.includes(user.principal_id) ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                  <input type="checkbox" checked={createGroupMemberIds.includes(user.principal_id)} onChange={() => toggleCreateGroupMember(user.principal_id)} />
+                  <span className="checkbox-copy">
+                    <strong>{principalLabel(user)}</strong>
+                    <span>{user.email_normalized}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          {accessWizard === 'group' && accessWizardStep === 'review' && (
+            <div className="summary-list">
+              <div className="summary-row"><span>Group</span><strong>{createGroupName || 'New group'}</strong></div>
+              <div className="summary-row"><span>Purpose</span><strong>{groupPurposeLabel(createGroupPurpose)}</strong></div>
+              <div className="summary-row"><span>Starting Role</span><strong>{createGroupRoleId ? accessRoleById.get(createGroupRoleId)?.name || createGroupRoleId : 'None'}</strong></div>
+              <div className="summary-row"><span>Members</span><strong>{formatWholeNumber(createGroupMemberIds.length)}</strong></div>
+            </div>
+          )}
+        </div>
+      </Dialog>
 
       {active === 'mcp' && (
         <div className="content-stack">
@@ -7073,6 +8494,436 @@ export default function App() {
           )}
         </div>
       )}
+      <Dialog
+        open={ingestionWizardOpen}
+        onClose={() => setIngestionWizardOpen(false)}
+        title="Ingestion Wizard"
+        description="Create or select a collection, choose the source workflow, and optionally prepare a GraphRAG graph from the same setup."
+        size="lg"
+        footer={(
+          <>
+            <ActionButton
+              tone="ghost"
+              onClick={() => {
+                const index = Math.max(0, INGESTION_WIZARD_STEPS.indexOf(ingestionWizardStep) - 1)
+                setIngestionWizardStep(INGESTION_WIZARD_STEPS[index])
+              }}
+              disabled={ingestionWizardStep === 'collection'}
+            >
+              Back
+            </ActionButton>
+            {ingestionWizardStep !== 'review' ? (
+              <ActionButton
+                tone="primary"
+                onClick={() => {
+                  const index = Math.min(INGESTION_WIZARD_STEPS.length - 1, INGESTION_WIZARD_STEPS.indexOf(ingestionWizardStep) + 1)
+                  setIngestionWizardStep(INGESTION_WIZARD_STEPS[index])
+                }}
+              >
+                Next
+              </ActionButton>
+            ) : (
+              <ActionButton tone="primary" onClick={() => void handleWizardFinish()}>
+                Finish
+              </ActionButton>
+            )}
+          </>
+        )}
+      >
+        <div className="wizard-shell">
+          <div className="stage-list">
+            {INGESTION_WIZARD_STEPS.map(step => (
+              <button
+                key={step}
+                type="button"
+                className={`stage-chip ${ingestionWizardStep === step ? 'stage-chip-active' : 'stage-chip-pending'}`}
+                onClick={() => setIngestionWizardStep(step)}
+              >
+                {humanizeKey(step)}
+              </button>
+            ))}
+          </div>
+
+          {ingestionWizardStep === 'collection' && (
+            <div className="field-stack">
+              <label className="field">
+                <span>Collection ID</span>
+                <input
+                  aria-label="Wizard Collection ID"
+                  value={wizardCollectionId}
+                  onChange={event => {
+                    const next = normalizeCollectionId(event.target.value)
+                    setWizardCollectionId(next)
+                    setCollectionDraft(next)
+                    setGraphCollectionId(next)
+                  }}
+                  placeholder="vendor-risk"
+                />
+              </label>
+              <div className="checkbox-list">
+                {collections.slice(0, 6).map(collection => (
+                  <label key={collection.collection_id} className={wizardCollectionId === collection.collection_id ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                    <input
+                      type="radio"
+                      name="wizard-collection"
+                      checked={wizardCollectionId === collection.collection_id}
+                      onChange={() => {
+                        setWizardCollectionId(collection.collection_id)
+                        setCollectionDraft(collection.collection_id)
+                        setGraphCollectionId(collection.collection_id)
+                      }}
+                    />
+                    <span className="checkbox-copy">
+                      <strong>{collection.collection_id}</strong>
+                      <span>{formatWholeNumber(collection.document_count)} documents, {formatWholeNumber(collection.graph_count)} graphs</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {ingestionWizardStep === 'source' && (
+            <div className="field-stack">
+              <input
+                ref={wizardFilesInputRef}
+                type="file"
+                multiple
+                hidden
+                onChange={event => {
+                  void handleCollectionFilesUpload(event.target.files)
+                  event.currentTarget.value = ''
+                }}
+              />
+              <input
+                ref={wizardFolderInputRef}
+                type="file"
+                multiple
+                hidden
+                // @ts-expect-error webkitdirectory is still the browser-supported folder picker attribute.
+                webkitdirectory="true"
+                onChange={event => {
+                  void handleCollectionFilesUpload(event.target.files)
+                  event.currentTarget.value = ''
+                }}
+              />
+              <SectionTabs
+                tabs={[
+                  { id: 'upload', label: 'Upload Files' },
+                  { id: 'local', label: 'Local Source' },
+                  { id: 'registered', label: 'Registered Source' },
+                  { id: 'sync', label: 'Sync Existing' },
+                ]}
+                active={collectionAction}
+                onChange={value => setCollectionAction(value as CollectionActionMode)}
+                ariaLabel="Wizard source mode"
+              />
+
+              {collectionAction === 'upload' && (
+                <div className="collection-action-panel collection-action-panel-compact">
+                  <div className="collection-action-copy">
+                    <strong>Upload files or a folder from this browser</strong>
+                    <p>Use this for PDFs, Office files, markdown, text, CSVs, spreadsheets, and OCR-friendly images. No path is needed here; the browser sends selected files to the backend.</p>
+                  </div>
+                  <div className="form-grid form-grid-compact">
+                    <label className="field">
+                      <span>Indexing Profile</span>
+                      <select value={metadataProfile} onChange={event => setMetadataProfile(event.target.value)}>
+                        <option value="auto">Auto</option>
+                        <option value="deterministic">Deterministic</option>
+                        <option value="basic">Basic</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </label>
+                    <label className="checkbox-card">
+                      <input
+                        type="checkbox"
+                        checked={indexPreview}
+                        onChange={event => setIndexPreview(event.target.checked)}
+                      />
+                      <span className="checkbox-copy">
+                        <strong>Preview only</strong>
+                        <span>Inspect metadata before writing documents.</span>
+                      </span>
+                    </label>
+                  </div>
+                  <ActionBar>
+                    <ActionButton tone="primary" onClick={() => wizardFilesInputRef.current?.click()}>Upload Files</ActionButton>
+                    <ActionButton tone="secondary" onClick={() => wizardFolderInputRef.current?.click()}>Upload Folder</ActionButton>
+                  </ActionBar>
+                </div>
+              )}
+
+              {collectionAction === 'local' && (
+                <div className="collection-action-panel">
+                  <div className="collection-action-copy">
+                    <strong>Index files that already exist on the API server</strong>
+                    <p>Enter absolute paths the backend process can read, one per line. These are server paths, not URLs and not necessarily paths from your browser machine.</p>
+                  </div>
+                  <SegmentedControl<KnowledgeSourceKind>
+                    ariaLabel="Wizard local source type"
+                    value={knowledgeSourceKind}
+                    onChange={setKnowledgeSourceKind}
+                    options={[
+                      { value: 'local_folder', label: 'Folder' },
+                      { value: 'local_repo', label: 'Repository' },
+                    ]}
+                  />
+                  <label className="field">
+                    <span>Server-Readable Local Paths</span>
+                    <textarea
+                      aria-label="Wizard Server-Readable Local Paths"
+                      rows={5}
+                      value={pathDraft}
+                      onChange={event => setPathDraft(event.target.value)}
+                      placeholder={'/Users/shivbalodi/Desktop/Rag_Research/source_docs\n/Users/shivbalodi/Desktop/Rag_Research/another_corpus'}
+                    />
+                  </label>
+                  <div className="collection-action-copy">
+                    <span className="field-label">Allowed Roots</span>
+                    <div className="badge-cluster">
+                      {allowedSourceRoots.length > 0 ? allowedSourceRoots.slice(0, 4).map(root => (
+                        <StatusBadge key={root} tone="neutral">{root}</StatusBadge>
+                      )) : (
+                        <StatusBadge tone="warning">No allowed roots reported</StatusBadge>
+                      )}
+                      {allowedSourceRoots.length > 4 && <StatusBadge tone="neutral">+{allowedSourceRoots.length - 4} more</StatusBadge>}
+                    </div>
+                  </div>
+                  <div className="form-grid form-grid-compact">
+                    <label className="field">
+                      <span>Include Globs</span>
+                      <textarea
+                        aria-label="Wizard Include Globs"
+                        rows={4}
+                        value={sourceIncludeGlobs}
+                        onChange={event => setSourceIncludeGlobs(event.target.value)}
+                        placeholder={'docs/**\n*.md'}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Exclude Globs</span>
+                      <textarea
+                        aria-label="Wizard Exclude Globs"
+                        rows={4}
+                        value={sourceExcludeGlobs}
+                        onChange={event => setSourceExcludeGlobs(event.target.value)}
+                        placeholder={'node_modules/**\n.git/**'}
+                      />
+                    </label>
+                  </div>
+                  <ActionBar>
+                    <ActionButton tone="secondary" onClick={() => void handleSourceScan()}>Preview Scan</ActionButton>
+                    <ActionButton tone="ghost" onClick={() => void handleRegisterSource()}>Register Source</ActionButton>
+                    <ActionButton tone="primary" onClick={() => void handleIndexLocalSource()}>Index Source</ActionButton>
+                  </ActionBar>
+                </div>
+              )}
+
+              {collectionAction === 'registered' && (
+                <div className="collection-action-panel">
+                  <div className="collection-action-copy">
+                    <strong>Refresh a saved folder or repository source</strong>
+                    <p>Registered sources remember their server-readable paths and include/exclude rules, so users can refresh changed files without retyping paths.</p>
+                  </div>
+                  {filteredRegisteredSources.length > 0 ? (
+                    <EntityList
+                      items={filteredRegisteredSources}
+                      selectedKey={visibleRegisteredSource?.source_id ?? selectedSourceId}
+                      getKey={source => source.source_id}
+                      getLabel={source => source.display_name}
+                      getDescription={source => `${source.source_kind} -> ${source.collection_id}`}
+                      getMeta={source => (
+                        <>
+                          <StatusBadge tone="neutral">{source.source_kind}</StatusBadge>
+                          <span>{source.last_scan?.summary.supported_count ?? 0} files</span>
+                        </>
+                      )}
+                      onSelect={source => {
+                        setSelectedSourceId(source.source_id)
+                        if (source.last_scan) setSourceScan(source.last_scan)
+                      }}
+                    />
+                  ) : (
+                    <EmptyState title="No registered sources" body="Register a local folder or repository first, then use this mode to preview drift or refresh it." />
+                  )}
+                  <ActionBar>
+                    <ActionButton tone="secondary" onClick={() => void handleRefreshSource(true)} disabled={!visibleRegisteredSource}>Preview Drift</ActionButton>
+                    <ActionButton tone="primary" onClick={() => void handleRefreshSource(false)} disabled={!visibleRegisteredSource}>Refresh Now</ActionButton>
+                    <ActionButton tone="ghost" onClick={() => void handleRefreshSource(false, true)} disabled={!visibleRegisteredSource}>Queue Refresh</ActionButton>
+                  </ActionBar>
+                </div>
+              )}
+
+              {collectionAction === 'sync' && (
+                <div className="collection-action-panel collection-action-panel-compact">
+                  <div className="collection-action-copy">
+                    <strong>Sync runtime-configured KB sources</strong>
+                    <p>Use this only when the collection should mirror KB source roots configured on the backend. It does not upload arbitrary files or scan a new typed path.</p>
+                  </div>
+                  <ActionButton tone="primary" onClick={() => void handleSyncCollection()}>
+                    Sync Configured Sources
+                  </ActionButton>
+                </div>
+              )}
+            </div>
+          )}
+
+          {ingestionWizardStep === 'graph' && (
+            <div className="field-stack">
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={wizardCreateGraph}
+                  onChange={event => setWizardCreateGraph(event.target.checked)}
+                />
+                <span>Create a graph draft for this collection</span>
+              </label>
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={wizardStartBuild}
+                  onChange={event => setWizardStartBuild(event.target.checked)}
+                  disabled={!wizardCreateGraph}
+                />
+                <span>Start the graph build after creating the draft</span>
+              </label>
+              <label className="field">
+                <span>Graph Intent</span>
+                <select value={graphIntent} onChange={event => setGraphIntent(event.target.value)}>
+                  <option value="general">General Knowledge</option>
+                  <option value="vendor_risk">Vendor Risk</option>
+                  <option value="requirements">Requirements</option>
+                  <option value="policy">Policy & Controls</option>
+                  <option value="research">Research Corpus</option>
+                </select>
+              </label>
+            </div>
+          )}
+
+          {ingestionWizardStep === 'tuning' && (
+            <div className="field-stack">
+              {wizardCreateGraph ? (
+                <>
+                  <label className="inline-check">
+                    <input
+                      type="checkbox"
+                      checked={wizardRunTune}
+                      onChange={event => setWizardRunTune(event.target.checked)}
+                    />
+                    <span>Run prompt tuning before the graph build</span>
+                  </label>
+                  <label className="inline-check">
+                    <input
+                      type="checkbox"
+                      checked={wizardApplyTune}
+                      onChange={event => setWizardApplyTune(event.target.checked)}
+                      disabled={!wizardRunTune || !graphTuneResult?.run_id || graphTuneSelectedPrompts.length === 0}
+                    />
+                    <span>Apply selected prompt drafts before build</span>
+                  </label>
+                  <label className="inline-check">
+                    <input
+                      type="checkbox"
+                      checked={wizardRequireTuneBeforeBuild}
+                      onChange={event => setWizardRequireTuneBeforeBuild(event.target.checked)}
+                      disabled={!wizardRunTune}
+                    />
+                    <span>Require prompt tuning to succeed before starting build</span>
+                  </label>
+                  <label className="field">
+                    <span>Research Guidance</span>
+                    <textarea
+                      aria-label="Wizard Prompt Tuning Guidance"
+                      rows={4}
+                      value={graphTuneGuidance}
+                      onChange={event => setGraphTuneGuidance(event.target.value)}
+                      placeholder="Focus extraction on policy controls, owners, exceptions, approval chains, and relationship evidence."
+                    />
+                  </label>
+                  <div className="field-stack">
+                    <span className="field-label">Prompt Targets</span>
+                    <div className="checkbox-list">
+                      {GRAPH_RESEARCH_TUNE_TARGETS.map(promptFile => {
+                        const checked = graphTuneTargets.includes(promptFile)
+                        return (
+                          <label key={promptFile} className={checked ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleGraphTuneTarget(promptFile)}
+                            />
+                            <span className="checkbox-copy">
+                              <strong>{promptFile}</strong>
+                              <span>{checked ? 'Included' : 'Skipped'}</span>
+                            </span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  <ActionBar>
+                    <ActionButton tone="primary" onClick={() => void handleWizardRunTune()} disabled={!wizardRunTune || graphTuneRunning}>
+                      {graphTuneRunning ? 'Running Research & Tune' : 'Run Research & Tune'}
+                    </ActionButton>
+                  </ActionBar>
+                  {graphTuneResult ? (
+                    <div className="preview-card">
+                      <div className="tool-card-head">
+                        <strong>Prompt tuning result</strong>
+                        <StatusBadge tone={toneForStatus(graphTuneResult.status)}>{asString(graphTuneResult.status, 'completed')}</StatusBadge>
+                      </div>
+                      <div className="summary-list">
+                        <div className="summary-row">
+                          <span>Run</span>
+                          <strong>{shortId(asString(graphTuneResult.run_id, 'run'))}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>Valid drafts selected</span>
+                          <strong>{formatWholeNumber(graphTuneSelectedPrompts.length)}</strong>
+                        </div>
+                        <div className="summary-row">
+                          <span>Prompt drafts</span>
+                          <strong>{formatWholeNumber(Object.keys(graphTuneResult.prompt_drafts ?? {}).length)}</strong>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <EmptyState title="Prompt tuning is optional" body="Enable tuning and run it here to draft GraphRAG prompt overrides before building the graph." />
+                  )}
+                </>
+              ) : (
+                <EmptyState title="Prompt tuning skipped" body="Prompt tuning requires a graph draft. Enable graph draft creation in the previous step to tune GraphRAG prompts." />
+              )}
+            </div>
+          )}
+
+          {ingestionWizardStep === 'review' && (
+            <div className="summary-list">
+              <div className="summary-row">
+                <span>Collection</span>
+                <strong>{wizardCollectionId || 'Not selected'}</strong>
+              </div>
+              <div className="summary-row">
+                <span>Source Workflow</span>
+                <strong>{humanizeKey(collectionAction)}</strong>
+              </div>
+              <div className="summary-row">
+                <span>Graph Draft</span>
+                <strong>{wizardCreateGraph ? humanizeKey(graphIntent) : 'Skipped'}</strong>
+              </div>
+              <div className="summary-row">
+                <span>Build</span>
+                <strong>{wizardStartBuild && wizardCreateGraph ? 'Start after draft creation' : 'Manual start later'}</strong>
+              </div>
+              <div className="summary-row">
+                <span>Prompt Tuning</span>
+                <strong>{wizardCreateGraph && wizardRunTune ? `${wizardApplyTune ? 'Run and apply selected drafts' : 'Run only'}` : 'Skipped'}</strong>
+              </div>
+            </div>
+          )}
+        </div>
+      </Dialog>
       <ConfirmDialog
         open={pendingConfirm !== null}
         title={pendingConfirm?.title ?? ''}

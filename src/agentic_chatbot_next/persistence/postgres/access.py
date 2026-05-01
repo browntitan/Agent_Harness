@@ -11,8 +11,18 @@ from agentic_chatbot_next.persistence.postgres.connection import get_conn
 
 VALID_PRINCIPAL_TYPES = {"user", "group"}
 VALID_PROVIDERS = {"email", "entra", "system"}
-VALID_RESOURCE_TYPES = {"collection", "graph", "tool", "skill_family"}
-VALID_ACTIONS = {"use", "manage"}
+VALID_RESOURCE_TYPES = {
+    "agent",
+    "agent_group",
+    "collection",
+    "graph",
+    "skill",
+    "skill_family",
+    "tool",
+    "tool_group",
+    "worker_request",
+}
+VALID_ACTIONS = {"use", "manage", "approve", "delete"}
 
 
 def _utc_now() -> str:

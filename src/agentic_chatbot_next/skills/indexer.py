@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
 from agentic_chatbot_next.config import Settings
 from agentic_chatbot_next.persistence.postgres.skills import SkillChunkMatch, SkillPackRecord
 from agentic_chatbot_next.persistence.postgres.skills import SkillStore
-from agentic_chatbot_next.rag.stores import KnowledgeStores
 from agentic_chatbot_next.skills.dependency_graph import build_skill_dependency_graph
 from agentic_chatbot_next.skills.pack_loader import load_skill_pack_from_file
+
+if TYPE_CHECKING:
+    from agentic_chatbot_next.rag.stores import KnowledgeStores
 
 
 @dataclass
@@ -35,11 +37,68 @@ class SkillIndexSync:
             return []
         return sorted(path for path in root.rglob("*.md") if path.is_file())
 
+    def _resolve_seeded_source_path(self, root: Path, source_path: str) -> Path | None:
+        text = str(source_path or "").strip()
+        if not text or "://" in text:
+            return None
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(root.resolve())
+        except Exception:
+            return None
+        return resolved
+
+    def _archive_removed_seeded_skill_packs(
+        self,
+        *,
+        tenant_id: str,
+        root: Path,
+        active_seeded_paths: set[Path],
+    ) -> List[Dict[str, Any]]:
+        if not root.exists():
+            return []
+        list_skill_packs = getattr(self.stores.skill_store, "list_skill_packs", None)
+        set_skill_status = getattr(self.stores.skill_store, "set_skill_status", None)
+        if not callable(list_skill_packs) or not callable(set_skill_status):
+            return []
+        try:
+            records = list_skill_packs(tenant_id=tenant_id)
+        except TypeError:
+            records = list_skill_packs()
+        archived: List[Dict[str, Any]] = []
+        for record in records:
+            if str(getattr(record, "status", "") or "").strip().lower() == "archived":
+                continue
+            source_path = str(getattr(record, "source_path", "") or "").strip()
+            seeded_path = self._resolve_seeded_source_path(root, source_path)
+            if seeded_path is None or seeded_path in active_seeded_paths or seeded_path.exists():
+                continue
+            set_skill_status(
+                str(getattr(record, "skill_id", "") or ""),
+                tenant_id=tenant_id,
+                status="archived",
+                enabled=False,
+            )
+            archived.append(
+                {
+                    "skill_id": str(getattr(record, "skill_id", "") or ""),
+                    "source_path": source_path,
+                }
+            )
+        return archived
+
     def sync(self, *, tenant_id: str) -> Dict[str, Any]:
         indexed: List[Dict[str, Any]] = []
         root = self._skill_packs_root()
+        active_seeded_paths: set[Path] = set()
         for path in self.iter_skill_files():
             pack = load_skill_pack_from_file(path, root=root)
+            seeded_path = self._resolve_seeded_source_path(root, pack.source_path)
+            if seeded_path is not None:
+                active_seeded_paths.add(seeded_path)
             self.stores.skill_store.upsert_skill_pack(
                 SkillPackRecord(
                     skill_id=pack.skill_id,
@@ -78,12 +137,19 @@ class SkillIndexSync:
                     "kind": pack.kind,
                 }
             )
+        archived = self._archive_removed_seeded_skill_packs(
+            tenant_id=tenant_id,
+            root=root,
+            active_seeded_paths=active_seeded_paths,
+        )
         records = self.stores.skill_store.list_skill_packs(tenant_id=tenant_id)
         dependency_graph = build_skill_dependency_graph(records)
         summary = dependency_graph.summary()
         return {
             "indexed": indexed,
+            "archived_removed_seeded": archived,
             "count": len(indexed),
+            "archived_removed_seeded_count": len(archived),
             "dependency_graph": summary.to_dict(),
             "valid": summary.valid,
         }
@@ -92,8 +158,12 @@ class SkillIndexSync:
         changed: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
         root = self._skill_packs_root()
+        active_seeded_paths: set[Path] = set()
         for path in self.iter_skill_files():
             pack = load_skill_pack_from_file(path, root=root)
+            seeded_path = self._resolve_seeded_source_path(root, pack.source_path)
+            if seeded_path is not None:
+                active_seeded_paths.add(seeded_path)
             existing = self.stores.skill_store.get_skill_pack(
                 pack.skill_id,
                 tenant_id=tenant_id,
@@ -139,13 +209,20 @@ class SkillIndexSync:
                     "kind": pack.kind,
                 }
             )
+        archived = self._archive_removed_seeded_skill_packs(
+            tenant_id=tenant_id,
+            root=root,
+            active_seeded_paths=active_seeded_paths,
+        )
         records = self.stores.skill_store.list_skill_packs(tenant_id=tenant_id)
         summary = build_skill_dependency_graph(records).summary()
         return {
             "changed": changed,
             "skipped": skipped,
+            "archived_removed_seeded": archived,
             "changed_count": len(changed),
             "skipped_count": len(skipped),
+            "archived_removed_seeded_count": len(archived),
             "dependency_graph": summary.to_dict(),
             "valid": summary.valid,
         }

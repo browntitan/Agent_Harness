@@ -5,8 +5,18 @@ from typing import Any, Dict, Iterable
 
 from agentic_chatbot_next.contracts.messages import utc_now_iso
 
-RESOURCE_TYPES = ("collection", "graph", "tool", "skill_family", "worker_request")
-RESOURCE_ACTIONS = ("use", "manage", "approve")
+RESOURCE_TYPES = (
+    "agent",
+    "agent_group",
+    "collection",
+    "graph",
+    "skill",
+    "skill_family",
+    "tool",
+    "tool_group",
+    "worker_request",
+)
+RESOURCE_ACTIONS = ("use", "manage", "approve", "delete")
 
 
 def normalize_user_email(value: Any) -> str:
@@ -163,7 +173,10 @@ class AuthorizationService:
             )
 
         resources: Dict[str, Dict[str, Any]] = {
-            resource_type: {"use": [], "manage": [], "use_all": False, "manage_all": False}
+            resource_type: {
+                **{action: [] for action in RESOURCE_ACTIONS},
+                **{f"{action}_all": False for action in RESOURCE_ACTIONS},
+            }
             for resource_type in RESOURCE_TYPES
         }
         if not normalized_email:

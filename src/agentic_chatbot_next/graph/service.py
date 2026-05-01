@@ -138,6 +138,26 @@ _PROGRESS_RE = re.compile(
     r"(?P<label>[A-Za-z0-9_ ]+?)\s+progress:\s*(?P<current>\d+)\s*/\s*(?P<total>\d+)",
     re.IGNORECASE,
 )
+_ACTIVE_GRAPH_RUN_STATUSES = {"queued", "running"}
+_TERMINAL_GRAPH_RUN_STATUSES = {"completed", "failed", "cancelled", "canceled", "succeeded"}
+_GRAPHRAG_PROGRESS_STAGES: tuple[dict[str, Any], ...] = (
+    {"id": "prepare", "label": "Prepare Project", "workflows": ("prepare", "init", "load_input_documents")},
+    {"id": "text_units", "label": "Create Text Units", "workflows": ("create_base_text_units", "create_final_text_units")},
+    {"id": "documents", "label": "Finalize Documents", "workflows": ("create_final_documents",)},
+    {"id": "extract_graph", "label": "Extract Graph", "workflows": ("extract_graph", "extract_covariates")},
+    {"id": "communities", "label": "Build Communities", "workflows": ("create_communities",)},
+    {
+        "id": "reports",
+        "label": "Community Reports",
+        "workflows": ("create_community_reports", "create_community_reports_text", "create_final_community_reports"),
+    },
+    {
+        "id": "embeddings",
+        "label": "Generate Embeddings",
+        "workflows": ("generate_text_embeddings", "create_final_entities", "create_final_relationships"),
+    },
+    {"id": "finalize", "label": "Finalize Index", "workflows": ("finalize", "artifact_probe")},
+)
 
 _DEFAULT_EXTRACT_GRAPH_PREFLIGHT_PROMPT = """
 -Goal-
@@ -431,6 +451,144 @@ class GraphService:
         if activity is not None:
             payload["last_log_activity_at"] = activity.isoformat()
         return payload
+
+    def _workflow_stage_index(self, workflow: str) -> int:
+        normalized = str(workflow or "").strip().lower()
+        if not normalized:
+            return -1
+        for index, stage in enumerate(_GRAPHRAG_PROGRESS_STAGES):
+            aliases = [str(item).strip().lower() for item in stage.get("workflows", ())]
+            if any(normalized == alias or alias in normalized for alias in aliases if alias):
+                return index
+        return -1
+
+    def _progress_stages(
+        self,
+        *,
+        run_status: str,
+        workflow: str,
+        progress: Dict[str, Any],
+    ) -> tuple[List[Dict[str, Any]], float]:
+        normalized_status = str(run_status or "").strip().lower()
+        stage_index = self._workflow_stage_index(workflow)
+        if stage_index < 0 and normalized_status in _ACTIVE_GRAPH_RUN_STATUSES:
+            stage_index = 0
+        stage_count = max(1, len(_GRAPHRAG_PROGRESS_STAGES))
+        current_fraction = float(progress.get("percent") or 0.0) / 100.0 if progress else 0.0
+        current_fraction = min(1.0, max(0.0, current_fraction))
+
+        stages: List[Dict[str, Any]] = []
+        for index, stage in enumerate(_GRAPHRAG_PROGRESS_STAGES):
+            state = "pending"
+            if normalized_status in {"completed", "succeeded"}:
+                state = "completed"
+            elif normalized_status in {"failed", "cancelled", "canceled"}:
+                if stage_index < 0:
+                    state = "pending"
+                elif index < stage_index:
+                    state = "completed"
+                elif index == stage_index:
+                    state = "failed" if normalized_status == "failed" else "cancelled"
+            elif normalized_status in _ACTIVE_GRAPH_RUN_STATUSES:
+                if index < stage_index:
+                    state = "completed"
+                elif index == stage_index:
+                    state = "active"
+            stages.append(
+                {
+                    "id": str(stage.get("id") or ""),
+                    "label": str(stage.get("label") or ""),
+                    "state": state,
+                    "workflow": workflow if index == stage_index else "",
+                }
+            )
+
+        if normalized_status in {"completed", "succeeded"}:
+            percent = 100.0
+        elif stage_index >= 0:
+            percent = ((stage_index + current_fraction) / stage_count) * 100.0
+        else:
+            percent = 0.0
+        return stages, round(min(100.0, max(0.0, percent)), 2)
+
+    def _active_graph_run(
+        self,
+        record: GraphIndexRecord,
+    ) -> tuple[GraphIndexRecord, GraphIndexRunRecord | None, List[GraphIndexRunRecord]]:
+        effective, runs = self._reconcile_live_run_state(record)
+        for run in runs:
+            if str(run.status or "").strip().lower() in _ACTIVE_GRAPH_RUN_STATUSES:
+                return effective, run, runs
+        return effective, None, runs
+
+    def _active_graph_operation_payload(
+        self,
+        record: GraphIndexRecord,
+        run: GraphIndexRunRecord,
+        *,
+        requested_operation: str,
+        runs: Sequence[GraphIndexRunRecord] | None = None,
+    ) -> Dict[str, Any]:
+        payload = self._graph_output_payload(record, runs=runs)
+        payload.update(
+            {
+                "operation_status": "already_running",
+                "active_run": asdict(run),
+                "detail": (
+                    f"Graph '{record.graph_id}' already has an active "
+                    f"{str(run.operation or 'build').strip() or 'build'} run. "
+                    f"The requested {requested_operation} was not started."
+                ),
+                "progress": self.graph_progress(record.graph_id),
+            }
+        )
+        return payload
+
+    def graph_progress(self, graph_ref: str) -> Dict[str, Any]:
+        record = self._resolve_graph_reference(graph_ref)
+        if record is None:
+            return {"error": f"Graph '{graph_ref}' was not found."}
+        effective, runs = self._reconcile_live_run_state(record)
+        latest = runs[0] if runs else None
+        latest_metadata = dict(latest.metadata or {}) if latest is not None else {}
+        progress_state = self._graph_log_progress(effective.graph_id)
+        workflow = str(
+            latest_metadata.get("workflow")
+            or dict(effective.health or {}).get("active_workflow")
+            or progress_state.get("workflow")
+            or ""
+        )
+        progress = dict(
+            latest_metadata.get("progress")
+            or dict(effective.health or {}).get("progress")
+            or progress_state.get("progress")
+            or {}
+        )
+        run_status = str(latest.status if latest is not None else effective.status or "draft")
+        stages, percent = self._progress_stages(run_status=run_status, workflow=workflow, progress=progress)
+        logs = self._collect_graph_logs(effective.graph_id)
+        primary_log = logs[0] if logs else {}
+        active_run = latest if latest is not None and run_status.strip().lower() in _ACTIVE_GRAPH_RUN_STATUSES else None
+        return {
+            "graph_id": effective.graph_id,
+            "status": effective.status,
+            "active": active_run is not None,
+            "active_run": asdict(active_run) if active_run is not None else None,
+            "latest_run": asdict(latest) if latest is not None else None,
+            "workflow": workflow,
+            "task_progress": progress,
+            "stages": stages,
+            "percent": percent,
+            "updated_at": (
+                str(progress_state.get("last_log_activity_at") or "")
+                or str(latest_metadata.get("last_output_at") or "")
+                or str(latest_metadata.get("last_heartbeat_at") or "")
+                or effective.updated_at
+            ),
+            "logs": logs,
+            "log_tail": str(primary_log.get("preview") or ""),
+            "cursor": f"{primary_log.get('modified_at') or ''}:{primary_log.get('size_bytes') or 0}" if primary_log else "",
+        }
 
     def _read_background_state(self, path: str) -> Dict[str, Any]:
         clean_path = str(path or "").strip()
@@ -2505,7 +2663,14 @@ class GraphService:
         )
         return payload
 
-    def build_admin_graph(self, graph_ref: str, *, refresh: bool = False) -> Dict[str, Any]:
+    def build_admin_graph(
+        self,
+        graph_ref: str,
+        *,
+        refresh: bool = False,
+        force: bool = False,
+        cancel_existing: bool = False,
+    ) -> Dict[str, Any]:
         graph_store = self._index_store()
         source_store = self._source_store()
         record = self._resolve_graph_reference(graph_ref)
@@ -2513,6 +2678,15 @@ class GraphService:
             return {"error": "Graph catalog stores are unavailable."}
         if record is None:
             return {"error": f"Graph '{graph_ref}' was not found."}
+        operation = "refresh" if refresh else "build"
+        record, active_run, active_runs = self._active_graph_run(record)
+        if active_run is not None and not (force or cancel_existing):
+            return self._active_graph_operation_payload(
+                record,
+                active_run,
+                requested_operation=operation,
+                runs=active_runs,
+            )
 
         source_records = self._source_records_for_graph(record)
         resolved_docs = self._resolved_records_for_graph(record)
@@ -2563,7 +2737,6 @@ class GraphService:
             source_records=source_records,
             materialized_sources=materialized_sources,
         )
-        operation = "refresh" if refresh else "build"
         refresh_mode = "incremental_update" if use_incremental_refresh else "full_rebuild"
         prepared_record = replace(
             record,
@@ -2582,7 +2755,8 @@ class GraphService:
                 "connectivity": connectivity,
             },
         )
-        self._expire_inflight_runs(record.graph_id, replacement_operation=operation)
+        if active_run is not None:
+            self._expire_inflight_runs(record.graph_id, replacement_operation=operation)
         run_id = f"grun_{uuid.uuid4().hex[:16]}"
 
         launch_result = None
@@ -2655,8 +2829,113 @@ class GraphService:
             operation=operation,
         )
 
-    def refresh_admin_graph(self, graph_ref: str) -> Dict[str, Any]:
-        return self.build_admin_graph(graph_ref, refresh=True)
+    def refresh_admin_graph(
+        self,
+        graph_ref: str,
+        *,
+        force: bool = False,
+        cancel_existing: bool = False,
+    ) -> Dict[str, Any]:
+        return self.build_admin_graph(graph_ref, refresh=True, force=force, cancel_existing=cancel_existing)
+
+    def cancel_admin_graph_run(self, graph_ref: str, *, run_id: str = "", actor: str = "control-panel") -> Dict[str, Any]:
+        record = self._resolve_graph_reference(graph_ref)
+        run_store = self._run_store()
+        graph_store = self._index_store()
+        if record is None:
+            return {"error": f"Graph '{graph_ref}' was not found."}
+        if run_store is None:
+            return {"error": "Graph run store is unavailable."}
+        effective, _, runs = self._active_graph_run(record)
+        requested_run_id = str(run_id or "").strip()
+        target = next(
+            (
+                run
+                for run in runs
+                if str(run.status or "").strip().lower() in _ACTIVE_GRAPH_RUN_STATUSES
+                and (not requested_run_id or str(run.run_id or "") == requested_run_id)
+            ),
+            None,
+        )
+        if target is None:
+            return {
+                "graph_id": effective.graph_id,
+                "status": "not_running",
+                "detail": "No active graph build or refresh run was found.",
+                "runs": [asdict(item) for item in runs],
+            }
+        self._terminate_owned_run_process(target)
+        cancelled_at = self._now_utc().isoformat()
+        cancelled = replace(
+            target,
+            status="cancelled",
+            detail=f"{target.detail} Cancelled by {actor or 'control-panel'}.".strip(),
+            completed_at=cancelled_at,
+            metadata={
+                **dict(target.metadata or {}),
+                "cancelled_by": actor or "control-panel",
+                "cancelled_at": cancelled_at,
+            },
+        )
+        run_store.upsert_run(cancelled)
+        health = {
+            **{
+                key: value
+                for key, value in dict(effective.health or {}).items()
+                if key not in {"active_run", "active_operation", "active_workflow", "progress", "status_reason"}
+            },
+            "latest_run": asdict(cancelled),
+            "status_detail": cancelled.detail,
+        }
+        if graph_store is not None:
+            graph_store.update_index_status(effective.graph_id, self.tenant_id, status="failed", health=health)
+        refreshed = self._resolve_graph_reference(effective.graph_id) or replace(effective, status="failed", health=health)
+        return {
+            "graph_id": effective.graph_id,
+            "status": "cancelled",
+            "run": asdict(cancelled),
+            "graph": self._graph_output_payload(refreshed, runs=[cancelled, *[run for run in runs if run.run_id != cancelled.run_id]]),
+        }
+
+    def delete_admin_graph(self, graph_ref: str, *, delete_artifacts: bool = False) -> Dict[str, Any]:
+        record = self._resolve_graph_reference(graph_ref)
+        graph_store = self._index_store()
+        if graph_store is None:
+            return {"error": "Graph catalog store is unavailable."}
+        if record is None:
+            return {"error": f"Graph '{graph_ref}' was not found."}
+        effective, active_run, runs = self._active_graph_run(record)
+        if active_run is not None:
+            return {
+                "error": "Graph has an active build or refresh run. Cancel the run before deleting the graph.",
+                "graph_id": effective.graph_id,
+                "active_run": asdict(active_run),
+                "runs": [asdict(item) for item in runs],
+            }
+        root_path = Path(effective.root_path or self._graph_root(effective.graph_id))
+        artifact_deleted = False
+        artifact_error = ""
+        cleanup = graph_store.delete_index(effective.graph_id, self.tenant_id)
+        if delete_artifacts:
+            try:
+                root_resolved = root_path.resolve()
+                project_root = Path(self.settings.graphrag_projects_dir).resolve()
+                if root_resolved == project_root or project_root not in root_resolved.parents:
+                    artifact_error = f"Refusing to delete graph artifacts outside {project_root}."
+                elif root_resolved.exists():
+                    shutil.rmtree(root_resolved)
+                    artifact_deleted = True
+            except Exception as exc:
+                artifact_error = f"{type(exc).__name__}: {exc}"
+        return {
+            "deleted": bool(cleanup.get("graph_indexes", 0)),
+            "graph_id": effective.graph_id,
+            "delete_artifacts": bool(delete_artifacts),
+            "artifact_path": str(root_path),
+            "artifact_deleted": artifact_deleted,
+            "artifact_error": artifact_error,
+            "cleanup": cleanup,
+        }
 
     def update_graph_prompts(
         self,
@@ -2694,7 +2973,7 @@ class GraphService:
         record = self._resolve_graph_reference(graph_ref)
         if record is None or self._run_store() is None:
             return []
-        runs = self._prioritize_runs_for_display(self._graph_runs(record.graph_id))
+        _, runs = self._reconcile_live_run_state(record)
         return [asdict(item) for item in runs]
 
     def list_indexes(self, *, collection_id: str = "", limit: int = 100) -> List[Dict[str, Any]]:

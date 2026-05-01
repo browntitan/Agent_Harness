@@ -232,6 +232,17 @@ class GraphAdminUpsertRequest(BaseModel):
 
 class GraphLifecycleRequest(BaseModel):
     actor: str = "control-panel"
+    force: bool = False
+    cancel_existing: bool = False
+
+
+class GraphDeleteRequest(BaseModel):
+    actor: str = "control-panel"
+    delete_artifacts: bool = False
+
+
+class GraphRunCancelRequest(BaseModel):
+    actor: str = "control-panel"
 
 
 class GraphPromptUpdateRequest(BaseModel):
@@ -4312,7 +4323,12 @@ def build_graph(
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     user_id = x_user_id or runtime.settings.default_user_id
     service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
-    payload = service.build_admin_graph(graph_id, refresh=False)
+    payload = service.build_admin_graph(
+        graph_id,
+        refresh=False,
+        force=bool(request.force if request is not None else False),
+        cancel_existing=bool(request.cancel_existing if request is not None else False),
+    )
     if payload.get("error"):
         raise HTTPException(status_code=400, detail=str(payload["error"]))
     manager.get_overlay_store().append_audit_event(
@@ -4335,7 +4351,11 @@ def refresh_graph(
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     user_id = x_user_id or runtime.settings.default_user_id
     service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
-    payload = service.refresh_admin_graph(graph_id)
+    payload = service.refresh_admin_graph(
+        graph_id,
+        force=bool(request.force if request is not None else False),
+        cancel_existing=bool(request.cancel_existing if request is not None else False),
+    )
     if payload.get("error"):
         raise HTTPException(status_code=400, detail=str(payload["error"]))
     manager.get_overlay_store().append_audit_event(
@@ -4344,6 +4364,23 @@ def refresh_graph(
         details={"graph_id": graph_id, "status": payload.get("status")},
     )
     return _enrich_graph_payload(runtime, payload, owner_user_id=user_id)
+
+
+@router.get("/graphs/{graph_id}/progress")
+def get_graph_progress(
+    graph_id: str,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    payload = service.graph_progress(graph_id)
+    if payload.get("error"):
+        raise HTTPException(status_code=404, detail=str(payload["error"]))
+    return payload
 
 
 @router.get("/graphs/{graph_id}/runs")
@@ -4358,6 +4395,64 @@ def get_graph_runs(
     user_id = x_user_id or runtime.settings.default_user_id
     service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
     return {"runs": service.list_graph_runs(graph_id)}
+
+
+@router.post("/graphs/{graph_id}/runs/{run_id}/cancel")
+def cancel_graph_run(
+    graph_id: str,
+    run_id: str,
+    request: GraphRunCancelRequest | None = None,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    payload = service.cancel_admin_graph_run(
+        graph_id,
+        run_id=run_id,
+        actor=(request.actor if request is not None else "control-panel"),
+    )
+    if payload.get("error"):
+        raise HTTPException(status_code=400, detail=str(payload["error"]))
+    manager.get_overlay_store().append_audit_event(
+        action="graph_run_cancel",
+        actor=(request.actor if request is not None else "control-panel"),
+        details={"graph_id": graph_id, "run_id": run_id, "status": payload.get("status")},
+    )
+    return payload
+
+
+@router.delete("/graphs/{graph_id}")
+def delete_graph(
+    graph_id: str,
+    request: GraphDeleteRequest | None = None,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    payload = service.delete_admin_graph(
+        graph_id,
+        delete_artifacts=bool(request.delete_artifacts if request is not None else False),
+    )
+    if payload.get("error"):
+        raise HTTPException(status_code=409, detail=str(payload["error"]))
+    manager.get_overlay_store().append_audit_event(
+        action="graph_delete",
+        actor=(request.actor if request is not None else "control-panel"),
+        details={
+            "graph_id": graph_id,
+            "deleted": payload.get("deleted"),
+            "delete_artifacts": payload.get("delete_artifacts"),
+        },
+    )
+    return payload
 
 
 @router.post("/graphs/{graph_id}/research-tune")

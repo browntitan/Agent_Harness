@@ -458,11 +458,74 @@ class GraphIndexStore:
                 rows = cur.fetchall()
         return [_row_to_graph_index(dict(row)) for row in rows]
 
-    def delete_index(self, graph_id: str, tenant_id: str) -> None:
+    def update_index_status(
+        self,
+        graph_id: str,
+        tenant_id: str,
+        *,
+        status: str,
+        health: Dict[str, Any] | None = None,
+    ) -> bool:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM graph_indexes WHERE graph_id = %s AND tenant_id = %s", (graph_id, tenant_id))
+                if health is None:
+                    cur.execute(
+                        """
+                        UPDATE graph_indexes
+                        SET status = %s,
+                            updated_at = %s
+                        WHERE graph_id = %s AND tenant_id = %s
+                        """,
+                        (status, _now_iso(), graph_id, tenant_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE graph_indexes
+                        SET status = %s,
+                            health = %s,
+                            updated_at = %s
+                        WHERE graph_id = %s AND tenant_id = %s
+                        """,
+                        (status, psycopg2.extras.Json(dict(health)), _now_iso(), graph_id, tenant_id),
+                    )
+                updated = cur.rowcount > 0
             conn.commit()
+        return updated
+
+    def delete_index(self, graph_id: str, tenant_id: str) -> Dict[str, int]:
+        deleted: Dict[str, int] = {}
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM entity_mentions WHERE graph_id = %s AND tenant_id = %s",
+                    (graph_id, tenant_id),
+                )
+                deleted["entity_mentions"] = cur.rowcount
+                cur.execute(
+                    "DELETE FROM canonical_entities WHERE graph_id = %s AND tenant_id = %s",
+                    (graph_id, tenant_id),
+                )
+                deleted["canonical_entities"] = cur.rowcount
+                cur.execute(
+                    "DELETE FROM skills WHERE graph_id = %s AND tenant_id = %s",
+                    (graph_id, tenant_id),
+                )
+                deleted["skills"] = cur.rowcount
+                cur.execute(
+                    """
+                    DELETE FROM auth_role_permissions
+                    WHERE tenant_id = %s
+                      AND resource_type = 'graph'
+                      AND resource_selector = %s
+                    """,
+                    (tenant_id, graph_id),
+                )
+                deleted["auth_role_permissions"] = cur.rowcount
+                cur.execute("DELETE FROM graph_indexes WHERE graph_id = %s AND tenant_id = %s", (graph_id, tenant_id))
+                deleted["graph_indexes"] = cur.rowcount
+            conn.commit()
+        return deleted
 
 
 class GraphIndexSourceStore:

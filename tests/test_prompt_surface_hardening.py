@@ -20,6 +20,16 @@ _LEGACY_TOOL_NAMES = re.compile(
     r"\b(resolve_document|search_document|search_all_documents|diff_documents|compare_clauses|"
     r"extract_clauses|extract_requirements|fetch_chunk_window|fetch_document_outline|search_collection|list_collections)\b"
 )
+_DEMO_HINT_TERMS = re.compile(
+    r"\b("
+    r"rfp-corpus|requirements-extraction-pack|defense_rag_test_corpus|"
+    r"asterion|blue mica|ember reach|iron vale|trident echo|raven crest|"
+    r"customer_reviews|sales_performance|support_tickets|marketing_leads|"
+    r"request-for-proposal|primary corporate knowledge base"
+    r")\b"
+    r"|defense[-_\s]+(?:corpus|graph|repository|program)",
+    re.IGNORECASE,
+)
 
 
 def test_tool_definitions_have_rich_metadata() -> None:
@@ -120,6 +130,23 @@ def test_prompt_files_have_required_sections_and_no_placeholder_or_legacy_terms(
 
     for path in sorted((repo_root / "data" / "prompts").glob("*.md")):
         assert "placeholder" not in path.read_text(encoding="utf-8").lower(), path
+
+
+def test_runtime_prompt_surfaces_do_not_include_demo_corpus_hints() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    runtime_paths = [
+        *sorted((repo_root / "data" / "agents").glob("*.md")),
+        *sorted((repo_root / "data" / "prompts").glob("*.md")),
+        *sorted((repo_root / "data" / "prompts").glob("*.txt")),
+        *sorted((repo_root / "data" / "skill_packs").rglob("*.md")),
+        repo_root / "src" / "agentic_chatbot_next" / "tools" / "registry.py",
+        repo_root / "src" / "agentic_chatbot_next" / "rag" / "inventory.py",
+        repo_root / "control_panel" / "src" / "App.tsx",
+    ]
+
+    for path in runtime_paths:
+        text = path.read_text(encoding="utf-8")
+        assert not _DEMO_HINT_TERMS.search(text), path
 
 
 def test_prompt_assembly_includes_shared_charter_for_all_prompt_backed_roles() -> None:

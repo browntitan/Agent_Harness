@@ -463,6 +463,26 @@ class _FakeGraphIndexStore:
                 break
         return matches
 
+    def update_index_status(self, graph_id: str, tenant_id: str, *, status: str, health=None) -> bool:
+        record = self.records.get(graph_id)
+        if record is None or record.tenant_id != tenant_id:
+            return False
+        self.records[graph_id] = replace(record, status=status, health=dict(health or record.health))
+        return True
+
+    def delete_index(self, graph_id: str, tenant_id: str) -> Dict[str, int]:
+        record = self.records.get(graph_id)
+        if record is None or record.tenant_id != tenant_id:
+            return {"graph_indexes": 0}
+        del self.records[graph_id]
+        return {
+            "entity_mentions": 0,
+            "canonical_entities": 0,
+            "skills": 0,
+            "auth_role_permissions": 0,
+            "graph_indexes": 1,
+        }
+
 
 class _FakeGraphIndexSourceStore:
     def __init__(self) -> None:
@@ -2135,6 +2155,14 @@ async def test_admin_graph_routes_create_validate_build_and_bind_graph_skills(
         )
         detail = await client.get("/v1/admin/graphs/release_risk", headers=_admin_headers())
         runs = await client.get("/v1/admin/graphs/release_risk/runs", headers=_admin_headers())
+        progress = await client.get("/v1/admin/graphs/release_risk/progress", headers=_admin_headers())
+        deleted = await client.request(
+            "DELETE",
+            "/v1/admin/graphs/release_risk",
+            headers=_admin_headers(),
+            json={"delete_artifacts": False, "actor": "tester"},
+        )
+        after_delete = await client.get("/v1/admin/graphs", headers=_admin_headers())
 
     assert initial.status_code == 200
     assert initial.json()["graphs"] == []
@@ -2193,3 +2221,14 @@ async def test_admin_graph_routes_create_validate_build_and_bind_graph_skills(
     assert "update" in operations
     assert "research_tune" in operations
     assert "research_tune_apply" in operations
+
+    assert progress.status_code == 200
+    assert progress.json()["graph_id"] == "release_risk"
+    assert progress.json()["percent"] == 100.0
+    assert progress.json()["logs"][0]["name"] == "index.log"
+
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["artifact_deleted"] is False
+    assert graph_root.exists()
+    assert after_delete.json()["graphs"] == []

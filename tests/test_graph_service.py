@@ -126,6 +126,26 @@ class _FakeGraphIndexStore:
                 break
         return rows
 
+    def update_index_status(self, graph_id: str, tenant_id: str, *, status: str, health=None):
+        record = self.records.get(graph_id)
+        if record is None or record.tenant_id != tenant_id:
+            return False
+        self.records[graph_id] = replace(record, status=status, health=dict(health or record.health))
+        return True
+
+    def delete_index(self, graph_id: str, tenant_id: str):
+        record = self.records.get(graph_id)
+        if record is None or record.tenant_id != tenant_id:
+            return {"graph_indexes": 0}
+        del self.records[graph_id]
+        return {
+            "entity_mentions": 0,
+            "canonical_entities": 0,
+            "skills": 0,
+            "auth_role_permissions": 0,
+            "graph_indexes": 1,
+        }
+
 
 class _FakeGraphIndexSourceStore:
     def __init__(self):
@@ -1038,11 +1058,10 @@ def test_graph_service_replaces_stale_running_builds(tmp_path: Path):
 
     payload = service.build_admin_graph("release_graph")
 
-    runs = payload["runs"]
-    stale = next(item for item in runs if item["run_id"] == stale_run_id)
-    assert stale["status"] == "failed"
-    assert "Superseded by a newer build attempt." in stale["detail"]
-    assert runs[0]["status"] == "ready"
+    runs = payload["progress"]["latest_run"]
+    assert payload["operation_status"] == "already_running"
+    assert payload["active_run"]["run_id"] == stale_run_id
+    assert runs["status"] == "running"
 
 
 def test_graph_service_background_build_returns_running_payload(tmp_path: Path):
@@ -1481,6 +1500,60 @@ def test_graph_service_ignores_stale_progress_logs_from_prior_runs(tmp_path: Pat
     assert payload["runs"][0]["metadata"].get("progress") is None
 
 
+def test_graph_service_progress_payload_reports_live_stages_and_logs(tmp_path: Path):
+    service = _make_service(tmp_path)
+    backend = _AsyncBackend()
+    service._backend_for = lambda backend_name: backend
+    service.create_admin_graph(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+
+    service.build_admin_graph("release_graph")
+    log_path = service._graph_log_dir("release_graph") / "indexing-engine.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        "Workflow started: extract_graph\nextract graph progress: 6/42\n",
+        encoding="utf-8",
+    )
+
+    progress = service.graph_progress("release_graph")
+
+    assert progress["active"] is True
+    assert progress["workflow"] == "extract_graph"
+    assert progress["percent"] > 0
+    assert any(stage["state"] == "active" and stage["id"] == "extract_graph" for stage in progress["stages"])
+    assert "extract graph progress" in progress["log_tail"]
+
+
+def test_graph_service_cancel_and_delete_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service = _make_service(tmp_path)
+    backend = _AsyncBackend()
+    service._backend_for = lambda backend_name: backend
+    service.create_admin_graph(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+    service.build_admin_graph("release_graph")
+    run_id = service.list_graph_runs("release_graph")[0]["run_id"]
+    terminated: list[str] = []
+    monkeypatch.setattr(service, "_terminate_owned_run_process", lambda run: terminated.append(run.run_id))
+
+    blocked = service.delete_admin_graph("release_graph")
+    cancelled = service.cancel_admin_graph_run("release_graph", run_id=run_id, actor="tester")
+    deleted = service.delete_admin_graph("release_graph")
+
+    assert "active build" in blocked["error"]
+    assert cancelled["status"] == "cancelled"
+    assert terminated == [run_id]
+    assert deleted["deleted"] is True
+    assert service.inspect_index("release_graph")["error"].startswith("Graph")
+
+
 def test_graph_service_terminates_superseded_background_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = _make_service(tmp_path)
     service.create_admin_graph(
@@ -1503,7 +1576,7 @@ def test_graph_service_terminates_superseded_background_run(tmp_path: Path, monk
         lambda run: terminated.append(str(run.run_id)),
     )
 
-    payload = service.build_admin_graph("release_graph")
+    payload = service.build_admin_graph("release_graph", cancel_existing=True)
 
     stale = next(item for item in payload["runs"] if item["run_id"] == stale_run_id)
     assert terminated == [stale_run_id]

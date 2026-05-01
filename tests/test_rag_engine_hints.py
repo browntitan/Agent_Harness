@@ -995,10 +995,9 @@ def test_run_rag_contract_uses_kb_collection_access_answer_for_collection_querie
     )
 
     assert "Knowledge base collections available to this chat:" in contract.answer
-    assert "default\nThe primary corporate knowledge base - 1 indexed document covering product overviews and architecture." in contract.answer
+    assert "default\nThe default knowledge-base collection - 1 indexed document covering product overviews and architecture." in contract.answer
     assert (
-        "rfp-corpus\nA specialized collection for request-for-proposal (RFP) material - "
-        "1 indexed document covering product overviews."
+        "rfp-corpus\nA knowledge-base collection - 1 indexed document covering product overviews."
     ) in contract.answer
     assert "Knowledge graphs available to this chat:" in contract.answer
     assert (

@@ -159,6 +159,7 @@ export function CollapsibleSurfaceCard(props: {
             <button
               type="button"
               className="collapsible-toggle"
+              aria-label={`${props.open ? 'Collapse' : 'Expand'} ${props.title ?? 'section'}`}
               aria-expanded={props.open}
               aria-controls={panelId}
               onClick={props.onToggle}
