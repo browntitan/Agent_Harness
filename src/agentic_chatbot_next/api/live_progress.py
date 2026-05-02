@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List
 
 from agentic_chatbot_next.observability.events import RuntimeEvent
 from agentic_chatbot_next.runtime.event_sink import RuntimeEventSink
+from agentic_chatbot_next.runtime.frontend_events import FrontendEventPolicy
 
 _PHASE_LABELS = {
     "basic_turn_started": "Composing response",
@@ -574,19 +575,21 @@ def _parallel_group_status_from_runtime_event(
 
 
 class LiveProgressSink(RuntimeEventSink):
-    def __init__(self) -> None:
+    def __init__(self, settings: Any | None = None, *, policy: FrontendEventPolicy | None = None) -> None:
         self.events: queue.Queue = queue.Queue()
+        self.policy = policy or FrontendEventPolicy.from_settings(settings)
 
     def mark_done(self) -> None:
         self.events.put(None)
 
     def emit_progress(self, event_type: str, **payload: Any) -> None:
         event = {"type": str(event_type), "timestamp": int(payload.pop("timestamp", _now_ms())), **payload}
-        self.events.put(event)
+        if self.policy.allows_progress_event(event):
+            self.events.put(event)
 
     def emit(self, event: RuntimeEvent) -> None:
         translated = self._translate_runtime_event(event)
-        if translated is not None:
+        if translated is not None and self.policy.allows_translated_event(translated):
             self.events.put(translated)
 
     def _translate_runtime_event(self, event: RuntimeEvent) -> Dict[str, Any] | None:
@@ -1229,6 +1232,87 @@ class LiveProgressSink(RuntimeEventSink):
                     actor=event.agent_name,
                     target=target_agent,
                     chips=["reused" if reused else "queued", target_agent],
+                ),
+            )
+
+        if event.event_type == "agent_context_loaded":
+            prompt_docs = [dict(item) for item in list(payload.get("prompt_docs") or []) if isinstance(item, dict)]
+            skill_docs = [dict(item) for item in list(payload.get("skill_docs") or []) if isinstance(item, dict)]
+            context_sections = [
+                dict(item) for item in list(payload.get("context_sections") or []) if isinstance(item, dict)
+            ]
+            memory_context = payload.get("memory_context") if isinstance(payload.get("memory_context"), dict) else {}
+            redacted_fields = [str(item) for item in list(payload.get("redacted_fields") or []) if str(item)]
+            title_agent = event.agent_name or str(payload.get("agent_name") or "agent")
+            title = str(payload.get("title") or f"{title_agent} loaded prompt, skills, and context")
+            detail = str(
+                payload.get("detail")
+                or f"{len(prompt_docs)} prompt doc(s), {len(skill_docs)} skill doc(s), {len(context_sections)} context section(s)"
+            )
+            audit_input = {
+                "prompt_docs": prompt_docs,
+                "skill_docs": skill_docs,
+                "context_sections": context_sections,
+                "memory_context": memory_context,
+            }
+            base = {
+                "type": "context_trace",
+                "status_id": f"context-{event.event_id}",
+                "status_key": f"context-{event.event_id}",
+                "description": title,
+                "status": "complete",
+                "done": True,
+                "hidden": False,
+                "elapsed_ms": 0,
+                "agent": title_agent,
+                "selected_agent": title_agent,
+                "phase": "starting",
+                "phase_label": "Starting",
+                "phase_elapsed_ms": 0,
+                "status_elapsed_ms": 0,
+                "source_event_type": event.event_type,
+                "label": title,
+                "detail": detail,
+                "job_id": event.job_id,
+                "task_id": str(payload.get("task_id") or ""),
+                "why": "The runtime assembled agent guidance before calling the model.",
+                "waiting_on": "",
+                "timestamp": timestamp,
+                "agentic_status": _agentic_status(
+                    status="completed",
+                    kind="context",
+                    title=title,
+                    subtitle=detail,
+                    chips=[
+                        title_agent,
+                        f"{len(prompt_docs)} prompt doc(s)",
+                        f"{len(skill_docs)} skill doc(s)",
+                        str(payload.get("detail_level") or ""),
+                    ],
+                    elapsed_ms=0,
+                    timestamp=timestamp,
+                ),
+            }
+            return _attach_audit_item(
+                base,
+                _audit_item_payload(
+                    item_id=f"context-{event.event_id}",
+                    kind="context",
+                    status="completed",
+                    title=title,
+                    subtitle=detail,
+                    actor=title_agent,
+                    chips=[
+                        title_agent,
+                        f"{len(prompt_docs)} prompt doc(s)",
+                        f"{len(skill_docs)} skill(s)",
+                        f"{len(context_sections)} section(s)",
+                        str(payload.get("detail_level") or ""),
+                    ],
+                    input=audit_input,
+                    notices=[str(item) for item in list(payload.get("notices") or []) if str(item)],
+                    redacted_fields=redacted_fields,
+                    payload_limit_chars=int(payload.get("payload_limit_chars") or 0) or None,
                 ),
             )
 

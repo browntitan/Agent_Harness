@@ -4,7 +4,7 @@ import datetime as dt
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import psycopg2.extras
 
@@ -628,6 +628,87 @@ class GraphIndexRunStore:
                 )
                 rows = cur.fetchall()
         return [_row_to_graph_run(dict(row)) for row in rows]
+
+    def list_runs_by_status(
+        self,
+        *,
+        tenant_id: str = "local-dev",
+        status: str = "",
+        graph_id: str = "",
+        limit: int = 100,
+    ) -> List[GraphIndexRunRecord]:
+        clauses = ["tenant_id = %s"]
+        params: List[Any] = [tenant_id]
+        if status:
+            clauses.append("status = %s")
+            params.append(status)
+        if graph_id:
+            clauses.append("graph_id = %s")
+            params.append(graph_id)
+        params.append(max(1, int(limit)))
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT *
+                    FROM graph_index_runs
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY started_at DESC
+                    LIMIT %s
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall()
+        return [_row_to_graph_run(dict(row)) for row in rows]
+
+    def delete_run(
+        self,
+        run_id: str,
+        *,
+        tenant_id: str = "local-dev",
+        graph_id: str = "",
+        statuses: Sequence[str] | None = None,
+    ) -> int:
+        clauses = ["tenant_id = %s", "run_id = %s"]
+        params: List[Any] = [tenant_id, run_id]
+        if graph_id:
+            clauses.append("graph_id = %s")
+            params.append(graph_id)
+        allowed_statuses = [str(item) for item in (statuses or []) if str(item).strip()]
+        if allowed_statuses:
+            clauses.append("status = ANY(%s)")
+            params.append(allowed_statuses)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM graph_index_runs WHERE {' AND '.join(clauses)}",
+                    tuple(params),
+                )
+                deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return deleted
+
+    def delete_runs_by_status(
+        self,
+        *,
+        tenant_id: str = "local-dev",
+        status: str,
+        graph_id: str = "",
+    ) -> int:
+        clauses = ["tenant_id = %s", "status = %s"]
+        params: List[Any] = [tenant_id, status]
+        if graph_id:
+            clauses.append("graph_id = %s")
+            params.append(graph_id)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"DELETE FROM graph_index_runs WHERE {' AND '.join(clauses)}",
+                    tuple(params),
+                )
+                deleted = int(cur.rowcount or 0)
+            conn.commit()
+        return deleted
 
 
 class GraphQueryCacheStore:

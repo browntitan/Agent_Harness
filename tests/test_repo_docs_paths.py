@@ -44,6 +44,29 @@ def test_local_docker_doc_matches_v3_compose_bootstrap() -> None:
     assert "graphrag_projects" in compose
 
 
+def test_ollama_reranker_residency_defaults_are_documented_in_runtime_envs() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    env_example = (repo_root / ".env.example").read_text(encoding="utf-8")
+    podman_env = (repo_root / "podman_startup" / "env.podman.example").read_text(encoding="utf-8")
+    reranker_model = "rjmalagon/mxbai-rerank-large-v2:1.5b-fp16"
+    bootstrap_models = f"gpt-oss:20b,{reranker_model},nomic-embed-text:latest"
+
+    assert "OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-3}" in compose
+    assert f"OLLAMA_BOOTSTRAP_MODELS: ${{OLLAMA_BOOTSTRAP_MODELS:-{bootstrap_models}}}" in compose
+    assert f"RERANK_MODEL: ${{RERANK_MODEL:-{reranker_model}}}" in compose
+
+    for text in (env_example, podman_env):
+        assert "OLLAMA_MAX_LOADED_MODELS=3" in text
+        assert f"OLLAMA_BOOTSTRAP_MODELS={bootstrap_models}" in text
+        assert "RERANK_ENABLED=true" in text
+        assert "RERANK_PROVIDER=ollama" in text
+        assert f"RERANK_MODEL={reranker_model}" in text
+        assert "RERANK_TOP_N=12" in text
+        assert "RERANK_TIMEOUT_SECONDS=30" in text
+        assert "RERANK_FALLBACK_TO_HEURISTICS=true" in text
+
+
 def test_gateway_docs_keep_openwebui_primary_and_connector_compatibility() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     gateway = (repo_root / "docs" / "OPENAI_GATEWAY.md").read_text(encoding="utf-8")

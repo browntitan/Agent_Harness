@@ -15,10 +15,16 @@ class SkillMatch:
     content: str
     chunk_index: int
     score: float
+    graph_id: str = ""
+    collection_id: str = ""
     retrieval_profile: str = ""
     controller_hints: dict[str, Any] = field(default_factory=dict)
     coverage_goal: str = ""
     result_mode: str = ""
+    source_path: str = ""
+    checksum: str = ""
+    description: str = ""
+    kind: str = "retrievable"
 
 
 @dataclass
@@ -39,9 +45,15 @@ class ResolvedSkillContext:
                     "agent_scope": match.agent_scope,
                     "chunk_index": match.chunk_index,
                     "score": match.score,
+                    "graph_id": match.graph_id,
+                    "collection_id": match.collection_id,
                     "retrieval_profile": match.retrieval_profile,
                     "coverage_goal": match.coverage_goal,
                     "result_mode": match.result_mode,
+                    "source_path": match.source_path,
+                    "checksum": match.checksum,
+                    "description": match.description,
+                    "kind": match.kind,
                 }
                 for match in self.matches
             ],
@@ -64,6 +76,7 @@ class SkillResolver:
         task_tags: List[str] | None = None,
         owner_user_id: str | None = None,
         graph_ids: List[str] | None = None,
+        collection_ids: List[str] | None = None,
         top_k: int | None = None,
         max_chars: int | None = None,
         pinned_skill_ids: List[str] | None = None,
@@ -77,6 +90,7 @@ class SkillResolver:
             task_tags=task_tags,
             owner_user_id=str(owner_user_id or ""),
             graph_ids=list(graph_ids or []),
+            collection_ids=list(collection_ids) if collection_ids is not None else None,
             top_k=top_k,
             max_chars=max_chars,
             pinned_skill_ids=list(pinned_skill_ids or []),
@@ -93,10 +107,16 @@ class SkillResolver:
                     content=match.content,
                     chunk_index=match.chunk_index,
                     score=match.score,
+                    graph_id=match.graph_id,
+                    collection_id=match.collection_id,
                     retrieval_profile=match.retrieval_profile,
                     controller_hints=dict(match.controller_hints),
                     coverage_goal=match.coverage_goal,
                     result_mode=match.result_mode,
+                    source_path=getattr(match, "source_path", ""),
+                    checksum=getattr(match, "checksum", ""),
+                    description=getattr(match, "description", ""),
+                    kind=getattr(match, "kind", "retrievable"),
                 )
                 for match in result.matches
             ],

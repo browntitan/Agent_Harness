@@ -1001,3 +1001,88 @@ def test_rag_agent_tool_forwards_search_mode_and_max_rounds(monkeypatch) -> None
         "top_k_vector": 15,
         "top_k_keyword": 15,
     }
+
+
+def test_rag_agent_tool_forwards_planning_controls(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_rag_contract(
+        settings_arg,
+        stores_arg,
+        *,
+        providers,
+        session,
+        query,
+        conversation_context,
+        preferred_doc_ids,
+        must_include_uploads,
+        top_k_vector,
+        top_k_keyword,
+        max_retries,
+        callbacks,
+        search_mode,
+        max_search_rounds,
+        research_profile="",
+        coverage_goal="",
+        result_mode="",
+        controller_hints=None,
+        skill_context="",
+        **kwargs,
+    ):
+        del settings_arg, stores_arg, providers, session, query, conversation_context
+        del preferred_doc_ids, must_include_uploads, top_k_vector, top_k_keyword
+        del max_retries, callbacks, search_mode, max_search_rounds, kwargs
+        captured["research_profile"] = research_profile
+        captured["coverage_goal"] = coverage_goal
+        captured["result_mode"] = result_mode
+        captured["controller_hints"] = controller_hints
+        captured["skill_context"] = skill_context
+        return FakeRagContract("planned answer")
+
+    monkeypatch.setattr("agentic_chatbot_next.tools.rag_agent_tool.run_rag_contract", fake_run_rag_contract)
+
+    tool = make_rag_agent_tool(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        providers=SimpleNamespace(),
+        session=SimpleNamespace(scratchpad={}),
+    )
+
+    result = tool.invoke(
+        {
+            "query": "compare evidence",
+            "research_profile": "comparative",
+            "coverage_goal": "corpus_wide",
+            "result_mode": "comparison",
+            "controller_hints_json": json.dumps({"prefer_full_reads": True, "seed_keywords": ["msa"]}),
+            "skill_context": "Use contract comparison guidance.",
+        }
+    )
+
+    assert result["answer"] == "planned answer"
+    assert captured == {
+        "research_profile": "comparative",
+        "coverage_goal": "corpus_wide",
+        "result_mode": "comparison",
+        "controller_hints": {"prefer_full_reads": True, "seed_keywords": ["msa"]},
+        "skill_context": "Use contract comparison guidance.",
+    }
+
+
+def test_rag_agent_tool_returns_warning_for_invalid_controller_hints_json(monkeypatch) -> None:
+    def fake_run_rag_contract(*args, **kwargs):
+        raise AssertionError("run_rag_contract should not run when controller_hints_json is invalid")
+
+    monkeypatch.setattr("agentic_chatbot_next.tools.rag_agent_tool.run_rag_contract", fake_run_rag_contract)
+    tool = make_rag_agent_tool(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        providers=SimpleNamespace(),
+        session=SimpleNamespace(scratchpad={}),
+    )
+
+    result = tool.invoke({"query": "find evidence", "controller_hints_json": "{not-json"})
+
+    assert result["answer"] == ""
+    assert result["warnings"]
+    assert "INVALID_CONTROLLER_HINTS_JSON" in result["warnings"][0]

@@ -8,7 +8,7 @@ Handle managed-graph inspection, graph-backed evidence search, and source-planni
 
 - You can inspect graph readiness, sources, and query methods.
 - You can run graph-backed search and explain source selection across GraphRAG, vector, keyword, and structured paths.
-- Graph search methods are GraphRAG methods: use `methods_csv=""` for graph defaults, or explicitly use `local`, `global`, and `drift`. Do not use `graph`, `vector`, `text`, or `keyword` as graph methods.
+- Graph search methods are GraphRAG methods: use `methods_csv=""` for automatic method planning and generic rewrites, or explicitly use `local`, `global`, and `drift` when the user has requested a method. Do not use `graph`, `vector`, `text`, or `keyword` as graph methods.
 - You can explain the optional Research & Tune pre-build workflow, including that generated drafts do not affect builds until an operator applies selected prompt drafts.
 - Treat graph lifecycle actions as controlled operations; do not casually recommend them as the default user path.
 
@@ -24,7 +24,7 @@ Handle managed-graph inspection, graph-backed evidence search, and source-planni
 - Use `inspect_graph_index` for graph-specific detail.
 - Use `search_graph_index` when relationships, entity networks, or graph structure are the likely best evidence path.
 - Use `explain_source_plan` when deciding among graph, vector, keyword, and SQL-style retrieval, especially for text-first causal questions.
-- If `search_graph_index` returns `evidence_status="source_candidates_only"` or `requires_source_read=true`, treat those results as candidate sources only. Call `rag_agent_tool` with the original question and preferred doc ids from the graph candidates before answering.
+- If `search_graph_index` returns `evidence_status="source_candidates_only"` or `requires_source_read=true`, treat those results as candidate sources or graph leads only. Call `rag_agent_tool` with the original question and preferred doc ids from the graph candidates before answering.
 - When initial retrieval is weak, reason about query rewrites from visible information only: user-stated entities, quoted claims, causal/status/date terms, source titles, candidate metadata, retrieved snippets, and missing claim slots. Try claim-focused, entity-focused, refutation-focused, causal-factor-focused, and date/status/outcome-focused rewrites when those concepts are present. Never use corpus-specific baked-in hints or answer terms that were not present in the question, metadata, or retrieved evidence.
 - Use `invoke_agent` only for a tightly bounded follow-up outside graph scope.
 

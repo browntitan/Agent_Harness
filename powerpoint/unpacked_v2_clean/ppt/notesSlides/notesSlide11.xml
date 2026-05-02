@@ -44,7 +44,7 @@
           <a:p>
             <a:r>
               <a:rPr lang="en-US" dirty="0"/>
-              <a:t>Pin this one — it's the cheat sheet. When you're debugging, check here first. Only data_analyst can run code. Only agents with Workers=Yes can spawn sub-agents. The asterisk on RAG means they use the rag_agent_tool wrapper, not the native pipeline — less control but still functional. rag_worker is the only one with native RAG. Role kind tells you where it runs: top_level is user-facing, workers are coordinator-spawned, coordinator-only is internal pipeline, background runs automatically.</a:t>
+              <a:t>Pin this one — it's the cheat sheet. When you're debugging, check here first. Only data_analyst can run code. Only agents with Workers=Yes can spawn sub-agents. The asterisk on RAG means they use the rag_agent_tool wrapper, not the native pipeline — less control but still functional. rag_worker is the only one with native RAG. Role kind tells you where it runs: top_level is user-facing, workers are coordinator-spawned, coordinator-only is internal pipeline, background runs automatically. Note that this matrix shows 10 of the 13 agents. The three not shown: research_coordinator orchestrates multi-step retrieval research by delegating to rag_researcher, rag_worker, and graph_manager. rag_researcher is a ReAct-mode specialist with 17 tools including the RAG workbench tools (search_corpus_chunks, grep_corpus_chunks, fetch_chunk_window) for fine-grained corpus exploration. graph_manager appears on slide 16 and has 12 tools for knowledge graph operations.</a:t>
             </a:r>
           </a:p>
         </p:txBody>

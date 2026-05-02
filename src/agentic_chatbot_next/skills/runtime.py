@@ -44,6 +44,7 @@ class SkillRuntime:
             if str(item).strip()
         )
         graph_ids = self._active_graph_ids(session_state, payload)
+        collection_ids = self._active_collection_ids(session_state, payload, graph_ids=graph_ids)
         access_summary = dict(session_state.metadata.get("access_summary") or {})
         accessible_skill_family_ids = (
             list(access_summary_allowed_ids(access_summary, "skill_family", action="use"))
@@ -71,6 +72,7 @@ class SkillRuntime:
                 agent_scope=agent.skill_scope,
                 tool_tags=list(agent.allowed_tools),
                 graph_ids=graph_ids,
+                collection_ids=collection_ids,
                 pinned_skill_ids=self._dedupe(pinned_skill_ids),
                 accessible_skill_family_ids=accessible_skill_family_ids,
             )
@@ -115,6 +117,46 @@ class SkillRuntime:
             *[str(item) for item in (worker_hints.get("planned_graph_ids") or []) if str(item).strip()],
         ]
         return self._dedupe(graph_ids)
+
+    def _active_collection_ids(
+        self,
+        session_state: SessionState,
+        payload: Dict[str, Any],
+        *,
+        graph_ids: List[str],
+    ) -> List[str]:
+        worker_request = dict(payload.get("worker_request") or {})
+        controller_hints = dict(payload.get("controller_hints") or {})
+        worker_hints = dict(worker_request.get("controller_hints") or {})
+        metadata = dict(session_state.metadata or {})
+        collection_ids: List[str] = []
+        for source in (metadata, controller_hints, worker_hints, payload, worker_request):
+            for key in ("active_collection_ids", "search_collection_ids", "collection_ids", "kb_collection_ids"):
+                raw = source.get(key)
+                if isinstance(raw, str):
+                    collection_ids.extend(part.strip() for part in raw.split(",") if part.strip())
+                else:
+                    collection_ids.extend(str(item) for item in (raw or []) if str(item).strip())
+            for key in ("collection_id", "kb_collection_id", "requested_kb_collection_id", "upload_collection_id"):
+                value = str(source.get(key) or "").strip()
+                if value:
+                    collection_ids.append(value)
+        graph_store = getattr(self.stores, "graph_index_store", None)
+        if graph_store is not None:
+            for graph_id in graph_ids:
+                try:
+                    record = graph_store.get_index(graph_id, session_state.tenant_id, user_id="*")
+                except TypeError:
+                    try:
+                        record = graph_store.get_index(graph_id, session_state.tenant_id)
+                    except Exception:
+                        record = None
+                except Exception:
+                    record = None
+                value = str(getattr(record, "collection_id", "") or "").strip() if record is not None else ""
+                if value:
+                    collection_ids.append(value)
+        return self._dedupe(collection_ids)
 
     def _graph_skill_ids(
         self,

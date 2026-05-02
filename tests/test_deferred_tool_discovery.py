@@ -77,6 +77,32 @@ def test_registry_marks_graph_heavy_tools_deferred_with_specialist_eager_overrid
     assert definitions["index_graph_corpus"].eager_for_agents == []
 
 
+def test_registry_marks_rag_workbench_tools_deferred_with_researcher_eager_override() -> None:
+    definitions = build_tool_definitions(None)
+    general = AgentDefinition(name="general", mode="react", allowed_tools=["search_corpus_chunks"])
+    rag_researcher = AgentDefinition(name="rag_researcher", mode="react", allowed_tools=["search_corpus_chunks"])
+
+    for tool_name in (
+        "plan_rag_queries",
+        "search_corpus_chunks",
+        "grep_corpus_chunks",
+        "fetch_chunk_window",
+        "inspect_document_structure",
+        "search_document_sections",
+        "filter_indexed_docs",
+        "grade_evidence_candidates",
+        "prune_evidence_candidates",
+        "validate_evidence_plan",
+        "build_rag_controller_hints",
+    ):
+        assert definitions[tool_name].group == "rag_workbench"
+        assert definitions[tool_name].should_defer is True
+        assert definitions[tool_name].eager_for_agents == ["rag_researcher"]
+        assert should_defer_for_agent(definitions[tool_name], general)
+        assert not should_defer_for_agent(definitions[tool_name], rag_researcher)
+    assert definitions["explain_source_plan"].eager_for_agents == ["graph_manager", "rag_researcher"]
+
+
 def test_build_agent_tools_flag_disabled_binds_deferred_tool_directly(monkeypatch) -> None:
     definition = _heavy_definition()
     monkeypatch.setattr(

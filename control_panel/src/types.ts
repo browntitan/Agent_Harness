@@ -572,3 +572,37 @@ export interface GraphResearchTunePayload {
   prompt_drafts?: Record<string, Record<string, unknown>>
   prompt_diffs?: Record<string, Record<string, unknown>>
 }
+
+export interface CollectionSkillDraftRecord {
+  draft_type: string
+  label: string
+  skill_id: string
+  name: string
+  agent_scope: string
+  collection_id: string
+  graph_id?: string
+  body_markdown: string
+  markdown?: string
+  selected?: boolean
+  description?: string
+  tool_tags?: string[]
+  task_tags?: string[]
+  controller_hints?: Record<string, unknown>
+}
+
+export interface CollectionSkillDraftPayload {
+  object: string
+  collection_id: string
+  graph_id?: string
+  drafts: CollectionSkillDraftRecord[]
+  mutated?: boolean
+}
+
+export interface CollectionSkillDraftApplyPayload {
+  object: string
+  collection_id: string
+  graph_id?: string
+  applied_skill_ids: string[]
+  graph_bound_skill_ids: string[]
+  skills: Array<Record<string, unknown>>
+}

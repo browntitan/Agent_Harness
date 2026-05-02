@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from agentic_chatbot_next.runtime.clarification import normalize_clarification_sensitivity
 from agentic_chatbot_next.runtime.deep_rag import normalize_deep_rag_mode
+from agentic_chatbot_next.runtime.frontend_events import normalize_frontend_event_detail_level
 
 _PROCESS_STARTED_AT = datetime.now(timezone.utc).isoformat()
 
@@ -44,6 +45,14 @@ class Settings:
     agent_chat_model_overrides: dict[str, str]
     agent_judge_model_overrides: dict[str, str]
     agent_chat_max_output_tokens: dict[str, int]
+
+    # --- Reranking ---
+    rerank_enabled: bool
+    rerank_provider: str
+    rerank_model: str
+    rerank_top_n: int
+    rerank_timeout_seconds: int
+    rerank_fallback_to_heuristics: bool
 
     # --- Azure OpenAI (optional) ---
     azure_openai_api_key: str | None
@@ -220,6 +229,7 @@ class Settings:
     graph_backend: str                  # env: GRAPH_BACKEND (default: "microsoft_graphrag")
     graph_import_enabled: bool          # env: GRAPH_IMPORT_ENABLED (default: True)
     graph_source_planning_enabled: bool # env: GRAPH_SOURCE_PLANNING_ENABLED (default: True)
+    graph_query_llm_planning_enabled: bool  # env: GRAPH_QUERY_LLM_PLANNING_ENABLED (default: False)
     retrieval_decomposition_enabled: bool  # env: RETRIEVAL_DECOMPOSITION_ENABLED (default: False)
     entity_linking_enabled: bool       # env: ENTITY_LINKING_ENABLED (default: False)
     section_first_retrieval_enabled: bool  # env: SECTION_FIRST_RETRIEVAL_ENABLED (default: False)
@@ -296,6 +306,17 @@ class Settings:
     deep_rag_sync_reflection_rounds: int  # env: DEEP_RAG_SYNC_REFLECTION_ROUNDS (default: 1)
     deep_rag_background_threshold: int  # env: DEEP_RAG_BACKGROUND_THRESHOLD (default: 4)
     runtime_events_enabled: bool        # env: RUNTIME_EVENTS_ENABLED (default: True)
+    frontend_events_enabled: bool       # env: FRONTEND_EVENTS_ENABLED (default: True)
+    frontend_events_show_status: bool   # env: FRONTEND_EVENTS_SHOW_STATUS (default: True)
+    frontend_events_show_agents: bool   # env: FRONTEND_EVENTS_SHOW_AGENTS (default: True)
+    frontend_events_show_tools: bool    # env: FRONTEND_EVENTS_SHOW_TOOLS (default: True)
+    frontend_events_show_parallel_groups: bool  # env: FRONTEND_EVENTS_SHOW_PARALLEL_GROUPS
+    frontend_events_show_guidance: bool # env: FRONTEND_EVENTS_SHOW_GUIDANCE (default: True)
+    frontend_events_show_skills: bool   # env: FRONTEND_EVENTS_SHOW_SKILLS (default: True)
+    frontend_events_show_context: bool  # env: FRONTEND_EVENTS_SHOW_CONTEXT (default: True)
+    frontend_events_show_memory_context: bool  # env: FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT (default: False)
+    frontend_events_detail_level: str   # env: FRONTEND_EVENTS_DETAIL_LEVEL (metadata|safe_preview)
+    frontend_events_preview_chars: int  # env: FRONTEND_EVENTS_PREVIEW_CHARS (default: 480)
     session_hydrate_window_messages: int  # env: SESSION_HYDRATE_WINDOW_MESSAGES (default: 40)
     session_transcript_page_size: int     # env: SESSION_TRANSCRIPT_PAGE_SIZE (default: 100)
     context_budget_enabled: bool       # env: CONTEXT_BUDGET_ENABLED (default: False)
@@ -486,6 +507,9 @@ def runtime_settings_diagnostics(settings: Settings) -> dict[str, object]:
         "ollama_chat_model": str(getattr(settings, "ollama_chat_model", "") or ""),
         "ollama_judge_model": str(getattr(settings, "ollama_judge_model", "") or ""),
         "ollama_embed_model": str(getattr(settings, "ollama_embed_model", "") or ""),
+        "rerank_enabled": bool(getattr(settings, "rerank_enabled", False)),
+        "rerank_provider": str(getattr(settings, "rerank_provider", "") or ""),
+        "rerank_model": str(getattr(settings, "rerank_model", "") or ""),
         "graphrag_chat_model": str(getattr(settings, "graphrag_chat_model", "") or ""),
         "graphrag_index_chat_model": str(getattr(settings, "graphrag_index_chat_model", "") or ""),
         "graphrag_community_report_mode": str(
@@ -529,6 +553,9 @@ def runtime_settings_diagnostics(settings: Settings) -> dict[str, object]:
         "team_mailbox_max_channels_per_session": int(getattr(settings, "team_mailbox_max_channels_per_session", 0) or 0),
         "team_mailbox_max_open_messages_per_channel": int(getattr(settings, "team_mailbox_max_open_messages_per_channel", 0) or 0),
         "team_mailbox_claim_limit": int(getattr(settings, "team_mailbox_claim_limit", 0) or 0),
+        "frontend_events_enabled": bool(getattr(settings, "frontend_events_enabled", True)),
+        "frontend_events_detail_level": str(getattr(settings, "frontend_events_detail_level", "") or ""),
+        "frontend_events_preview_chars": int(getattr(settings, "frontend_events_preview_chars", 0) or 0),
         "context_budget_enabled": bool(getattr(settings, "context_budget_enabled", False)),
         "context_window_tokens": int(getattr(settings, "context_window_tokens", 0) or 0),
         "context_target_ratio": float(getattr(settings, "context_target_ratio", 0.0) or 0.0),
@@ -569,6 +596,7 @@ def runtime_settings_diagnostics(settings: Settings) -> dict[str, object]:
             "chat_model": fingerprint_payload["ollama_chat_model"],
             "judge_model": fingerprint_payload["ollama_judge_model"],
             "embedding_model": fingerprint_payload["ollama_embed_model"],
+            "rerank_model": fingerprint_payload["rerank_model"],
             "graphrag_chat_model": fingerprint_payload["graphrag_chat_model"],
             "graphrag_index_chat_model": fingerprint_payload["graphrag_index_chat_model"],
             "graphrag_community_report_mode": fingerprint_payload["graphrag_community_report_mode"],
@@ -635,6 +663,14 @@ def load_settings(
     agent_chat_model_overrides = _as_agent_model_override_map(kind="CHAT_MODEL")
     agent_judge_model_overrides = _as_agent_model_override_map(kind="JUDGE_MODEL")
     agent_chat_max_output_tokens = _as_agent_int_override_map(kind="MAX_OUTPUT_TOKENS")
+
+    # Reranking
+    rerank_enabled = _as_bool("RERANK_ENABLED", True)
+    rerank_provider = str(_getenv("RERANK_PROVIDER", "ollama") or "ollama").strip().lower()
+    rerank_model = str(_getenv("RERANK_MODEL", "rjmalagon/mxbai-rerank-large-v2:1.5b-fp16") or "").strip()
+    rerank_top_n = max(1, _as_int("RERANK_TOP_N", 12))
+    rerank_timeout_seconds = max(1, _as_int("RERANK_TIMEOUT_SECONDS", 30))
+    rerank_fallback_to_heuristics = _as_bool("RERANK_FALLBACK_TO_HEURISTICS", True)
 
     # Azure OpenAI (optional)
     azure_openai_api_key = _getenv("AZURE_OPENAI_API_KEY")
@@ -956,6 +992,7 @@ def load_settings(
     graphrag_default_query_method = str(_getenv("GRAPHRAG_DEFAULT_QUERY_METHOD", "local") or "local").strip().lower()
     graphrag_artifact_cache_ttl_seconds = _as_int("GRAPHRAG_ARTIFACT_CACHE_TTL_SECONDS", 300)
     graph_query_cache_ttl_seconds = _as_int("GRAPH_QUERY_CACHE_TTL_SECONDS", 900)
+    graph_query_llm_planning_enabled = _as_bool("GRAPH_QUERY_LLM_PLANNING_ENABLED", False)
     graph_sql_enabled = _as_bool("GRAPH_SQL_ENABLED", True)
     graph_sql_allowed_views = _as_str_tuple("GRAPH_SQL_ALLOWED_VIEWS")
     neo4j_uri = _getenv("NEO4J_URI")
@@ -1016,6 +1053,19 @@ def load_settings(
     deep_rag_sync_reflection_rounds = max(1, _as_int("DEEP_RAG_SYNC_REFLECTION_ROUNDS", 1))
     deep_rag_background_threshold = max(2, _as_int("DEEP_RAG_BACKGROUND_THRESHOLD", 4))
     runtime_events_enabled = _as_bool("RUNTIME_EVENTS_ENABLED", True)
+    frontend_events_enabled = _as_bool("FRONTEND_EVENTS_ENABLED", True)
+    frontend_events_show_status = _as_bool("FRONTEND_EVENTS_SHOW_STATUS", True)
+    frontend_events_show_agents = _as_bool("FRONTEND_EVENTS_SHOW_AGENTS", True)
+    frontend_events_show_tools = _as_bool("FRONTEND_EVENTS_SHOW_TOOLS", True)
+    frontend_events_show_parallel_groups = _as_bool("FRONTEND_EVENTS_SHOW_PARALLEL_GROUPS", True)
+    frontend_events_show_guidance = _as_bool("FRONTEND_EVENTS_SHOW_GUIDANCE", True)
+    frontend_events_show_skills = _as_bool("FRONTEND_EVENTS_SHOW_SKILLS", True)
+    frontend_events_show_context = _as_bool("FRONTEND_EVENTS_SHOW_CONTEXT", True)
+    frontend_events_show_memory_context = _as_bool("FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT", False)
+    frontend_events_detail_level = normalize_frontend_event_detail_level(
+        _getenv("FRONTEND_EVENTS_DETAIL_LEVEL", "safe_preview")
+    )
+    frontend_events_preview_chars = max(0, _as_int("FRONTEND_EVENTS_PREVIEW_CHARS", 480))
     session_hydrate_window_messages = _as_int("SESSION_HYDRATE_WINDOW_MESSAGES", 80)
     session_transcript_page_size = _as_int("SESSION_TRANSCRIPT_PAGE_SIZE", 200)
     context_budget_enabled = _as_bool("CONTEXT_BUDGET_ENABLED", False)
@@ -1136,6 +1186,12 @@ def load_settings(
         agent_chat_model_overrides=agent_chat_model_overrides,
         agent_judge_model_overrides=agent_judge_model_overrides,
         agent_chat_max_output_tokens=agent_chat_max_output_tokens,
+        rerank_enabled=rerank_enabled,
+        rerank_provider=rerank_provider,
+        rerank_model=rerank_model,
+        rerank_top_n=rerank_top_n,
+        rerank_timeout_seconds=rerank_timeout_seconds,
+        rerank_fallback_to_heuristics=rerank_fallback_to_heuristics,
         azure_openai_api_key=azure_openai_api_key,
         azure_openai_endpoint=azure_openai_endpoint,
         azure_openai_api_version=azure_openai_api_version,
@@ -1305,6 +1361,7 @@ def load_settings(
         graphrag_default_query_method=graphrag_default_query_method,
         graphrag_artifact_cache_ttl_seconds=graphrag_artifact_cache_ttl_seconds,
         graph_query_cache_ttl_seconds=graph_query_cache_ttl_seconds,
+        graph_query_llm_planning_enabled=graph_query_llm_planning_enabled,
         graph_sql_enabled=graph_sql_enabled,
         graph_sql_allowed_views=graph_sql_allowed_views,
         neo4j_uri=neo4j_uri,
@@ -1347,6 +1404,17 @@ def load_settings(
         deep_rag_sync_reflection_rounds=deep_rag_sync_reflection_rounds,
         deep_rag_background_threshold=deep_rag_background_threshold,
         runtime_events_enabled=runtime_events_enabled,
+        frontend_events_enabled=frontend_events_enabled,
+        frontend_events_show_status=frontend_events_show_status,
+        frontend_events_show_agents=frontend_events_show_agents,
+        frontend_events_show_tools=frontend_events_show_tools,
+        frontend_events_show_parallel_groups=frontend_events_show_parallel_groups,
+        frontend_events_show_guidance=frontend_events_show_guidance,
+        frontend_events_show_skills=frontend_events_show_skills,
+        frontend_events_show_context=frontend_events_show_context,
+        frontend_events_show_memory_context=frontend_events_show_memory_context,
+        frontend_events_detail_level=frontend_events_detail_level,
+        frontend_events_preview_chars=frontend_events_preview_chars,
         session_hydrate_window_messages=session_hydrate_window_messages,
         session_transcript_page_size=session_transcript_page_size,
         context_budget_enabled=context_budget_enabled,

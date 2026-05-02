@@ -92,6 +92,24 @@ def test_chunks_metadata_json_backfill_precedes_gin_index() -> None:
     assert chunks_table < metadata_alter < metadata_index
 
 
+def test_skills_collection_id_backfill_precedes_collection_index() -> None:
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "agentic_chatbot_next"
+        / "persistence"
+        / "postgres"
+        / "schema.sql"
+    )
+    sql = schema_path.read_text(encoding="utf-8")
+
+    skills_table = sql.index("CREATE TABLE IF NOT EXISTS skills")
+    collection_alter = sql.index("ALTER TABLE skills ADD COLUMN IF NOT EXISTS collection_id TEXT DEFAULT '';")
+    collection_index = sql.index("CREATE INDEX IF NOT EXISTS skills_collection_idx")
+
+    assert skills_table < collection_alter < collection_index
+
+
 def test_apply_schema_reports_legacy_graph_indexes_upgrade_error(monkeypatch, tmp_path: Path) -> None:
     db_connection.close_pool()
     schema_path = tmp_path / "schema.sql"

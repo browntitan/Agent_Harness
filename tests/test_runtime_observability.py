@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import queue
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,8 @@ from agentic_chatbot_next.observability.callbacks import RuntimeTraceCallbackHan
 from agentic_chatbot_next.observability.events import RuntimeEvent
 from agentic_chatbot_next.providers.circuit_breaker import CircuitBreakerOpenError
 from agentic_chatbot_next.runtime.context import RuntimePaths
+from agentic_chatbot_next.runtime.context_budget import BudgetedTurn, ContextBudgetManager, ContextLedger, ContextSection
+from agentic_chatbot_next.runtime.frontend_events import FrontendEventPolicy
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.messages import RuntimeMessage, SessionState
 from agentic_chatbot_next.runtime.kernel import AgentRunResult, RuntimeKernel
@@ -24,6 +27,7 @@ from agentic_chatbot_next.runtime.tool_parallelism import PolicyAwareToolNode
 from agentic_chatbot_next.runtime.turn_contracts import resolve_turn_intent
 from agentic_chatbot_next.runtime.transcript_store import RuntimeTranscriptStore
 from agentic_chatbot_next.session import ChatSession
+from agentic_chatbot_next.skills.resolver import ResolvedSkillContext, SkillMatch
 
 
 def _runtime_settings(tmp_path: Path) -> SimpleNamespace:
@@ -2189,6 +2193,241 @@ def test_live_progress_sink_translates_peer_dispatch_events() -> None:
     assert event["label"] == "Queued data_analyst"
     assert event["detail"] == "analyze the evidence"
     assert event["job_id"] == "job_peer_123"
+
+
+def _assert_sink_empty(sink: LiveProgressSink) -> None:
+    try:
+        event = sink.events.get_nowait()
+    except queue.Empty:
+        return
+    assert event is None, f"expected no event, got {event!r}"
+
+
+def test_live_progress_sink_policy_gates_tools_agents_and_context() -> None:
+    tool_sink = LiveProgressSink(policy=FrontendEventPolicy(show_tools=False))
+    tool_sink.emit(
+        RuntimeEvent(
+            event_type="tool_start",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            tool_name="search_indexed_docs",
+            payload={"tool_call_id": "call-1", "tool_name": "search_indexed_docs"},
+        )
+    )
+
+    agent_sink = LiveProgressSink(policy=FrontendEventPolicy(show_agents=False))
+    agent_sink.emit_progress("agent_selected", label="Running general", agent="general")
+    agent_sink.emit(
+        RuntimeEvent(
+            event_type="agent_run_completed",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            payload={"status": "completed", "detail": "General agent finished."},
+        )
+    )
+
+    context_sink = LiveProgressSink(
+        policy=FrontendEventPolicy(
+            show_guidance=False,
+            show_skills=False,
+            show_context=False,
+            show_memory_context=False,
+        )
+    )
+    context_sink.emit(
+        RuntimeEvent(
+            event_type="agent_context_loaded",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            payload={
+                "prompt_docs": [{"source_path": "/tmp/general.md"}],
+                "skill_docs": [],
+                "context_sections": [],
+                "memory_context": {},
+            },
+        )
+    )
+
+    _assert_sink_empty(tool_sink)
+    _assert_sink_empty(agent_sink)
+    _assert_sink_empty(context_sink)
+
+
+def test_live_progress_sink_translates_context_loaded_to_audit_item() -> None:
+    sink = LiveProgressSink()
+    sink.emit(
+        RuntimeEvent(
+            event_id="evt_context",
+            event_type="agent_context_loaded",
+            session_id="tenant:user:conv",
+            agent_name="general",
+            job_id="job-context",
+            payload={
+                "title": "general loaded prompt, skills, and context",
+                "detail": "2 prompt doc(s), 1 skill doc(s), 2 context section(s)",
+                "detail_level": "safe_preview",
+                "payload_limit_chars": 80,
+                "prompt_docs": [{"kind": "agent_definition", "source_path": "/tmp/general.md"}],
+                "skill_docs": [{"kind": "retrievable", "source_path": "/tmp/skill.md", "skill_id": "skill-1"}],
+                "context_sections": [{"name": "base_prompt", "clipped": False}],
+                "memory_context": {"included": True, "preview_redacted": True},
+                "redacted_fields": ["memory_context.preview"],
+                "notices": ["Memory context preview is hidden by frontend event policy."],
+            },
+        )
+    )
+
+    event = sink.events.get_nowait()
+    audit_item = event["agentic_audit_item"]
+
+    assert event["type"] == "context_trace"
+    assert event["source_event_type"] == "agent_context_loaded"
+    assert event["agent"] == "general"
+    assert audit_item["kind"] == "context"
+    assert audit_item["status"] == "completed"
+    assert audit_item["input"]["prompt_docs"][0]["source_path"] == "/tmp/general.md"
+    assert audit_item["input"]["skill_docs"][0]["skill_id"] == "skill-1"
+    assert audit_item["input"]["memory_context"]["preview_redacted"] is True
+    assert audit_item["redacted_fields"] == ["memory_context.preview"]
+    assert audit_item["payload_limit_chars"] == 80
+
+
+def test_query_loop_emits_agent_context_loaded_safe_payloads(tmp_path: Path) -> None:
+    settings = _runtime_settings(tmp_path)
+    settings.memory_enabled = False
+    settings.tiktoken_enabled = False
+    settings.context_budget_enabled = False
+    settings.skills_dir = tmp_path / "skills"
+    settings.agents_dir = tmp_path / "agents"
+    settings.control_panel_prompt_overlays_dir = tmp_path / "overlays" / "prompts"
+    settings.control_panel_agent_overlays_dir = tmp_path / "overlays" / "agents"
+    settings.frontend_events_enabled = True
+    settings.frontend_events_show_guidance = True
+    settings.frontend_events_show_skills = True
+    settings.frontend_events_show_context = True
+    settings.frontend_events_show_memory_context = False
+    settings.frontend_events_detail_level = "safe_preview"
+    settings.frontend_events_preview_chars = 24
+    settings.skills_dir.mkdir(parents=True)
+    settings.agents_dir.mkdir(parents=True)
+
+    (settings.agents_dir / "general.md").write_text("# General Agent\nUse available context carefully.", encoding="utf-8")
+    (settings.skills_dir / "skills.md").write_text("# Shared Prompt\nShared guidance for all agents.", encoding="utf-8")
+    (settings.skills_dir / "general_agent.md").write_text("# General Prompt\nAnswer with citations.", encoding="utf-8")
+    skill_doc = settings.skills_dir / "retrieval.md"
+    skill_doc.write_text("# Retrieval Skill\nUse precise evidence and quote sparingly.", encoding="utf-8")
+
+    class _CaptureSink:
+        def __init__(self) -> None:
+            self.events: list[RuntimeEvent] = []
+
+        def emit(self, event: RuntimeEvent) -> None:
+            self.events.append(event)
+
+    ledger = ContextLedger(enabled=True, window_tokens=100, target_tokens=40, autocompact_tokens=80)
+    ledger.add_section("base_prompt", 30, 18, clipped=True)
+    ledger.add_section("skill_context", 10, 10, clipped=False)
+    ledger.add_section("memory_context", 8, 8, clipped=False)
+    budgeted = BudgetedTurn(
+        system_prompt="system",
+        history_messages=[],
+        ledger=ledger,
+        sections=[
+            ContextSection(
+                name="base_prompt",
+                title="Base Prompt",
+                content="Base prompt content that should be clipped in preview output.",
+                preserve=True,
+            ),
+            ContextSection(name="skill_context", title="Skill Context", content="Skill context block."),
+            ContextSection(name="memory_context", title="Memory Context", content="Remember private project context."),
+        ],
+    )
+    sink = _CaptureSink()
+    loop = QueryLoop(settings=settings, context_budget_manager=ContextBudgetManager(settings))
+    agent = AgentDefinition(name="general", mode="react", prompt_file="general_agent.md", skill_scope="general")
+    session_state = SessionState(tenant_id="tenant", user_id="user", conversation_id="conv")
+    skill_resolution = ResolvedSkillContext(
+        text="Skill context block.",
+        matches=[
+            SkillMatch(
+                skill_id="retrieval",
+                skill_family_id="retrieval",
+                name="Retrieval Skill",
+                agent_scope="general",
+                content="Retrieval skill content that is long enough to be clipped in the preview.",
+                chunk_index=0,
+                score=0.97,
+                source_path=str(skill_doc),
+                checksum="sha256:abc",
+                description="Retrieve evidence carefully.",
+                kind="retrievable",
+            ),
+            SkillMatch(
+                skill_id="non-md",
+                skill_family_id="non-md",
+                name="Ignored Skill",
+                agent_scope="general",
+                content="This should not be surfaced.",
+                chunk_index=0,
+                score=0.1,
+                source_path=str(settings.skills_dir / "ignored.txt"),
+            ),
+        ],
+    )
+
+    loop._emit_agent_context_loaded(
+        agent,
+        session_state,
+        budgeted,
+        tool_context=SimpleNamespace(
+            event_sink=sink,
+            metadata={"job_id": "job-context"},
+            skill_resolution=skill_resolution,
+        ),
+    )
+
+    event = sink.events[0]
+    payload = event.payload
+
+    assert event.event_type == "agent_context_loaded"
+    assert event.agent_name == "general"
+    assert event.job_id == "job-context"
+    assert {doc["kind"] for doc in payload["prompt_docs"]} == {
+        "agent_definition",
+        "shared_prompt",
+        "agent_prompt",
+    }
+    assert all(doc["source_path"].endswith(".md") for doc in payload["prompt_docs"])
+    assert len(payload["skill_docs"]) == 1
+    assert payload["skill_docs"][0]["source_path"] == str(skill_doc)
+    assert payload["skill_docs"][0]["checksum"] == "sha256:abc"
+    assert len(payload["skill_docs"][0]["preview"]) <= 24
+    assert payload["context_sections"][0]["clipped"] is True
+    assert payload["context_sections"][0]["original_tokens"] == 30
+    assert payload["context_sections"][0]["kept_tokens"] == 18
+    memory_section = next(item for item in payload["context_sections"] if item["name"] == "memory_context")
+    assert "preview" not in memory_section
+    assert payload["memory_context"]["preview_redacted"] is True
+    assert "memory_context.preview" in payload["redacted_fields"]
+    assert "context_sections.memory_context.preview" in payload["redacted_fields"]
+
+    settings.frontend_events_show_guidance = False
+    second_sink = _CaptureSink()
+    loop._emit_agent_context_loaded(
+        agent,
+        session_state,
+        budgeted,
+        tool_context=SimpleNamespace(
+            event_sink=second_sink,
+            metadata={"job_id": "job-context"},
+            skill_resolution=skill_resolution,
+        ),
+    )
+    second_payload = second_sink.events[0].payload
+    assert second_payload["prompt_docs"] == []
+    assert second_payload["skill_docs"]
+    assert second_payload["context_sections"]
 
 
 def test_live_progress_sink_translates_tool_lifecycle_to_status_cards() -> None:

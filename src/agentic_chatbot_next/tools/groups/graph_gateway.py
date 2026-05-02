@@ -75,7 +75,7 @@ def build_graph_gateway_tools(ctx: Any) -> List[Any]:
         top_k_graphs: int = 3,
         limit: int = 8,
     ) -> str:
-        """Search graph evidence using GraphRAG methods: local, global, drift, or blank for defaults."""
+        """Search graph evidence using GraphRAG methods: local, global, drift, or blank for auto planning."""
         methods = _parse_csv(methods_csv)
         if graph_id.strip():
             payload = service.query_index(

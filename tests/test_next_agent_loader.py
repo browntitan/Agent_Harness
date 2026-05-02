@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from agentic_chatbot_next.agents.loader import load_agent_markdown
 from agentic_chatbot_next.agents.registry import AgentRegistry
+from agentic_chatbot_next.app.service import RuntimeService
 
 
 def test_agent_registry_loads_markdown_definitions_from_repo() -> None:
@@ -21,6 +23,7 @@ def test_agent_registry_loads_markdown_definitions_from_repo() -> None:
         "utility",
         "data_analyst",
         "rag_worker",
+        "rag_researcher",
         "graph_manager",
         "planner",
         "finalizer",
@@ -45,6 +48,25 @@ def test_agent_registry_loads_markdown_definitions_from_repo() -> None:
     assert "search_graph_index" in graph_manager.allowed_tools
     assert graph_manager.metadata["role_kind"] == "top_level_or_worker"
     assert graph_manager.metadata["entry_path"] == "router_fast_path_or_delegated"
+    rag_researcher = registry.get("rag_researcher")
+    assert rag_researcher is not None
+    assert rag_researcher.mode == "react"
+    assert "rag_agent_tool" in rag_researcher.allowed_tools
+    assert "plan_rag_queries" in rag_researcher.allowed_tools
+    assert "search_corpus_chunks" in rag_researcher.allowed_tools
+    assert "grep_corpus_chunks" in rag_researcher.allowed_tools
+    assert "fetch_chunk_window" in rag_researcher.allowed_tools
+    assert "inspect_document_structure" in rag_researcher.allowed_tools
+    assert "search_document_sections" in rag_researcher.allowed_tools
+    assert "filter_indexed_docs" in rag_researcher.allowed_tools
+    assert "grade_evidence_candidates" in rag_researcher.allowed_tools
+    assert "prune_evidence_candidates" in rag_researcher.allowed_tools
+    assert "validate_evidence_plan" in rag_researcher.allowed_tools
+    assert "build_rag_controller_hints" in rag_researcher.allowed_tools
+    assert "search_graph_index" in rag_researcher.allowed_tools
+    assert rag_researcher.metadata["entry_path"] == "manual_or_delegated"
+    assert rag_researcher.metadata["manual_override_allowed"] is True
+    assert "rag_researcher" not in {agent.name for agent in registry.list_routable()}
     coordinator = registry.get("coordinator")
     assert coordinator is not None
     assert list(coordinator.allowed_tools) == [
@@ -71,12 +93,26 @@ def test_agent_registry_loads_markdown_definitions_from_repo() -> None:
     assert set(research_coordinator.allowed_worker_agents) == {
         "planner",
         "rag_worker",
+        "rag_researcher",
         "general",
         "graph_manager",
         "finalizer",
         "verifier",
     }
     assert "execute_code" not in research_coordinator.allowed_tools
+
+
+def test_manual_override_list_includes_non_routable_rag_researcher() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    registry = AgentRegistry(repo_root / "data" / "agents")
+    service = RuntimeService.__new__(RuntimeService)
+    service.kernel = SimpleNamespace(registry=registry)
+    service.ctx = SimpleNamespace(settings=SimpleNamespace(memory_enabled=True))
+
+    overrides = service.list_requested_agent_overrides()
+
+    assert "rag_researcher" in overrides
+    assert "rag_researcher" not in {agent.name for agent in registry.list_routable()}
 
 
 def test_repo_agents_directory_has_no_live_json_definitions() -> None:

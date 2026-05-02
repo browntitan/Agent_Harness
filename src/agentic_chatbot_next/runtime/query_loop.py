@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -40,6 +41,7 @@ from agentic_chatbot_next.runtime.deep_rag import (
     deep_rag_controller_hints,
     deep_rag_search_mode,
 )
+from agentic_chatbot_next.runtime.frontend_events import FrontendEventPolicy
 from agentic_chatbot_next.runtime.context import RuntimePaths
 from agentic_chatbot_next.runtime.context_budget import (
     BudgetedTurn,
@@ -313,6 +315,7 @@ class QueryLoop:
                 task_payload=dict(task_payload or {}),
                 callbacks=callbacks,
                 providers=active_providers,
+                tool_context=tool_context,
             )
         elif agent.mode == "finalizer":
             result = self._run_finalizer(
@@ -323,6 +326,7 @@ class QueryLoop:
                 task_payload=dict(task_payload or {}),
                 callbacks=callbacks,
                 providers=active_providers,
+                tool_context=tool_context,
             )
         elif agent.mode == "verifier":
             result = self._run_verifier(
@@ -333,6 +337,7 @@ class QueryLoop:
                 task_payload=dict(task_payload or {}),
                 callbacks=callbacks,
                 providers=active_providers,
+                tool_context=tool_context,
             )
         else:
             result = self._run_react(
@@ -523,6 +528,7 @@ class QueryLoop:
             job_id=str((getattr(tool_context, "metadata", {}) or {}).get("job_id") or ""),
         )
         self._last_context_ledger = budgeted.ledger.to_dict()
+        self._emit_agent_context_loaded(agent, session_state, budgeted, tool_context=tool_context)
         return budgeted
 
     def _build_system_prompt(
@@ -534,6 +540,7 @@ class QueryLoop:
         providers: Any | None = None,
         skill_context: str = "",
         task_payload: Dict[str, Any] | None = None,
+        tool_context: Any | None = None,
     ) -> str:
         budgeted = self._prepare_budgeted_turn(
             agent,
@@ -543,8 +550,264 @@ class QueryLoop:
             skill_context=skill_context,
             task_payload=task_payload,
             history_messages=[],
+            tool_context=tool_context,
         )
         return budgeted.system_prompt
+
+    def _emit_agent_context_loaded(
+        self,
+        agent: AgentDefinition,
+        session_state: SessionState,
+        budgeted: BudgetedTurn,
+        *,
+        tool_context: Any | None = None,
+    ) -> None:
+        event_sink = getattr(tool_context, "event_sink", None)
+        if event_sink is None or not session_state.session_id:
+            return
+        policy = FrontendEventPolicy.from_settings(self.settings)
+        if not policy.enabled or not policy.show_context_trace:
+            return
+
+        redacted_fields: List[str] = []
+        notices: List[str] = []
+        prompt_docs = self._prompt_doc_payloads(agent, policy) if policy.show_guidance else []
+        skill_docs = self._skill_doc_payloads(getattr(tool_context, "skill_resolution", None), policy) if policy.show_skills else []
+        context_sections = (
+            self._context_section_payloads(budgeted, policy, redacted_fields=redacted_fields)
+            if policy.show_context
+            else []
+        )
+        memory_context = (
+            self._memory_context_payload(budgeted, policy, redacted_fields=redacted_fields)
+            if policy.show_context or policy.show_memory_context
+            else {}
+        )
+        if (
+            policy.show_context
+            and not policy.show_memory_context
+            and any(section.name == "memory_context" for section in list(budgeted.sections or []))
+        ):
+            notices.append("Memory context preview is hidden by frontend event policy.")
+
+        if not prompt_docs and not skill_docs and not context_sections and not memory_context:
+            return
+
+        detail = (
+            f"{len(prompt_docs)} prompt doc(s), "
+            f"{len(skill_docs)} skill doc(s), "
+            f"{len(context_sections)} context section(s)"
+        )
+        try:
+            event_sink.emit(
+                RuntimeEvent(
+                    event_type="agent_context_loaded",
+                    session_id=session_state.session_id,
+                    agent_name=agent.name,
+                    job_id=str((getattr(tool_context, "metadata", {}) or {}).get("job_id") or ""),
+                    payload={
+                        "conversation_id": session_state.conversation_id,
+                        "agent_name": agent.name,
+                        "title": f"{agent.name} loaded prompt, skills, and context",
+                        "detail": detail,
+                        "detail_level": policy.detail_level,
+                        "payload_limit_chars": policy.preview_chars,
+                        "prompt_docs": prompt_docs,
+                        "skill_docs": skill_docs,
+                        "context_sections": context_sections,
+                        "memory_context": memory_context,
+                        "redacted_fields": self._dedupe_texts(redacted_fields),
+                        "notices": notices,
+                    },
+                )
+            )
+        except Exception:
+            return
+
+    def _prompt_doc_payloads(self, agent: AgentDefinition, policy: FrontendEventPolicy) -> List[Dict[str, Any]]:
+        docs: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        agent_doc_path = self._resolve_agent_doc_path(agent)
+        for kind, name, path in (
+            ("agent_definition", f"{agent.name}.md", agent_doc_path),
+            ("shared_prompt", "skills.md", self._resolve_prompt_doc_path("skills.md")),
+            ("agent_prompt", agent.prompt_file, self._resolve_prompt_doc_path(agent.prompt_file)),
+        ):
+            if path is None or path.suffix.lower() != ".md":
+                continue
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            payload = self._markdown_doc_payload(kind=kind, name=name, path=path, policy=policy)
+            if payload:
+                payload["agent_scope"] = agent.skill_scope or agent.name
+                docs.append(payload)
+        return docs
+
+    def _skill_doc_payloads(self, skill_resolution: Any, policy: FrontendEventPolicy) -> List[Dict[str, Any]]:
+        docs: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        matches = getattr(skill_resolution, "matches", None)
+        if matches is None and isinstance(skill_resolution, Mapping):
+            matches = skill_resolution.get("matches")
+        for match in list(matches or []):
+            source_path = str(self._match_field(match, "source_path") or "").strip()
+            if not source_path or not source_path.lower().endswith(".md"):
+                continue
+            if source_path in seen:
+                continue
+            seen.add(source_path)
+            content = str(self._match_field(match, "content") or "")
+            item: Dict[str, Any] = {
+                "kind": str(self._match_field(match, "kind") or "retrievable"),
+                "name": str(self._match_field(match, "name") or ""),
+                "source_path": source_path,
+                "skill_id": str(self._match_field(match, "skill_id") or ""),
+                "skill_family_id": str(
+                    self._match_field(match, "skill_family_id") or self._match_field(match, "version_parent") or ""
+                ),
+                "agent_scope": str(self._match_field(match, "agent_scope") or ""),
+                "description": str(self._match_field(match, "description") or ""),
+                "checksum": str(self._match_field(match, "checksum") or ""),
+                "chunk_index": int(self._match_field(match, "chunk_index") or 0),
+                "score": float(self._match_field(match, "score") or 0.0),
+                "char_count": len(content),
+                "estimated_tokens": self.context_budget_manager.estimate_text(content),
+            }
+            if policy.safe_preview_enabled:
+                item["preview"] = policy.preview(content)
+            docs.append(item)
+        return docs
+
+    def _match_field(self, match: Any, key: str) -> Any:
+        if isinstance(match, Mapping):
+            return match.get(key)
+        return getattr(match, key, None)
+
+    def _dedupe_texts(self, values: List[str]) -> List[str]:
+        result: List[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
+    def _context_section_payloads(
+        self,
+        budgeted: BudgetedTurn,
+        policy: FrontendEventPolicy,
+        *,
+        redacted_fields: List[str],
+    ) -> List[Dict[str, Any]]:
+        ledger_sections = list((budgeted.ledger.to_dict() or {}).get("sections") or [])
+        sections_by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for raw in ledger_sections:
+            if isinstance(raw, dict):
+                sections_by_name.setdefault(str(raw.get("name") or ""), []).append(raw)
+        result: List[Dict[str, Any]] = []
+        for section in list(budgeted.sections or []):
+            ledger = (sections_by_name.get(section.name) or [{}]).pop(0)
+            content = str(section.content or "")
+            item: Dict[str, Any] = {
+                "name": section.name,
+                "title": section.title,
+                "priority": section.priority,
+                "preserve": section.preserve,
+                "char_count": len(content),
+                "estimated_tokens": self.context_budget_manager.estimate_text(section.render()),
+                "original_tokens": int(ledger.get("original_tokens") or 0),
+                "kept_tokens": int(ledger.get("kept_tokens") or 0),
+                "clipped": bool(ledger.get("clipped")),
+            }
+            preview_field = f"context_sections.{section.name}.preview"
+            if section.name == "memory_context" and not policy.show_memory_context:
+                redacted_fields.append(preview_field)
+            elif section.name == "skill_context" and not policy.show_skills:
+                redacted_fields.append(preview_field)
+            elif section.name == "base_prompt" and not policy.show_guidance:
+                redacted_fields.append(preview_field)
+            elif policy.safe_preview_enabled:
+                item["preview"] = policy.preview(content)
+            result.append(item)
+        return result
+
+    def _memory_context_payload(
+        self,
+        budgeted: BudgetedTurn,
+        policy: FrontendEventPolicy,
+        *,
+        redacted_fields: List[str],
+    ) -> Dict[str, Any]:
+        memory_sections = [section for section in list(budgeted.sections or []) if section.name == "memory_context"]
+        if not memory_sections:
+            return {}
+        content = "\n\n".join(str(section.content or "").strip() for section in memory_sections if str(section.content or "").strip())
+        payload: Dict[str, Any] = {
+            "included": True,
+            "char_count": len(content),
+            "estimated_tokens": self.context_budget_manager.estimate_text(content),
+        }
+        if policy.show_memory_context and policy.safe_preview_enabled:
+            payload["preview"] = policy.preview(content)
+        elif not policy.show_memory_context:
+            payload["preview_redacted"] = True
+            redacted_fields.append("memory_context.preview")
+        return payload
+
+    def _markdown_doc_payload(
+        self,
+        *,
+        kind: str,
+        name: str,
+        path: Path,
+        policy: FrontendEventPolicy,
+    ) -> Dict[str, Any]:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            return {}
+        item: Dict[str, Any] = {
+            "kind": kind,
+            "name": str(name or path.name),
+            "source_path": str(path),
+            "char_count": len(content),
+            "estimated_tokens": self.context_budget_manager.estimate_text(content),
+        }
+        if policy.safe_preview_enabled:
+            item["preview"] = policy.preview(content)
+        return item
+
+    def _resolve_agent_doc_path(self, agent: AgentDefinition) -> Path | None:
+        candidates: List[Path] = []
+        overlay_dir = getattr(self.settings, "control_panel_agent_overlays_dir", None)
+        if overlay_dir:
+            candidates.append(Path(overlay_dir) / f"{agent.name}.md")
+        candidates.append(Path(getattr(self.settings, "agents_dir", Path("data") / "agents")) / f"{agent.name}.md")
+        return self._first_existing_markdown(candidates)
+
+    def _resolve_prompt_doc_path(self, prompt_file: str) -> Path | None:
+        filename = str(prompt_file or "").strip()
+        if not filename:
+            return None
+        candidates: List[Path] = []
+        overlay_dir = getattr(self.settings, "control_panel_prompt_overlays_dir", None)
+        if overlay_dir:
+            candidates.append(Path(overlay_dir) / filename)
+        candidates.append(Path(getattr(self.settings, "skills_dir", Path("data") / "skills")) / filename)
+        return self._first_existing_markdown(candidates)
+
+    def _first_existing_markdown(self, candidates: List[Path]) -> Path | None:
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file() and candidate.suffix.lower() == ".md":
+                    return candidate
+            except Exception:
+                continue
+        return None
 
     def _clarification_policy_text(self) -> str:
         return build_clarification_policy_text(getattr(self.settings, "clarification_sensitivity", 50))
@@ -1252,6 +1515,7 @@ class QueryLoop:
         task_payload: Dict[str, Any],
         callbacks: List[Any],
         providers: Any,
+        tool_context: Any | None = None,
     ) -> QueryLoopResult:
         payload = dict(task_payload or {})
         planner_input_packet = dict(payload.get("planner_input_packet") or {})
@@ -1262,6 +1526,7 @@ class QueryLoop:
             providers=providers,
             skill_context=skill_context,
             task_payload=payload,
+            tool_context=tool_context,
         )
         planner_context_block = ""
         if planner_input_packet:
@@ -1367,6 +1632,7 @@ class QueryLoop:
         task_payload: Dict[str, Any],
         callbacks: List[Any],
         providers: Any,
+        tool_context: Any | None = None,
     ) -> QueryLoopResult:
         system_prompt = self._build_system_prompt(
             agent,
@@ -1375,6 +1641,7 @@ class QueryLoop:
             providers=providers,
             skill_context=skill_context,
             task_payload=task_payload,
+            tool_context=tool_context,
         )
         execution_digest = dict(task_payload.get("execution_digest") or {})
         control_notes = {
@@ -1440,6 +1707,7 @@ class QueryLoop:
         task_payload: Dict[str, Any],
         callbacks: List[Any],
         providers: Any,
+        tool_context: Any | None = None,
     ) -> QueryLoopResult:
         system_prompt = self._build_system_prompt(
             agent,
@@ -1448,6 +1716,7 @@ class QueryLoop:
             providers=providers,
             skill_context=skill_context,
             task_payload=task_payload,
+            tool_context=tool_context,
         )
         execution_digest = dict(task_payload.get("execution_digest") or {})
         prompt_payload = execution_digest or dict(task_payload or {})

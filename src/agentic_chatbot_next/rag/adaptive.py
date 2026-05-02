@@ -12,6 +12,7 @@ from langchain_core.documents import Document
 from agentic_chatbot_next.contracts.rag import RetrievalSummary
 from agentic_chatbot_next.persistence.postgres.chunks import ChunkRecord, ScoredChunk
 from agentic_chatbot_next.prompting import load_judge_rewrite_prompt, render_template
+from agentic_chatbot_next.rag.reranker import rerank_scored_chunks
 from agentic_chatbot_next.rag.entity_linking import resolve_query_entities
 from agentic_chatbot_next.rag.fanout import (
     RagRuntimeBridge,
@@ -1241,7 +1242,13 @@ class CorpusRetrievalAdapter:
                     score += min(0.12, overlap * 0.02)
 
             boosted.append(ScoredChunk(doc=chunk.doc, score=score, method=chunk.method))
-        return merge_dedupe(boosted)
+        heuristically_ranked = merge_dedupe(boosted)
+        reranked, _metadata = rerank_scored_chunks(
+            self.settings,
+            query=query,
+            chunks=heuristically_ranked,
+        )
+        return reranked
 
     def _structured_neighbor_chunks(
         self,

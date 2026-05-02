@@ -243,11 +243,15 @@ The main RAG-oriented packs live under `data/skill_packs/rag/`:
 - `clause_extraction`
 - `collection_scoping`
 - `comparison_campaign`
+- `autonomous_query_planning`
 - `corpus_discovery`
 - `coverage_sufficiency_audit`
 - `cross_document_inventory`
 - `document_resolution`
+- `document_structure_navigation`
 - `empty_result_recovery`
+- `entity_disambiguation_retrieval`
+- `evidence_grading_and_pruning`
 - `graph_drift_followup`
 - `graph_freshness_and_staleness_check`
 - `graph_global_community_discovery`
@@ -258,6 +262,7 @@ The main RAG-oriented packs live under `data/skill_packs/rag/`:
 - `multi_document_comparison`
 - `negative_evidence_reporting`
 - `process_flow_identification`
+- `rag_researcher_finalization`
 - `retrieval_strategy`
 - `windowed_keyword_followup`
 

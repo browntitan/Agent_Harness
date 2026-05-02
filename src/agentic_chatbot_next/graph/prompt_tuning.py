@@ -73,13 +73,18 @@ _PROMPT_MODULE_CANDIDATES: Dict[str, List[tuple[str, str]]] = {
     ],
     "summarize_descriptions.txt": [
         ("graphrag.prompts.index.summarize_descriptions", "SUMMARIZE_DESCRIPTIONS_PROMPT"),
+        ("graphrag.prompts.index.summarize_descriptions", "SUMMARIZE_PROMPT"),
         ("graphrag.prompts.index.summarize_descriptions", "PROMPT"),
     ],
     "community_report_text.txt": [
+        ("graphrag.prompts.index.community_report_text_units", "COMMUNITY_REPORT_TEXT_PROMPT"),
+        ("graphrag.prompts.index.community_report_text_units", "PROMPT"),
         ("graphrag.prompts.index.community_report_text", "COMMUNITY_REPORT_TEXT_PROMPT"),
         ("graphrag.prompts.index.community_report_text", "PROMPT"),
     ],
     "community_report_graph.txt": [
+        ("graphrag.prompts.index.community_report", "COMMUNITY_REPORT_PROMPT"),
+        ("graphrag.prompts.index.community_report", "PROMPT"),
         ("graphrag.prompts.index.community_report_graph", "COMMUNITY_REPORT_GRAPH_PROMPT"),
         ("graphrag.prompts.index.community_report_graph", "PROMPT"),
     ],
@@ -89,21 +94,26 @@ _PROMPT_MODULE_CANDIDATES: Dict[str, List[tuple[str, str]]] = {
     ],
     "global_search_map_system_prompt.txt": [
         ("graphrag.prompts.query.global_search_map_system_prompt", "GLOBAL_SEARCH_MAP_SYSTEM_PROMPT"),
+        ("graphrag.prompts.query.global_search_map_system_prompt", "MAP_SYSTEM_PROMPT"),
         ("graphrag.prompts.query.global_search_map_system_prompt", "PROMPT"),
     ],
     "global_search_reduce_system_prompt.txt": [
         ("graphrag.prompts.query.global_search_reduce_system_prompt", "GLOBAL_SEARCH_REDUCE_SYSTEM_PROMPT"),
+        ("graphrag.prompts.query.global_search_reduce_system_prompt", "REDUCE_SYSTEM_PROMPT"),
         ("graphrag.prompts.query.global_search_reduce_system_prompt", "PROMPT"),
     ],
     "global_search_knowledge_system_prompt.txt": [
         ("graphrag.prompts.query.global_search_knowledge_system_prompt", "GLOBAL_SEARCH_KNOWLEDGE_SYSTEM_PROMPT"),
+        ("graphrag.prompts.query.global_search_knowledge_system_prompt", "GENERAL_KNOWLEDGE_INSTRUCTION"),
         ("graphrag.prompts.query.global_search_knowledge_system_prompt", "PROMPT"),
     ],
     "drift_search_system_prompt.txt": [
         ("graphrag.prompts.query.drift_search_system_prompt", "DRIFT_SEARCH_SYSTEM_PROMPT"),
+        ("graphrag.prompts.query.drift_search_system_prompt", "DRIFT_LOCAL_SYSTEM_PROMPT"),
         ("graphrag.prompts.query.drift_search_system_prompt", "PROMPT"),
     ],
     "drift_reduce_prompt.txt": [
+        ("graphrag.prompts.query.drift_search_system_prompt", "DRIFT_REDUCE_PROMPT"),
         ("graphrag.prompts.query.drift_reduce_prompt", "DRIFT_REDUCE_PROMPT"),
         ("graphrag.prompts.query.drift_reduce_prompt", "PROMPT"),
     ],
@@ -112,6 +122,119 @@ _PROMPT_MODULE_CANDIDATES: Dict[str, List[tuple[str, str]]] = {
         ("graphrag.prompts.query.basic_search_system_prompt", "PROMPT"),
     ],
 }
+
+_FALLBACK_GRAPHRAG_PROMPTS: Dict[str, str] = {
+    "extract_graph.txt": _DEFAULT_EXTRACT_GRAPH_PREFLIGHT_PROMPT,
+    "summarize_descriptions.txt": """
+You are a helpful assistant responsible for generating a comprehensive summary of the data provided below.
+Given one or two entities, and a list of descriptions, write a single concise summary that captures all relevant details.
+Resolve contradictions where possible and preserve source-supported facts.
+
+Entity name: {entity_name}
+Descriptions:
+{description_list}
+
+The summary must be no more than {max_length} words.
+""".strip(),
+    "community_report_text.txt": """
+You are an AI assistant helping an analyst understand a community in a knowledge graph.
+Use the source text below to write a structured report with title, summary, findings, and source-grounded details.
+Avoid unsupported claims and prefer concrete entity and relationship evidence.
+
+Source text:
+{input_text}
+
+Maximum report length: {max_report_length}
+""".strip(),
+    "community_report_graph.txt": """
+You are an AI assistant helping an analyst understand a community in a knowledge graph.
+Use the graph evidence below to write a structured community report with title, summary, findings, and rating.
+Keep claims traceable to the supplied entities, relationships, and observations.
+
+Graph evidence:
+{input_text}
+
+Maximum report length: {max_report_length}
+""".strip(),
+    "local_search_system_prompt.txt": """
+You are a helpful assistant answering questions about a dataset using the provided tables.
+Use only the supplied context unless the user explicitly asks for broader reasoning.
+If the context is insufficient, say what is missing.
+
+Context:
+{context_data}
+
+Respond in this style: {response_type}
+""".strip(),
+    "global_search_map_system_prompt.txt": """
+You are a helpful assistant generating intermediate answers from dataset context.
+Answer the user question using the provided community reports and include source-grounded points.
+Keep the answer concise and no longer than {max_length} words.
+
+Context:
+{context_data}
+""".strip(),
+    "global_search_reduce_system_prompt.txt": """
+You are a helpful assistant synthesizing multiple analyst reports into a final answer.
+Use the report data below, merge overlapping points, and cite only source-supported conclusions.
+If the reports disagree, describe the disagreement.
+
+Report data:
+{report_data}
+
+Respond as {response_type} and stay within {max_length} words.
+""".strip(),
+    "global_search_knowledge_system_prompt.txt": """
+The response may include relevant general knowledge outside the dataset only when clearly marked as external context.
+Dataset evidence should remain the authority for facts about the indexed corpus.
+""".strip(),
+    "drift_search_system_prompt.txt": """
+You are a helpful assistant reasoning over local dataset context and prior graph followups.
+Answer the global query using the provided context, preserving uncertainty and source limits.
+
+Global query:
+{global_query}
+
+Followups:
+{followups}
+
+Context:
+{context_data}
+
+Respond in this style: {response_type}
+""".strip(),
+    "drift_reduce_prompt.txt": """
+You are a helpful assistant synthesizing DRIFT search results into a final answer.
+Use the provided context, reconcile duplicate or conflicting points, and keep the response grounded.
+
+Context:
+{context_data}
+
+Respond in this style: {response_type}
+""".strip(),
+    "basic_search_system_prompt.txt": """
+You are a helpful assistant answering questions about a dataset using the provided context.
+Prioritize exact, source-grounded facts and state when the context is insufficient.
+
+Context:
+{context_data}
+
+Respond in this style: {response_type}
+""".strip(),
+}
+
+
+def _first_prompt_constant(module: Any) -> tuple[str, str]:
+    for attr_name in sorted(dir(module)):
+        if "PROMPT" not in attr_name.upper():
+            continue
+        try:
+            value = str(getattr(module, attr_name, "") or "").strip()
+        except Exception:
+            continue
+        if value:
+            return value, attr_name
+    return "", ""
 
 
 def _now_iso() -> str:
@@ -785,6 +908,14 @@ class GraphPromptTuningService:
         override = str(dict(record.prompt_overrides_json or {}).get(filename) or "")
         if override.strip():
             return override, "graph_prompt_override"
+        try:
+            project_prompt = self.graph_service._graph_prompts_dir(record.graph_id) / filename
+            if project_prompt.exists() and project_prompt.is_file():
+                value = project_prompt.read_text(encoding="utf-8", errors="ignore").strip()
+                if value:
+                    return value, "graph_project_prompt_file"
+        except Exception:
+            pass
         for module_name, attr_name in _PROMPT_MODULE_CANDIDATES.get(filename, []):
             try:
                 module = importlib.import_module(module_name)
@@ -793,8 +924,16 @@ class GraphPromptTuningService:
                 value = ""
             if value:
                 return value, f"{module_name}.{attr_name}"
-        if filename == "extract_graph.txt":
-            return _DEFAULT_EXTRACT_GRAPH_PREFLIGHT_PROMPT, "agentic_chatbot_default_extract_graph"
+            try:
+                module = importlib.import_module(module_name)
+                fallback_value, fallback_attr = _first_prompt_constant(module)
+            except Exception:
+                fallback_value, fallback_attr = "", ""
+            if fallback_value:
+                return fallback_value, f"{module_name}.{fallback_attr}"
+        fallback = str(_FALLBACK_GRAPHRAG_PROMPTS.get(filename) or "").strip()
+        if fallback:
+            return fallback, "agentic_chatbot_local_fallback"
         return "", ""
 
     def _compose_prompt_draft(

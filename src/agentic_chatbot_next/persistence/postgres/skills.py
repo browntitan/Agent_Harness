@@ -20,6 +20,7 @@ class SkillPackRecord:
     checksum: str
     tenant_id: str = "local-dev"
     graph_id: str = ""
+    collection_id: str = ""
     tool_tags: List[str] = field(default_factory=list)
     task_tags: List[str] = field(default_factory=list)
     version: str = "1"
@@ -49,6 +50,7 @@ class SkillChunkMatch:
     chunk_index: int
     score: float
     graph_id: str = ""
+    collection_id: str = ""
     tool_tags: List[str] = field(default_factory=list)
     task_tags: List[str] = field(default_factory=list)
     retrieval_profile: str = ""
@@ -59,6 +61,9 @@ class SkillChunkMatch:
     visibility: str = "global"
     status: str = "active"
     version_parent: str = ""
+    source_path: str = ""
+    checksum: str = ""
+    description: str = ""
     kind: str = "retrievable"
     execution_config: Dict[str, Any] = field(default_factory=dict)
 
@@ -151,15 +156,16 @@ class SkillStore:
                 cur.execute(
                     """
                     INSERT INTO skills
-                        (skill_id, tenant_id, owner_user_id, graph_id, name, agent_scope, tool_tags, task_tags,
+                        (skill_id, tenant_id, owner_user_id, graph_id, collection_id, name, agent_scope, tool_tags, task_tags,
                          version, enabled, source_path, checksum, description,
                          retrieval_profile, controller_hints, coverage_goal, result_mode,
                          visibility, status, version_parent, body_markdown, kind, execution_config, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (skill_id) DO UPDATE SET
                         tenant_id = EXCLUDED.tenant_id,
                         owner_user_id = EXCLUDED.owner_user_id,
                         graph_id = EXCLUDED.graph_id,
+                        collection_id = EXCLUDED.collection_id,
                         name = EXCLUDED.name,
                         agent_scope = EXCLUDED.agent_scope,
                         tool_tags = EXCLUDED.tool_tags,
@@ -186,6 +192,7 @@ class SkillStore:
                         record.tenant_id,
                         record.owner_user_id,
                         record.graph_id,
+                        record.collection_id,
                         record.name,
                         record.agent_scope,
                         record.tool_tags,
@@ -240,10 +247,18 @@ class SkillStore:
         visibility: str = "",
         status: str = "",
         graph_id: str = "",
+        collection_id: str = "",
+        collection_ids: Optional[List[str]] = None,
         accessible_skill_family_ids: Optional[List[str]] = None,
     ) -> List[SkillPackRecord]:
         sql = "SELECT * FROM skills WHERE tenant_id = %s"
         params: List[Any] = [tenant_id]
+        collection_scope_provided = collection_ids is not None
+        scoped_collection_ids = [
+            str(item).strip()
+            for item in (collection_ids or [])
+            if str(item).strip()
+        ]
         scoped_skill_family_ids, allow_all_skill_families = _normalize_accessible_skill_family_ids(
             accessible_skill_family_ids
         )
@@ -270,6 +285,15 @@ class SkillStore:
         if graph_id:
             sql += " AND graph_id = %s"
             params.append(str(graph_id))
+        if collection_id:
+            sql += " AND collection_id = %s"
+            params.append(str(collection_id))
+        elif collection_scope_provided:
+            if scoped_collection_ids:
+                sql += " AND (COALESCE(collection_id, '') = '' OR collection_id = ANY(%s))"
+                params.append(scoped_collection_ids)
+            else:
+                sql += " AND COALESCE(collection_id, '') = ''"
         sql += " ORDER BY agent_scope, name"
 
         with get_conn() as conn:
@@ -523,12 +547,15 @@ class SkillStore:
         enabled_only: bool = True,
         owner_user_id: str = "",
         graph_ids: Optional[List[str]] = None,
+        collection_ids: Optional[List[str]] = None,
         accessible_skill_family_ids: Optional[List[str]] = None,
     ) -> List[SkillChunkMatch]:
         embedding = self._embed(query)
         tool_tags = [tag for tag in (tool_tags or []) if tag]
         task_tags = [tag for tag in (task_tags or []) if tag]
         scoped_graph_ids = [str(item).strip() for item in (graph_ids or []) if str(item).strip()]
+        collection_scope_provided = collection_ids is not None
+        scoped_collection_ids = [str(item).strip() for item in (collection_ids or []) if str(item).strip()]
         scoped_skill_family_ids, allow_all_skill_families = _normalize_accessible_skill_family_ids(
             accessible_skill_family_ids
         )
@@ -540,6 +567,7 @@ class SkillStore:
                    s.name,
                    s.agent_scope,
                    s.graph_id,
+                   s.collection_id,
                    s.tool_tags,
                    s.task_tags,
                    s.retrieval_profile,
@@ -550,6 +578,9 @@ class SkillStore:
                    s.visibility,
                    s.status,
                    s.version_parent,
+                   s.source_path,
+                   s.checksum,
+                   s.description,
                    s.kind,
                    s.execution_config,
                    s.updated_at,
@@ -580,6 +611,12 @@ class SkillStore:
         if scoped_graph_ids:
             sql += " AND (s.graph_id = '' OR s.graph_id = ANY(%s))"
             params.append(scoped_graph_ids)
+        if collection_scope_provided:
+            if scoped_collection_ids:
+                sql += " AND (COALESCE(s.collection_id, '') = '' OR s.collection_id = ANY(%s))"
+                params.append(scoped_collection_ids)
+            else:
+                sql += " AND COALESCE(s.collection_id, '') = ''"
         if tool_tags:
             sql += " AND s.tool_tags && %s"
             params.append(tool_tags)
@@ -632,6 +669,7 @@ class SkillStore:
                 chunk_index=int(row["chunk_index"]),
                 score=float(row["score"]),
                 graph_id=str(row.get("graph_id") or ""),
+                collection_id=str(row.get("collection_id") or ""),
                 tool_tags=list(row.get("tool_tags") or []),
                 task_tags=list(row.get("task_tags") or []),
                 retrieval_profile=str(row.get("retrieval_profile") or ""),
@@ -642,6 +680,9 @@ class SkillStore:
                 visibility=str(row.get("visibility") or "global"),
                 status=str(row.get("status") or "active"),
                 version_parent=str(row.get("version_parent") or row.get("skill_id") or ""),
+                source_path=str(row.get("source_path") or ""),
+                checksum=str(row.get("checksum") or ""),
+                description=str(row.get("description") or ""),
                 kind=_normalize_kind(str(row.get("kind") or "retrievable")),
                 execution_config=dict(row.get("execution_config") or {}),
             )
@@ -654,6 +695,7 @@ def _row_to_skill_pack(row: Dict[str, Any]) -> SkillPackRecord:
         skill_id=row.get("skill_id", ""),
         tenant_id=row.get("tenant_id") or "local-dev",
         graph_id=row.get("graph_id") or "",
+        collection_id=row.get("collection_id") or "",
         name=row.get("name", ""),
         agent_scope=row.get("agent_scope", ""),
         tool_tags=list(row.get("tool_tags") or []),

@@ -125,9 +125,108 @@ class RagSearchBatchResult:
     parallel_workers_used: bool = False
 
 
+@dataclass
+class TabularEvidenceTask:
+    task_id: str
+    query: str
+    doc_id: str
+    title: str
+    source_path: str = ""
+    file_type: str = ""
+    sheet_hints: List[str] = field(default_factory=list)
+    cell_ranges: List[str] = field(default_factory=list)
+    row_hints: List[Dict[str, Any]] = field(default_factory=list)
+    requested_operations: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "query": self.query,
+            "doc_id": self.doc_id,
+            "title": self.title,
+            "source_path": self.source_path,
+            "file_type": self.file_type,
+            "sheet_hints": list(self.sheet_hints),
+            "cell_ranges": list(self.cell_ranges),
+            "row_hints": [dict(item) for item in self.row_hints],
+            "requested_operations": list(self.requested_operations),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "TabularEvidenceTask":
+        return cls(
+            task_id=str(raw.get("task_id") or ""),
+            query=str(raw.get("query") or ""),
+            doc_id=str(raw.get("doc_id") or ""),
+            title=str(raw.get("title") or ""),
+            source_path=str(raw.get("source_path") or ""),
+            file_type=str(raw.get("file_type") or ""),
+            sheet_hints=[str(item) for item in (raw.get("sheet_hints") or []) if str(item)],
+            cell_ranges=[str(item) for item in (raw.get("cell_ranges") or []) if str(item)],
+            row_hints=[dict(item) for item in (raw.get("row_hints") or []) if isinstance(item, dict)],
+            requested_operations=[str(item) for item in (raw.get("requested_operations") or []) if str(item)],
+        )
+
+
+@dataclass
+class TabularEvidenceResult:
+    task_id: str
+    status: str = "ok"
+    summary: str = ""
+    findings: List[Dict[str, Any]] = field(default_factory=list)
+    source_refs: List[Dict[str, Any]] = field(default_factory=list)
+    operations: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "status": self.status,
+            "summary": self.summary,
+            "findings": [dict(item) for item in self.findings],
+            "source_refs": [dict(item) for item in self.source_refs],
+            "operations": list(self.operations),
+            "warnings": list(self.warnings),
+            "confidence": float(self.confidence),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "TabularEvidenceResult":
+        try:
+            confidence = float(raw.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        findings: List[Dict[str, Any]] = []
+        for item in raw.get("findings") or []:
+            if isinstance(item, dict):
+                findings.append(dict(item))
+            elif str(item).strip():
+                findings.append({"text": str(item).strip()})
+        return cls(
+            task_id=str(raw.get("task_id") or ""),
+            status=str(raw.get("status") or "ok"),
+            summary=str(raw.get("summary") or ""),
+            findings=findings,
+            source_refs=[dict(item) for item in (raw.get("source_refs") or []) if isinstance(item, dict)],
+            operations=[str(item) for item in (raw.get("operations") or []) if str(item)],
+            warnings=[str(item) for item in (raw.get("warnings") or []) if str(item)],
+            confidence=confidence,
+        )
+
+
+@dataclass
+class TabularEvidenceBatchResult:
+    results: List[TabularEvidenceResult] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
 class RagRuntimeBridge(Protocol):
     def can_run_parallel(self, *, task_count: int) -> bool:
         ...
 
     def run_search_tasks(self, tasks: Sequence[RagSearchTask]) -> RagSearchBatchResult:
+        ...
+
+    def run_tabular_evidence_tasks(self, tasks: Sequence[TabularEvidenceTask]) -> TabularEvidenceBatchResult:
         ...

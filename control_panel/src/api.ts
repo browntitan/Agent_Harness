@@ -9,6 +9,8 @@ import type {
   ArchitectureActivity,
   ArchitectureSnapshot,
   CapabilitySectionStatus,
+  CollectionSkillDraftApplyPayload,
+  CollectionSkillDraftPayload,
   CollectionHealthReport,
   CollectionOperationResult,
   CollectionSummary,
@@ -381,6 +383,36 @@ export const api = {
       token,
     )
   },
+  draftCollectionSkills(
+    token: string,
+    collectionId: string,
+    payload: { graph_id?: string; guidance?: string; intent?: string; draft_types?: string[] },
+  ) {
+    return apiFetch<CollectionSkillDraftPayload>(
+      `/v1/admin/collections/${collectionId}/skill-drafts`,
+      token,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    )
+  },
+  applyCollectionSkillDrafts(
+    token: string,
+    collectionId: string,
+    payload: { graph_id?: string; drafts: Array<Record<string, unknown>> },
+  ) {
+    return apiFetch<CollectionSkillDraftApplyPayload>(
+      `/v1/admin/collections/${collectionId}/skill-drafts/apply`,
+      token,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    )
+  },
   reindexDocument(token: string, collectionId: string, docId: string) {
     return apiFetch<Record<string, unknown>>(
       `/v1/admin/collections/${collectionId}/documents/${docId}/reindex`,
@@ -496,11 +528,33 @@ export const api = {
   getGraphRuns(token: string, graphId: string) {
     return apiFetch<{ runs: GraphIndexRunRecord[] }>(`/v1/admin/graphs/${graphId}/runs`, token)
   },
+  listGraphRuns(token: string, payload: { status?: string; graph_id?: string; limit?: number } = {}) {
+    const params = new URLSearchParams()
+    if (payload.status) params.set('status', payload.status)
+    if (payload.graph_id) params.set('graph_id', payload.graph_id)
+    if (payload.limit) params.set('limit', String(payload.limit))
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return apiFetch<{ runs: GraphIndexRunRecord[] }>(`/v1/admin/graphs/runs${suffix}`, token)
+  },
   cancelGraphRun(token: string, graphId: string, runId: string) {
     return apiFetch<Record<string, unknown>>(`/v1/admin/graphs/${graphId}/runs/${runId}/cancel`, token, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
+    })
+  },
+  deleteGraphRun(token: string, graphId: string, runId: string, payload: { status?: string } = {}) {
+    return apiFetch<Record<string, unknown>>(`/v1/admin/graphs/${graphId}/runs/${runId}`, token, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
+  cleanupGraphRuns(token: string, payload: { status?: string; graph_id?: string } = {}) {
+    return apiFetch<Record<string, unknown>>('/v1/admin/graphs/runs/cleanup', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     })
   },
   deleteGraph(token: string, graphId: string, payload: { delete_artifacts?: boolean } = {}) {

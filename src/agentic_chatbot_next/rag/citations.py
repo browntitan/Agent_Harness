@@ -1,10 +1,98 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Sequence
 
 from langchain_core.documents import Document
 
 from agentic_chatbot_next.contracts.rag import Citation
+
+
+def _citation_value(citation: Any, key: str) -> str:
+    if isinstance(citation, Citation):
+        return str(getattr(citation, key, "") or "").strip()
+    if isinstance(citation, dict):
+        return str(citation.get(key) or "").strip()
+    return str(getattr(citation, key, "") or "").strip()
+
+
+def _source_basename(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    clean = text.split("?", 1)[0].rstrip("/").replace("\\", "/")
+    try:
+        return Path(clean).name
+    except Exception:
+        return clean.rsplit("/", 1)[-1]
+
+
+def citation_display_label(citation: Any) -> str:
+    citation_id = _citation_value(citation, "citation_id")
+    for candidate in (
+        _citation_value(citation, "title"),
+        _source_basename(_citation_value(citation, "source_path")),
+        _citation_value(citation, "doc_id"),
+        citation_id,
+    ):
+        if candidate and candidate != citation_id:
+            return candidate
+    return citation_id or "source"
+
+
+def replace_inline_citation_ids(
+    text: str,
+    citations: Sequence[Any],
+    *,
+    used_citation_ids: Sequence[str] | None = None,
+    link_renderer: Callable[[str, str], str] | None = None,
+) -> str:
+    """Replace raw inline citation ids with user-facing source labels."""
+
+    citation_by_id = {
+        _citation_value(citation, "citation_id"): citation
+        for citation in citations
+        if _citation_value(citation, "citation_id")
+    }
+    if not citation_by_id:
+        return str(text or "")
+    used = {str(item) for item in (used_citation_ids or []) if str(item)}
+    if used:
+        citation_by_id = {
+            citation_id: citation
+            for citation_id, citation in citation_by_id.items()
+            if citation_id in used
+        }
+    if not citation_by_id:
+        return str(text or "")
+
+    def _render(citation: Any) -> str:
+        label = citation_display_label(citation)
+        url = _citation_value(citation, "url")
+        if link_renderer is not None:
+            return link_renderer(label, url)
+        return label
+
+    token_re = re.compile(r"(\s*(?:[,;]|\band\b)\s*)")
+
+    def _replace_group(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        parts = token_re.split(inner)
+        replaced = False
+        rendered_parts: list[str] = []
+        for part in parts:
+            clean = part.strip()
+            if clean in citation_by_id:
+                rendered_parts.append(part.replace(clean, _render(citation_by_id[clean])))
+                replaced = True
+            else:
+                rendered_parts.append(part)
+        if not replaced:
+            return match.group(0)
+        return "(" + "".join(rendered_parts) + ")"
+
+    return re.sub(r"(?<!\])\(([^()\n]{1,500})\)", _replace_group, str(text or ""))
 
 
 def render_citation_location(metadata: Dict[str, Any]) -> str:

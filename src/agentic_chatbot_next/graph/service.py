@@ -42,6 +42,7 @@ from agentic_chatbot_next.persistence.postgres.graphs import (
     GraphIndexSourceRecord,
 )
 from agentic_chatbot_next.rag.ingest import canonicalize_local_source_path
+from agentic_chatbot_next.rag.reranker import rerank_graph_candidates
 from agentic_chatbot_next.rag.source_links import build_document_source_url
 from agentic_chatbot_next.storage import blob_ref_from_record, build_blob_store
 
@@ -103,11 +104,144 @@ def _normalize_graph_query_methods(
     return _dedupe(normalized), _dedupe(invalid), aliases
 
 
-def _expanded_graph_queries(query: str) -> List[str]:
+_GRAPH_QUERY_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "answer",
+    "based",
+    "because",
+    "before",
+    "being",
+    "between",
+    "could",
+    "does",
+    "following",
+    "from",
+    "graph",
+    "have",
+    "identify",
+    "index",
+    "into",
+    "look",
+    "need",
+    "question",
+    "response",
+    "search",
+    "should",
+    "that",
+    "their",
+    "there",
+    "these",
+    "this",
+    "those",
+    "using",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "would",
+}
+_GRAPH_GLOBAL_QUERY_RE = re.compile(
+    r"\b(summary|overview|theme|themes|across|corpus|collection|overall|compare|comparison|"
+    r"cause|caused|because|driver|factor|attributable|residual|risk|concern|separate|"
+    r"approved|current|final|latest|cost|increase|decrease|budget|million|\$|schedule|status)\b",
+    re.IGNORECASE,
+)
+_GRAPH_LOCAL_QUERY_RE = re.compile(
+    r"\b(relationship|relationships|entity|entities|depends on|dependency|connected|connects|"
+    r"path between|who|which|approval chain|owner|supplier|vendor)\b",
+    re.IGNORECASE,
+)
+_GRAPH_DRIFT_QUERY_RE = re.compile(
+    r"\b(drift|timeline|evolution|over time|changed|changing|history|sequence|before and after)\b"
+    r"|\bchanges\s+over\s+time\b",
+    re.IGNORECASE,
+)
+_SOURCE_READ_QUERY_RE = re.compile(
+    r"(\$|\b(?:cost|increase|decrease|budget|million|date|when|approved|current|final|latest|"
+    r"exact|caus|because|attributable|driver|factor|residual|risk|concern|separate|"
+    r"support|refute|contradict)\b)",
+    re.IGNORECASE,
+)
+_AUTHORITY_QUERY_RE = re.compile(r"\b(approved|current|final|latest|exact|official|authoritative)\b", re.IGNORECASE)
+_DRAFT_HINT_RE = re.compile(r"\b(draft|preliminary|planning|rough|estimate)\b", re.IGNORECASE)
+_AUTHORITY_HINT_RE = re.compile(r"\b(approved|current|final|official|authoritative|status|review|rev(?:ision)?\s*[a-z0-9])\b", re.IGNORECASE)
+
+
+def _graph_query_terms(value: str) -> set[str]:
+    terms: set[str] = set()
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", str(value or "")):
+        clean = token.strip("._-").casefold()
+        if len(clean) < 3 or clean in _GRAPH_QUERY_STOPWORDS:
+            continue
+        terms.add(clean)
+        for part in re.split(r"[-_.]", clean):
+            if len(part) >= 3 and part not in _GRAPH_QUERY_STOPWORDS:
+                terms.add(part)
+    return terms
+
+
+def _graph_query_is_hard(query: str) -> bool:
+    return bool(_SOURCE_READ_QUERY_RE.search(str(query or "")))
+
+
+def _auto_graph_query_methods(
+    query: str,
+    *,
+    supported: Sequence[str] | None,
+    default_method: str = "local",
+) -> List[str]:
+    supported_methods = _dedupe(str(item).strip().lower() for item in (supported or []) if str(item).strip())
+    if not supported_methods:
+        supported_methods = _dedupe([str(default_method or "local").strip().lower() or "local"])
+    methods: List[str] = []
+    if _GRAPH_DRIFT_QUERY_RE.search(query) and "drift" in supported_methods:
+        methods.append("drift")
+    if _GRAPH_GLOBAL_QUERY_RE.search(query) and "global" in supported_methods:
+        methods.append("global")
+    if (_GRAPH_LOCAL_QUERY_RE.search(query) or not methods) and "local" in supported_methods:
+        methods.append("local")
+    if not methods:
+        methods.append(supported_methods[0])
+    return _dedupe(methods)
+
+
+def _keyword_projection(query: str, *, limit: int = 14) -> str:
+    terms = []
+    seen: set[str] = set()
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", str(query or "")):
+        clean = token.strip("._-")
+        if len(clean) < 3 or clean.casefold() in _GRAPH_QUERY_STOPWORDS:
+            continue
+        key = clean.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(clean)
+        if len(terms) >= limit:
+            break
+    return " ".join(terms)
+
+
+def _expanded_graph_queries(query: str, *, enable_rewrites: bool = False) -> List[str]:
     base = str(query or "").strip()
     if not base:
         return []
-    return [base]
+    if not enable_rewrites:
+        return [base]
+    variants = [base]
+    keyword = _keyword_projection(base)
+    if keyword and keyword.casefold() != base.casefold():
+        variants.append(f"{keyword} evidence")
+    if _GRAPH_LOCAL_QUERY_RE.search(base):
+        variants.append(f"{keyword or base} relationship dependency entity evidence")
+    if _GRAPH_GLOBAL_QUERY_RE.search(base):
+        variants.append(f"{keyword or base} summary cause status risk evidence support refute")
+    if _AUTHORITY_QUERY_RE.search(base):
+        variants.append(f"{keyword or base} approved final current authoritative source evidence")
+    return _dedupe(variants)[:5]
 
 
 def _source_record_id(graph_id: str, source_doc_id: str, source_path: str) -> str:
@@ -131,6 +265,81 @@ def _source_lookup_keys(value: Any) -> List[str]:
     except Exception:
         pass
     return [key for key in keys if key]
+
+
+def _graph_hit_text(hit: Dict[str, Any]) -> str:
+    metadata = dict(hit.get("metadata") or {})
+    source = dict(metadata.get("source") or {})
+    pieces = [
+        str(hit.get("title") or ""),
+        str(hit.get("source_path") or source.get("source_path") or ""),
+        str(hit.get("source_type") or source.get("source_type") or ""),
+        str(hit.get("query_method") or ""),
+        " ".join(str(item) for item in (hit.get("relationship_path") or []) if str(item).strip()),
+        str(hit.get("summary") or ""),
+    ]
+    return " ".join(" ".join(piece.split()) for piece in pieces if piece and str(piece).strip())
+
+
+def _graph_hit_heuristic_score(query: str, hit: Dict[str, Any]) -> float:
+    query_terms = _graph_query_terms(query)
+    haystack = _graph_hit_text(hit)
+    hay_terms = _graph_query_terms(haystack)
+    score = float(hit.get("score") or 0.0)
+    if query_terms and hay_terms:
+        overlap = len(query_terms & hay_terms)
+        score += min(0.35, overlap * 0.035)
+    if _AUTHORITY_QUERY_RE.search(query):
+        if _AUTHORITY_HINT_RE.search(haystack):
+            score += 0.16
+        if _DRAFT_HINT_RE.search(haystack):
+            score -= 0.16
+    method = str(hit.get("query_method") or "").strip().lower()
+    if _GRAPH_GLOBAL_QUERY_RE.search(query) and method == "global":
+        score += 0.06
+    if _GRAPH_LOCAL_QUERY_RE.search(query) and method == "local":
+        score += 0.04
+    if not str(hit.get("doc_id") or "").strip():
+        score -= 0.08
+    if not str(hit.get("summary") or "").strip():
+        score -= 0.08
+    return score
+
+
+def _heuristic_rerank_graph_hits(query: str, hits: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    scored = []
+    for index, hit in enumerate(hits):
+        item = dict(hit)
+        item["score"] = _graph_hit_heuristic_score(query, item)
+        metadata = dict(item.get("metadata") or {})
+        metadata["heuristic_rerank_score"] = item["score"]
+        item["metadata"] = metadata
+        scored.append((item["score"], -index, item))
+    scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    return [item for _score, _index, item in scored]
+
+
+def _graph_source_read_plan(query: str, hits: Sequence[Dict[str, Any]], *, reason: str) -> Dict[str, Any]:
+    doc_ids = _dedupe(str(hit.get("doc_id") or "") for hit in hits if isinstance(hit, dict))
+    titles = _dedupe(str(hit.get("title") or "") for hit in hits if isinstance(hit, dict))
+    missing_slots: List[str] = []
+    lowered = str(query or "").lower()
+    if re.search(r"\b(cost|increase|decrease|budget|million|\$)\b", lowered):
+        missing_slots.append("exact_amount_or_cost_component")
+    if re.search(r"\b(approved|current|final|latest|exact)\b", lowered):
+        missing_slots.append("authoritative_or_current_source")
+    if re.search(r"\b(caus|because|attributable|driver|factor)\b", lowered):
+        missing_slots.append("causal_support")
+    if re.search(r"\b(residual|risk|concern|separate|refute|contradict)\b", lowered):
+        missing_slots.append("distinction_or_residual_risk")
+    return {
+        "required": True,
+        "reason": reason,
+        "preferred_doc_ids": doc_ids[:8],
+        "candidate_titles": titles[:8],
+        "missing_claim_slots": _dedupe(missing_slots),
+        "suggested_query": str(query or "").strip(),
+    }
 
 
 _WORKFLOW_STARTED_RE = re.compile(r"Workflow started: (?P<workflow>[A-Za-z0-9_]+)")
@@ -2976,6 +3185,132 @@ class GraphService:
         _, runs = self._reconcile_live_run_state(record)
         return [asdict(item) for item in runs]
 
+    def list_graph_runs_by_status(
+        self,
+        *,
+        status: str = "",
+        graph_ref: str = "",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        run_store = self._run_store()
+        if run_store is None:
+            return []
+        graph_id = ""
+        if graph_ref:
+            record = self._resolve_graph_reference(graph_ref)
+            if record is None:
+                return []
+            graph_id = record.graph_id
+        if hasattr(run_store, "list_runs_by_status"):
+            runs = run_store.list_runs_by_status(
+                tenant_id=self.tenant_id,
+                status=status,
+                graph_id=graph_id,
+                limit=max(1, int(limit)),
+            )
+        elif graph_id:
+            runs = [
+                run for run in run_store.list_runs(graph_id, tenant_id=self.tenant_id, limit=max(1, int(limit)))
+                if not status or str(run.status or "") == status
+            ]
+        else:
+            store = self._index_store()
+            graph_records = self._list_index_records(store, limit=250) if store is not None else []
+            collected: List[GraphIndexRunRecord] = []
+            for graph in graph_records:
+                collected.extend(
+                    run for run in run_store.list_runs(graph.graph_id, tenant_id=self.tenant_id, limit=max(1, int(limit)))
+                    if not status or str(run.status or "") == status
+                )
+            runs = sorted(collected, key=lambda item: str(item.started_at or ""), reverse=True)[:max(1, int(limit))]
+        return [asdict(item) for item in runs]
+
+    def delete_admin_graph_run(self, graph_ref: str, *, run_id: str, status: str = "failed") -> Dict[str, Any]:
+        record = self._resolve_graph_reference(graph_ref)
+        run_store = self._run_store()
+        if record is None:
+            return {"error": f"Graph '{graph_ref}' was not found."}
+        if run_store is None:
+            return {"error": "Graph run store is unavailable."}
+        target_run = next(
+            (
+                run for run in run_store.list_runs(record.graph_id, tenant_id=self.tenant_id, limit=500)
+                if str(run.run_id or "") == str(run_id or "")
+            ),
+            None,
+        )
+        if target_run is None:
+            return {"error": f"Graph run '{run_id}' was not found."}
+        normalized_status = str(target_run.status or "").strip().lower()
+        allowed_status = str(status or "failed").strip().lower()
+        if normalized_status in {"queued", "running"}:
+            return {"error": "Active graph runs must be cancelled before they can be removed."}
+        if normalized_status != allowed_status:
+            return {"error": f"Only {allowed_status} graph runs can be deleted through this cleanup action."}
+        deleted = 0
+        if hasattr(run_store, "delete_run"):
+            deleted = int(run_store.delete_run(
+                run_id,
+                tenant_id=self.tenant_id,
+                graph_id=record.graph_id,
+                statuses=[allowed_status],
+            ) or 0)
+        return {
+            "deleted": bool(deleted),
+            "deleted_count": deleted,
+            "graph_id": record.graph_id,
+            "run_id": run_id,
+            "status": normalized_status,
+            "run": asdict(target_run),
+        }
+
+    def cleanup_admin_graph_runs(
+        self,
+        *,
+        status: str = "failed",
+        graph_ref: str = "",
+        limit: int = 1000,
+    ) -> Dict[str, Any]:
+        normalized_status = str(status or "failed").strip().lower()
+        if normalized_status != "failed":
+            return {"error": "Only failed graph runs can be bulk deleted."}
+        run_store = self._run_store()
+        if run_store is None:
+            return {"error": "Graph run store is unavailable."}
+        graph_id = ""
+        if graph_ref:
+            record = self._resolve_graph_reference(graph_ref)
+            if record is None:
+                return {"error": f"Graph '{graph_ref}' was not found."}
+            graph_id = record.graph_id
+        runs = self.list_graph_runs_by_status(status=normalized_status, graph_ref=graph_id, limit=limit)
+        deleted_count = 0
+        deleted_runs: List[Dict[str, Any]] = []
+        for run in runs[: max(1, int(limit))]:
+            run_id = str(run.get("run_id") or "")
+            run_graph_id = str(run.get("graph_id") or graph_id)
+            if not run_id or str(run.get("status") or "").strip().lower() != normalized_status:
+                continue
+            if hasattr(run_store, "delete_run"):
+                deleted = int(run_store.delete_run(
+                    run_id,
+                    tenant_id=self.tenant_id,
+                    graph_id=run_graph_id,
+                    statuses=[normalized_status],
+                ) or 0)
+            else:
+                deleted = 0
+            if deleted:
+                deleted_count += deleted
+                deleted_runs.append(run)
+        return {
+            "deleted": deleted_count > 0,
+            "deleted_count": deleted_count,
+            "status": normalized_status,
+            "graph_id": graph_id,
+            "runs": deleted_runs,
+        }
+
     def list_indexes(self, *, collection_id: str = "", limit: int = 100) -> List[Dict[str, Any]]:
         store = self._index_store()
         if store is None:
@@ -3484,6 +3819,88 @@ class GraphService:
         payload["citations"] = list(citations_by_id.values())
         return payload
 
+    def _llm_graph_search_plan(
+        self,
+        *,
+        query: str,
+        supported_methods: Sequence[str],
+        heuristic_methods: Sequence[str],
+        graph_context_summary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not bool(getattr(self.settings, "graph_query_llm_planning_enabled", False)):
+            return {}
+        base_url = str(getattr(self.settings, "ollama_base_url", "") or "").strip()
+        model = str(
+            getattr(self.settings, "ollama_judge_model", "")
+            or getattr(self.settings, "ollama_chat_model", "")
+            or ""
+        ).strip()
+        if not base_url or not model:
+            return {}
+        prompt = (
+            "Choose GraphRAG query methods and generic search rewrites for the user query.\n"
+            "Use only visible terms from the query and graph metadata. Do not add answer facts.\n"
+            "Supported methods are local, global, drift. Return JSON only with keys: "
+            "methods, rewrites, reason.\n\n"
+            f"QUERY: {query}\n"
+            f"SUPPORTED_METHODS: {list(supported_methods)}\n"
+            f"HEURISTIC_METHODS: {list(heuristic_methods)}\n"
+            f"GRAPH_CONTEXT_SUMMARY: {json.dumps(dict(graph_context_summary or {}), ensure_ascii=False)[:3000]}"
+        )
+        try:
+            with httpx.Client(timeout=httpx.Timeout(12.0)) as client:
+                response = client.post(
+                    base_url.rstrip("/") + "/api/chat",
+                    json={
+                        "model": model,
+                        "stream": False,
+                        "messages": [
+                            {"role": "system", "content": "Return JSON only."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "format": "json",
+                        "options": {"temperature": 0},
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+        except Exception:
+            return {}
+        content = ""
+        message = data.get("message") if isinstance(data, dict) else None
+        if isinstance(message, dict):
+            content = str(message.get("content") or "")
+        if not content and isinstance(data, dict):
+            content = str(data.get("response") or "")
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+            if not match:
+                return {}
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return {}
+        if not isinstance(parsed, dict):
+            return {}
+        supported = set(str(item).strip().lower() for item in supported_methods)
+        methods = [
+            str(item).strip().lower()
+            for item in (parsed.get("methods") or [])
+            if str(item).strip().lower() in supported
+        ]
+        rewrites = [
+            str(item).strip()
+            for item in (parsed.get("rewrites") or [])
+            if str(item).strip()
+        ][:4]
+        return {
+            "methods": _dedupe(methods),
+            "rewrites": _dedupe(rewrites),
+            "reason": str(parsed.get("reason") or "llm_graph_search_plan"),
+        }
+
     def query_index(
         self,
         graph_id: str,
@@ -3504,13 +3921,44 @@ class GraphService:
         scoped_doc_ids = _dedupe(
             [*(doc_ids or []), *[item.source_doc_id for item in source_records if item.source_doc_id], *record.source_doc_ids]
         )
-        requested_methods, invalid_methods, method_aliases = _normalize_graph_query_methods(
-            methods,
-            supported=record.supported_query_methods,
-            default_method=str(getattr(self.settings, "graphrag_default_query_method", "local") or "local"),
+        raw_requested_methods = [str(item).strip() for item in (methods or []) if str(item).strip()]
+        supported_methods = _dedupe(
+            record.supported_query_methods or [getattr(self.settings, "graphrag_default_query_method", "local")]
         )
+        if raw_requested_methods:
+            requested_methods, invalid_methods, method_aliases = _normalize_graph_query_methods(
+                methods,
+                supported=record.supported_query_methods,
+                default_method=str(getattr(self.settings, "graphrag_default_query_method", "local") or "local"),
+            )
+            search_plan = {
+                "planner": "explicit_methods",
+                "methods": requested_methods,
+                "rewrites": [],
+                "reason": "Caller supplied graph query methods.",
+            }
+        else:
+            heuristic_methods = _auto_graph_query_methods(
+                query,
+                supported=record.supported_query_methods,
+                default_method=str(getattr(self.settings, "graphrag_default_query_method", "local") or "local"),
+            )
+            llm_plan = self._llm_graph_search_plan(
+                query=query,
+                supported_methods=supported_methods,
+                heuristic_methods=heuristic_methods,
+                graph_context_summary=dict(record.graph_context_summary or {}),
+            )
+            requested_methods = _dedupe(llm_plan.get("methods") or heuristic_methods)
+            invalid_methods = []
+            method_aliases = {"auto": requested_methods}
+            search_plan = {
+                "planner": "llm+heuristic" if llm_plan else "heuristic",
+                "methods": requested_methods,
+                "rewrites": [str(item) for item in (llm_plan.get("rewrites") or []) if str(item).strip()],
+                "reason": str(llm_plan.get("reason") or "Auto-selected graph query methods from generic query features."),
+            }
         if invalid_methods:
-            supported_methods = _dedupe(record.supported_query_methods or [getattr(self.settings, "graphrag_default_query_method", "local")])
             return {
                 "error": (
                     "Unsupported graph query method(s): "
@@ -3531,7 +3979,8 @@ class GraphService:
                 "evidence_status": "method_error",
             }
         cache_store = self._query_cache_store()
-        if use_cache and cache_store is not None and len(requested_methods) == 1:
+        cache_allowed = bool(raw_requested_methods) and use_cache and cache_store is not None and len(requested_methods) == 1
+        if cache_allowed:
             cached = cache_store.get_cached(
                 graph_id=graph_id,
                 tenant_id=self.tenant_id,
@@ -3547,7 +3996,11 @@ class GraphService:
 
         backend = self._backend_for(record.backend)
         results: List[GraphQueryHit] = []
-        effective_queries = _expanded_graph_queries(query) or [query]
+        effective_queries = _expanded_graph_queries(query, enable_rewrites=not bool(raw_requested_methods)) or [query]
+        for rewrite in search_plan.get("rewrites") or []:
+            if str(rewrite).strip():
+                effective_queries.append(str(rewrite).strip())
+        effective_queries = _dedupe(effective_queries)[:6]
         if bool(record.query_ready):
             for method in requested_methods:
                 for effective_query in effective_queries:
@@ -3592,9 +4045,19 @@ class GraphService:
             "query": query,
             "methods": requested_methods,
             "method_aliases": method_aliases,
+            "search_plan": search_plan,
             "expanded_queries": effective_queries if len(effective_queries) > 1 else [],
-            "results": [asdict(item) for item in results[: max(1, int(limit))]],
+            "results": [],
         }
+        raw_results = [asdict(item) for item in results]
+        heuristic_results = _heuristic_rerank_graph_hits(query, raw_results)
+        reranked_results, rerank_metadata = rerank_graph_candidates(
+            self.settings,
+            query=query,
+            candidates=heuristic_results,
+        )
+        payload["rerank"] = rerank_metadata
+        payload["results"] = reranked_results[: max(1, int(limit))]
         payload = self._attach_graph_citations(payload, source_records=source_records)
         catalog_only = bool(payload["results"]) and all(
             str((item.get("metadata") or {}).get("fallback") or "").strip() == "catalog"
@@ -3605,16 +4068,38 @@ class GraphService:
         if catalog_only:
             payload["evidence_status"] = "source_candidates_only"
             payload["requires_source_read"] = True
+            payload["source_read_plan"] = _graph_source_read_plan(
+                query,
+                payload["results"],
+                reason="Graph search returned catalog source candidates only.",
+            )
             payload["warnings"] = [
                 "Graph search returned catalog source candidates only; read source text or run grounded RAG before answering."
             ]
         elif payload["results"]:
             payload["evidence_status"] = "grounded_graph_evidence"
-            payload["requires_source_read"] = False
+            hard_query = _graph_query_is_hard(query)
+            weak_snippets = not any(len(str(item.get("summary") or "").strip()) >= 80 for item in payload["results"] if isinstance(item, dict))
+            payload["requires_source_read"] = bool(hard_query or weak_snippets)
+            if payload["requires_source_read"]:
+                reason = (
+                    "Graph search found leads, but the query asks for exact, causal, current, or version-sensitive claims."
+                    if hard_query
+                    else "Graph search results did not include enough textual snippet support."
+                )
+                payload["source_read_plan"] = _graph_source_read_plan(query, payload["results"], reason=reason)
+                payload["warnings"] = [
+                    "Graph search returned candidate evidence, but source text should be read before final answer synthesis."
+                ]
         else:
             payload["evidence_status"] = "no_results"
             payload["requires_source_read"] = True
-        if use_cache and cache_store is not None and len(requested_methods) == 1:
+            payload["source_read_plan"] = _graph_source_read_plan(
+                query,
+                [],
+                reason="Graph search returned no results.",
+            )
+        if cache_allowed:
             cache_store.put_cached(
                 graph_id=graph_id,
                 tenant_id=self.tenant_id,
@@ -3646,6 +4131,8 @@ class GraphService:
         self._remember_active_graphs(shortlist_graph_ids)
         aggregated: List[Dict[str, Any]] = []
         citations_by_id: Dict[str, Dict[str, Any]] = {}
+        child_source_read_required = False
+        child_source_read_plans: List[Dict[str, Any]] = []
         for item in shortlist[: max(1, int(top_k_graphs))]:
             graph_id = str(item.get("graph_id") or "")
             if not graph_id:
@@ -3662,11 +4149,21 @@ class GraphService:
                     citation_id = str(citation.get("citation_id") or "").strip()
                     if citation_id:
                         citations_by_id.setdefault(citation_id, citation)
+            if bool(response.get("requires_source_read")):
+                child_source_read_required = True
+                plan = response.get("source_read_plan")
+                if isinstance(plan, dict):
+                    child_source_read_plans.append(plan)
             for hit in response.get("results", []) or []:
                 if isinstance(hit, dict):
                     aggregated.append(hit)
-        aggregated.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
-        visible_results = aggregated[: max(1, int(limit))]
+        heuristic_results = _heuristic_rerank_graph_hits(query, aggregated)
+        reranked_results, rerank_metadata = rerank_graph_candidates(
+            self.settings,
+            query=query,
+            candidates=heuristic_results,
+        )
+        visible_results = reranked_results[: max(1, int(limit))]
         catalog_only = bool(visible_results) and all(
             str((item.get("metadata") or {}).get("fallback") or "").strip() == "catalog"
             or str(item.get("backend") or "").strip().lower() == "catalog"
@@ -3678,19 +4175,45 @@ class GraphService:
             "graph_shortlist": shortlist,
             "results": visible_results,
             "citations": list(citations_by_id.values()),
+            "rerank": rerank_metadata,
         }
+        if child_source_read_plans:
+            payload["child_source_read_plans"] = child_source_read_plans[:8]
         if catalog_only:
             payload["evidence_status"] = "source_candidates_only"
             payload["requires_source_read"] = True
+            payload["source_read_plan"] = _graph_source_read_plan(
+                query,
+                visible_results,
+                reason="Graph search returned catalog source candidates only.",
+            )
             payload["warnings"] = [
                 "Graph search returned catalog source candidates only; read source text or run grounded RAG before answering."
             ]
         elif visible_results:
             payload["evidence_status"] = "grounded_graph_evidence"
-            payload["requires_source_read"] = False
+            hard_query = _graph_query_is_hard(query)
+            weak_snippets = not any(len(str(item.get("summary") or "").strip()) >= 80 for item in visible_results if isinstance(item, dict))
+            payload["requires_source_read"] = bool(child_source_read_required or hard_query or weak_snippets)
+            if payload["requires_source_read"]:
+                if child_source_read_required:
+                    reason = "One or more graph searches marked these graph leads as requiring source-text confirmation."
+                elif hard_query:
+                    reason = "Graph search found leads, but the query asks for exact, causal, current, or version-sensitive claims."
+                else:
+                    reason = "Graph search results did not include enough textual snippet support."
+                payload["source_read_plan"] = _graph_source_read_plan(query, visible_results, reason=reason)
+                payload["warnings"] = [
+                    "Graph search returned candidate evidence, but source text should be read before final answer synthesis."
+                ]
         else:
             payload["evidence_status"] = "no_results"
             payload["requires_source_read"] = True
+            payload["source_read_plan"] = _graph_source_read_plan(
+                query,
+                [],
+                reason="Graph search returned no results.",
+            )
         return payload
 
     def explain_source_plan(

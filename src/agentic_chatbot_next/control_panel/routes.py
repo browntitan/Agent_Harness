@@ -245,6 +245,12 @@ class GraphRunCancelRequest(BaseModel):
     actor: str = "control-panel"
 
 
+class GraphRunCleanupRequest(BaseModel):
+    actor: str = "control-panel"
+    status: str = "failed"
+    graph_id: str = ""
+
+
 class GraphPromptUpdateRequest(BaseModel):
     prompt_overrides: Dict[str, Any] = Field(default_factory=dict)
     actor: str = "control-panel"
@@ -265,6 +271,20 @@ class GraphSkillUpdateRequest(BaseModel):
     skill_ids: List[str] = Field(default_factory=list)
     overlay_markdown: str = ""
     overlay_skill_name: str = ""
+    actor: str = "control-panel"
+
+
+class CollectionSkillDraftRequest(BaseModel):
+    graph_id: str = ""
+    guidance: str = ""
+    intent: str = "general"
+    draft_types: List[str] = Field(default_factory=list)
+    actor: str = "control-panel"
+
+
+class CollectionSkillDraftApplyRequest(BaseModel):
+    graph_id: str = ""
+    drafts: List[Dict[str, Any]] = Field(default_factory=list)
     actor: str = "control-panel"
 
 
@@ -565,6 +585,7 @@ def _serialize_skill_reference(record: Any) -> Dict[str, Any]:
         "name": record.name,
         "agent_scope": record.agent_scope,
         "graph_id": getattr(record, "graph_id", ""),
+        "collection_id": getattr(record, "collection_id", ""),
         "version": record.version,
         "enabled": bool(record.enabled),
         "status": record.status,
@@ -760,68 +781,297 @@ def _save_graph_overlay_skill(
     graph_id: str,
     overlay_markdown: str,
     overlay_skill_name: str = "",
-) -> str:
+) -> List[str]:
     skill_store = getattr(runtime.bot.ctx.stores, "skill_store", None)
     if skill_store is None:
         raise HTTPException(status_code=503, detail="Skill store is not configured.")
     text = str(overlay_markdown or "").strip()
     if not text:
-        return ""
+        return []
 
-    skill_id = f"graph-{filesystem_key(graph_id)}-overlay"
-    source_path = f"api://admin/graphs/{graph_id}/overlay-skill.md"
-    parsed = load_skill_pack_from_text(
-        text,
-        source_path=source_path,
-        metadata_defaults={
-            "name": str(overlay_skill_name or f"{graph_id} graph overlay").strip() or f"{graph_id} graph overlay",
-            "agent_scope": "rag",
-            "description": f"Graph-scoped overlay guidance for {graph_id}.",
-            "version": "1",
-            "enabled": True,
-            "tool_tags": ["search_graph_index", "inspect_graph_index"],
-            "task_tags": ["graph-research", "relationship-analysis"],
-        },
+    saved_skill_ids: List[str] = []
+
+    def _upsert_overlay(*, agent_scope: str, suffix: str, name_suffix: str = "") -> None:
+        skill_id = f"graph-{filesystem_key(graph_id)}-{suffix}"
+        source_path = f"api://admin/graphs/{graph_id}/{suffix}.md"
+        parsed = load_skill_pack_from_text(
+            text,
+            source_path=source_path,
+            metadata_defaults={
+                "name": str(overlay_skill_name or f"{graph_id} graph overlay").strip() or f"{graph_id} graph overlay",
+                "agent_scope": agent_scope,
+                "description": f"Graph-scoped overlay guidance for {graph_id}.",
+                "version": "1",
+                "enabled": True,
+                "tool_tags": ["search_graph_index", "inspect_graph_index"],
+                "task_tags": ["graph-research", "relationship-analysis"],
+            },
+        )
+        parsed.skill_id = skill_id
+        parsed.version_parent = skill_id
+        parsed.graph_id = graph_id
+        parsed.name = (
+            str(overlay_skill_name or parsed.name or f"{graph_id} graph overlay").strip()
+            or f"{graph_id} graph overlay"
+        ) + name_suffix
+        parsed.agent_scope = agent_scope
+        parsed.enabled = True
+        parsed.owner_user_id = owner_user_id
+        parsed.visibility = "tenant"
+        parsed.status = "active"
+        parsed.source_path = source_path
+        skill_store.upsert_skill_pack(
+            SkillPackRecord(
+                skill_id=parsed.skill_id,
+                tenant_id=tenant_id,
+                graph_id=parsed.graph_id,
+                name=parsed.name,
+                agent_scope=parsed.agent_scope,
+                checksum=parsed.checksum,
+                tool_tags=list(parsed.tool_tags),
+                task_tags=list(parsed.task_tags),
+                version=parsed.version,
+                enabled=parsed.enabled,
+                source_path=parsed.source_path,
+                description=parsed.description,
+                retrieval_profile=parsed.retrieval_profile,
+                controller_hints=dict(parsed.controller_hints),
+                coverage_goal=parsed.coverage_goal,
+                result_mode=parsed.result_mode,
+                body_markdown=parsed.body_markdown,
+                owner_user_id=parsed.owner_user_id,
+                visibility=parsed.visibility,
+                status=parsed.status,
+                version_parent=parsed.version_parent or parsed.skill_id,
+                kind=parsed.kind,
+                execution_config=dict(parsed.execution_config),
+            ),
+            parsed.chunks,
+        )
+        saved_skill_ids.append(skill_id)
+
+    _upsert_overlay(agent_scope="rag", suffix="overlay")
+    _upsert_overlay(agent_scope="graph_manager", suffix="graph-manager-overlay", name_suffix=" (Graph Manager)")
+    return saved_skill_ids
+
+
+def _skill_title(value: str) -> str:
+    text = str(value or "").replace("_", " ").replace("-", " ").strip()
+    return text.title() if text else "Collection"
+
+
+def _collection_documents_for_skill_draft(runtime: Any, tenant_id: str, collection_id: str) -> List[Any]:
+    doc_store = getattr(runtime.bot.ctx.stores, "doc_store", None)
+    if doc_store is None:
+        return []
+    try:
+        return list(doc_store.list_documents(tenant_id=tenant_id, collection_id=collection_id))
+    except TypeError:
+        try:
+            return list(doc_store.list_documents(collection_id=collection_id))
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
+def _skill_frontmatter(**metadata: Any) -> str:
+    lines = ["---"]
+    for key, value in metadata.items():
+        if isinstance(value, (dict, list, tuple, set)):
+            rendered = json.dumps(value, ensure_ascii=True)
+        elif isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = str(value)
+        lines.append(f"{key}: {rendered}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def _collection_rag_skill_markdown(
+    *,
+    collection_id: str,
+    guidance: str,
+    document_count: int,
+    source_titles: List[str],
+) -> str:
+    title = _skill_title(collection_id)
+    skill_id = f"collection-{filesystem_key(collection_id)}-rag-skill"
+    hints = {
+        "kb_collection_id": collection_id,
+        "requested_kb_collection_id": collection_id,
+        "search_collection_ids": [collection_id],
+        "strict_kb_scope": True,
+        "retrieval_scope_mode": "kb_only",
+    }
+    body = [
+        f"# {title} RAG Skill",
+        "",
+        "## Scope",
+        "",
+        f"- Use only indexed knowledge from collection `{collection_id}` unless the controller explicitly changes scope.",
+        "- Treat source citations, document titles, and chunk evidence as the authority for answers.",
+        "- If the collection does not contain enough evidence, say what is missing instead of filling gaps.",
+        "",
+        "## Retrieval Workflow",
+        "",
+        "- Search the scoped collection first, then open the most relevant indexed documents or chunks.",
+        "- Prefer exact section, table, requirement, owner, date, and exception references over broad summaries.",
+        "- Keep final answers tied to cited evidence from this collection.",
+        "",
+        "## Collection Notes",
+        "",
+        f"- Indexed document count at draft time: {document_count}.",
+        f"- Representative sources: {', '.join(source_titles[:5]) if source_titles else 'No source titles were available yet.'}",
+    ]
+    if guidance.strip():
+        body.extend(["", "## Operator Guidance", "", guidance.strip()])
+    return "\n\n".join(
+        [
+            _skill_frontmatter(
+                skill_id=skill_id,
+                name=f"{title} RAG Skill",
+                agent_scope="rag",
+                collection_id=collection_id,
+                description=f"Collection-scoped RAG guidance for {collection_id}.",
+                version="1",
+                enabled=True,
+                visibility="tenant",
+                status="active",
+                tool_tags="search_indexed_docs, read_indexed_doc, resolve_indexed_docs, rag_agent_tool",
+                task_tags="knowledge_retrieval, collection_research, evidence_grounding",
+                retrieval_profile="collection_strict",
+                coverage_goal="collection_bound_answer",
+                result_mode="cited_answer",
+                controller_hints=hints,
+            ),
+            "\n".join(body),
+        ]
+    ).strip() + "\n"
+
+
+def _graph_manager_skill_markdown(
+    *,
+    collection_id: str,
+    graph_id: str,
+    guidance: str,
+    intent: str,
+    source_titles: List[str],
+) -> str:
+    title = _skill_title(graph_id)
+    skill_id = f"graph-{filesystem_key(graph_id)}-manager-skill"
+    hints = {
+        "graph_ids": [graph_id],
+        "planned_graph_ids": [graph_id],
+        "kb_collection_id": collection_id,
+        "search_collection_ids": [collection_id],
+        "strict_kb_scope": True,
+    }
+    body = [
+        f"# {title} Graph Skill",
+        "",
+        "## Scope",
+        "",
+        f"- Manage and query graph `{graph_id}` for collection `{collection_id}`.",
+        f"- Use this graph for `{intent or 'general'}` relationship work only when the answer needs entities, relationships, communities, or source-linked graph evidence.",
+        "- Treat the graph as an index over the collection, not as a replacement for source documents.",
+        "",
+        "## Graph Workflow",
+        "",
+        "- Inspect graph status and source coverage before relying on graph answers.",
+        "- Prefer relationship paths supported by source snippets, document titles, or citations.",
+        "- When graph evidence is incomplete, fall back to scoped collection RAG evidence and explain the limitation.",
+        "",
+        "## Source Authority",
+        "",
+        f"- Representative collection sources: {', '.join(source_titles[:5]) if source_titles else 'No source titles were available yet.'}",
+        "- Source documents remain authoritative when graph relationships and text evidence disagree.",
+    ]
+    if guidance.strip():
+        body.extend(["", "## Operator Guidance", "", guidance.strip()])
+    return "\n\n".join(
+        [
+            _skill_frontmatter(
+                skill_id=skill_id,
+                name=f"{title} Graph Skill",
+                agent_scope="graph_manager",
+                graph_id=graph_id,
+                collection_id=collection_id,
+                description=f"Graph-manager guidance for {graph_id}.",
+                version="1",
+                enabled=True,
+                visibility="tenant",
+                status="active",
+                tool_tags="list_graph_indexes, inspect_graph_index, search_graph_index",
+                task_tags="graph_research, relationship_analysis, source_authority",
+                retrieval_profile="graph_scoped",
+                coverage_goal="source_backed_relationships",
+                result_mode="graph_evidence_plan",
+                controller_hints=hints,
+            ),
+            "\n".join(body),
+        ]
+    ).strip() + "\n"
+
+
+def _skill_draft_payload(
+    *,
+    draft_type: str,
+    markdown: str,
+    collection_id: str,
+    graph_id: str = "",
+) -> Dict[str, Any]:
+    parsed = load_skill_pack_from_text(markdown, source_path=f"api://admin/collections/{collection_id}/skill-drafts/{draft_type}.md")
+    return {
+        "draft_type": draft_type,
+        "label": "Collection RAG skill" if draft_type == "collection_rag" else "Graph skill",
+        "skill_id": parsed.skill_id,
+        "name": parsed.name,
+        "agent_scope": parsed.agent_scope,
+        "collection_id": collection_id,
+        "graph_id": graph_id or parsed.graph_id,
+        "body_markdown": markdown,
+        "markdown": markdown,
+        "selected": True,
+        "description": parsed.description,
+        "tool_tags": list(parsed.tool_tags),
+        "task_tags": list(parsed.task_tags),
+        "controller_hints": dict(parsed.controller_hints),
+    }
+
+
+def _skill_record_from_pack(parsed: Any, *, tenant_id: str, owner_user_id: str, collection_id: str) -> SkillPackRecord:
+    parsed.collection_id = str(parsed.collection_id or collection_id).strip()
+    parsed.owner_user_id = parsed.owner_user_id or owner_user_id
+    parsed.visibility = parsed.visibility or "tenant"
+    parsed.status = parsed.status or "active"
+    return SkillPackRecord(
+        skill_id=parsed.skill_id,
+        tenant_id=tenant_id,
+        graph_id=parsed.graph_id,
+        collection_id=parsed.collection_id,
+        name=parsed.name,
+        agent_scope=parsed.agent_scope,
+        checksum=parsed.checksum,
+        tool_tags=list(parsed.tool_tags),
+        task_tags=list(parsed.task_tags),
+        version=parsed.version,
+        enabled=parsed.enabled,
+        source_path=parsed.source_path,
+        description=parsed.description,
+        retrieval_profile=parsed.retrieval_profile,
+        controller_hints=dict(parsed.controller_hints),
+        coverage_goal=parsed.coverage_goal,
+        result_mode=parsed.result_mode,
+        body_markdown=parsed.body_markdown,
+        owner_user_id=parsed.owner_user_id,
+        visibility=parsed.visibility,
+        status=parsed.status,
+        version_parent=parsed.version_parent or parsed.skill_id,
+        kind=parsed.kind,
+        execution_config=dict(parsed.execution_config),
     )
-    parsed.skill_id = skill_id
-    parsed.version_parent = skill_id
-    parsed.graph_id = graph_id
-    parsed.name = str(overlay_skill_name or parsed.name or f"{graph_id} graph overlay").strip() or f"{graph_id} graph overlay"
-    parsed.agent_scope = str(parsed.agent_scope or "rag").strip() or "rag"
-    parsed.enabled = True
-    parsed.owner_user_id = owner_user_id
-    parsed.visibility = "tenant"
-    parsed.status = "active"
-    parsed.source_path = source_path
-    skill_store.upsert_skill_pack(
-        SkillPackRecord(
-            skill_id=parsed.skill_id,
-            tenant_id=tenant_id,
-            graph_id=parsed.graph_id,
-            name=parsed.name,
-            agent_scope=parsed.agent_scope,
-            checksum=parsed.checksum,
-            tool_tags=list(parsed.tool_tags),
-            task_tags=list(parsed.task_tags),
-            version=parsed.version,
-            enabled=parsed.enabled,
-            source_path=parsed.source_path,
-            description=parsed.description,
-            retrieval_profile=parsed.retrieval_profile,
-            controller_hints=dict(parsed.controller_hints),
-            coverage_goal=parsed.coverage_goal,
-            result_mode=parsed.result_mode,
-            body_markdown=parsed.body_markdown,
-            owner_user_id=parsed.owner_user_id,
-            visibility=parsed.visibility,
-            status=parsed.status,
-            version_parent=parsed.version_parent or parsed.skill_id,
-            kind=parsed.kind,
-            execution_config=dict(parsed.execution_config),
-        ),
-        parsed.chunks,
-    )
-    return skill_id
 
 
 def _enrich_graph_payload(runtime: Any, payload: Dict[str, Any], *, owner_user_id: str) -> Dict[str, Any]:
@@ -4233,6 +4483,57 @@ def list_graphs(
     }
 
 
+@router.get("/graphs/runs")
+def list_graph_runs(
+    manager: RuntimeManager = Depends(_admin_manager),
+    status: str = "",
+    graph_id: str = "",
+    limit: int = 100,
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    return {
+        "runs": service.list_graph_runs_by_status(
+            status=str(status or ""),
+            graph_ref=str(graph_id or ""),
+            limit=max(1, min(limit, 500)),
+        )
+    }
+
+
+@router.post("/graphs/runs/cleanup")
+def cleanup_graph_runs(
+    request: GraphRunCleanupRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    payload = service.cleanup_admin_graph_runs(
+        status=request.status,
+        graph_ref=request.graph_id,
+    )
+    if payload.get("error"):
+        raise HTTPException(status_code=400, detail=str(payload["error"]))
+    manager.get_overlay_store().append_audit_event(
+        action="graph_run_cleanup",
+        actor=request.actor,
+        details={
+            "status": payload.get("status"),
+            "graph_id": payload.get("graph_id"),
+            "deleted_count": payload.get("deleted_count"),
+        },
+    )
+    return payload
+
+
 @router.get("/graphs/{graph_id}")
 def get_graph(
     graph_id: str,
@@ -4425,6 +4726,39 @@ def cancel_graph_run(
     return payload
 
 
+@router.delete("/graphs/{graph_id}/runs/{run_id}")
+def delete_graph_run(
+    graph_id: str,
+    run_id: str,
+    request: GraphRunCleanupRequest | None = None,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    payload = service.delete_admin_graph_run(
+        graph_id,
+        run_id=run_id,
+        status=(request.status if request is not None else "failed"),
+    )
+    if payload.get("error"):
+        raise HTTPException(status_code=400, detail=str(payload["error"]))
+    manager.get_overlay_store().append_audit_event(
+        action="graph_run_delete",
+        actor=(request.actor if request is not None else "control-panel"),
+        details={
+            "graph_id": graph_id,
+            "run_id": run_id,
+            "status": payload.get("status"),
+            "deleted": payload.get("deleted"),
+        },
+    )
+    return payload
+
+
 @router.delete("/graphs/{graph_id}")
 def delete_graph(
     graph_id: str,
@@ -4579,7 +4913,7 @@ def update_graph_skills(
     user_id = x_user_id or runtime.settings.default_user_id
     service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
     skill_ids = [str(item) for item in request.skill_ids if str(item).strip()]
-    overlay_skill_id = _save_graph_overlay_skill(
+    overlay_skill_ids = _save_graph_overlay_skill(
         runtime,
         tenant_id=tenant_id,
         owner_user_id=user_id,
@@ -4587,8 +4921,9 @@ def update_graph_skills(
         overlay_markdown=request.overlay_markdown,
         overlay_skill_name=request.overlay_skill_name,
     )
-    if overlay_skill_id and overlay_skill_id not in skill_ids:
-        skill_ids.append(overlay_skill_id)
+    for overlay_skill_id in overlay_skill_ids:
+        if overlay_skill_id and overlay_skill_id not in skill_ids:
+            skill_ids.append(overlay_skill_id)
     payload = service.update_graph_skills(
         graph_id,
         graph_skill_ids=skill_ids,
@@ -4612,6 +4947,163 @@ def list_collections(
     runtime = _snapshot_or_503(manager)
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     return {"collections": _list_collection_payloads(runtime, tenant_id)}
+
+
+@router.post("/collections/{collection_id}/skill-drafts")
+def draft_collection_skills(
+    collection_id: str,
+    request: CollectionSkillDraftRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    normalized_collection_id = _normalize_collection_id(collection_id)
+    docs = _collection_documents_for_skill_draft(runtime, tenant_id, normalized_collection_id)
+    source_titles = [
+        str(getattr(record, "title", "") or getattr(record, "source_path", "") or getattr(record, "doc_id", "") or "")
+        for record in docs
+        if str(getattr(record, "title", "") or getattr(record, "source_path", "") or getattr(record, "doc_id", "") or "").strip()
+    ]
+    requested_types = {str(item).strip() for item in (request.draft_types or []) if str(item).strip()}
+    include_collection = not requested_types or "collection_rag" in requested_types
+    include_graph = (not requested_types or "graph_manager" in requested_types) and str(request.graph_id or "").strip()
+    drafts: List[Dict[str, Any]] = []
+    if include_collection:
+        markdown = _collection_rag_skill_markdown(
+            collection_id=normalized_collection_id,
+            guidance=request.guidance,
+            document_count=len(docs),
+            source_titles=source_titles,
+        )
+        drafts.append(
+            _skill_draft_payload(
+                draft_type="collection_rag",
+                markdown=markdown,
+                collection_id=normalized_collection_id,
+            )
+        )
+    if include_graph:
+        graph_id = str(request.graph_id or "").strip()
+        markdown = _graph_manager_skill_markdown(
+            collection_id=normalized_collection_id,
+            graph_id=graph_id,
+            guidance=request.guidance,
+            intent=request.intent,
+            source_titles=source_titles,
+        )
+        drafts.append(
+            _skill_draft_payload(
+                draft_type="graph_manager",
+                markdown=markdown,
+                collection_id=normalized_collection_id,
+                graph_id=graph_id,
+            )
+        )
+    return {
+        "object": "collection.skill_draft.list",
+        "collection_id": normalized_collection_id,
+        "graph_id": str(request.graph_id or "").strip(),
+        "drafts": drafts,
+        "mutated": False,
+    }
+
+
+@router.post("/collections/{collection_id}/skill-drafts/apply")
+def apply_collection_skill_drafts(
+    collection_id: str,
+    request: CollectionSkillDraftApplyRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    user_id = x_user_id or runtime.settings.default_user_id
+    normalized_collection_id = _normalize_collection_id(collection_id)
+    skill_store = getattr(runtime.bot.ctx.stores, "skill_store", None)
+    if skill_store is None:
+        raise HTTPException(status_code=503, detail="Skill store is not configured.")
+    applied_records: List[Any] = []
+    graph_bindings: Dict[str, List[str]] = {}
+    for index, draft in enumerate(request.drafts or []):
+        if draft.get("selected") is False:
+            continue
+        markdown = str(draft.get("body_markdown") or draft.get("markdown") or draft.get("content") or "").strip()
+        if not markdown:
+            continue
+        source_path = f"api://admin/collections/{normalized_collection_id}/skill-drafts/apply-{index}.md"
+        parsed = load_skill_pack_from_text(
+            markdown,
+            source_path=source_path,
+            metadata_defaults={
+                "collection_id": normalized_collection_id,
+                "visibility": "tenant",
+                "status": "active",
+                "enabled": True,
+            },
+        )
+        parsed.collection_id = normalized_collection_id
+        if not str(parsed.graph_id or "").strip() and str(request.graph_id or "").strip():
+            parsed.graph_id = str(request.graph_id or "").strip()
+        record = _skill_record_from_pack(
+            parsed,
+            tenant_id=tenant_id,
+            owner_user_id=user_id,
+            collection_id=normalized_collection_id,
+        )
+        skill_store.upsert_skill_pack(record, parsed.chunks)
+        applied_records.append(record)
+        if record.agent_scope == "graph_manager" and record.graph_id:
+            graph_bindings.setdefault(record.graph_id, []).append(record.skill_id)
+
+    service = _graph_service(runtime, tenant_id=tenant_id, user_id=user_id)
+    graph_bound_skill_ids: List[str] = []
+    for graph_id, skill_ids in graph_bindings.items():
+        detail = service.inspect_index(graph_id)
+        if detail.get("error"):
+            raise HTTPException(status_code=404, detail=str(detail["error"]))
+        graph = dict(detail.get("graph") or {})
+        if str(graph.get("collection_id") or "") != normalized_collection_id:
+            raise HTTPException(status_code=400, detail="Graph does not belong to this collection.")
+        merged = [
+            *[str(item) for item in (graph.get("graph_skill_ids") or []) if str(item).strip()],
+            *skill_ids,
+        ]
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for skill_id in merged:
+            if skill_id in seen:
+                continue
+            seen.add(skill_id)
+            deduped.append(skill_id)
+        payload = service.update_graph_skills(
+            graph_id,
+            graph_skill_ids=deduped,
+            owner_admin_user_id=user_id,
+        )
+        if payload.get("error"):
+            raise HTTPException(status_code=404, detail=str(payload["error"]))
+        graph_bound_skill_ids.extend(skill_ids)
+
+    manager.get_overlay_store().append_audit_event(
+        action="collection_skill_drafts_apply",
+        actor=request.actor,
+        details={
+            "collection_id": normalized_collection_id,
+            "graph_id": str(request.graph_id or "").strip(),
+            "skill_ids": [record.skill_id for record in applied_records],
+            "graph_bound_skill_ids": graph_bound_skill_ids,
+        },
+    )
+    return {
+        "object": "collection.skill_draft.apply",
+        "collection_id": normalized_collection_id,
+        "graph_id": str(request.graph_id or "").strip(),
+        "applied_skill_ids": [record.skill_id for record in applied_records],
+        "graph_bound_skill_ids": graph_bound_skill_ids,
+        "skills": [_serialize_skill_reference(record) for record in applied_records],
+    }
 
 
 @router.get("/uploads")

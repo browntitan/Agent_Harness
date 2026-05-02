@@ -92,6 +92,32 @@ def make_data_analyst_tools(
         except (TypeError, ValueError):
             return str(value)
 
+    def _safe_cell(value: Any) -> Any:
+        try:
+            import pandas as pd
+
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        return _safe_json(value)
+
+    def _excel_column_label(index: int) -> str:
+        index = max(0, int(index))
+        letters = ""
+        while True:
+            index, remainder = divmod(index, 26)
+            letters = chr(ord("A") + remainder) + letters
+            if index == 0:
+                break
+            index -= 1
+        return letters
+
+    def _sheet_cell_range(nrows: int, ncols: int) -> str:
+        if int(nrows or 0) <= 0 or int(ncols or 0) <= 0:
+            return ""
+        return f"A1:{_excel_column_label(int(ncols) - 1)}{int(nrows) + 1}"
+
     def _resolve_dataset_path(dataset_ref: str) -> tuple[Path | None, str]:
         doc = stores.doc_store.get_document(dataset_ref, tenant_id=session.tenant_id)
         if doc is not None:
@@ -165,6 +191,105 @@ def make_data_analyst_tools(
         session.scratchpad[f"dataset_{resolved_ref}_ext"] = ext
         _ensure_workspace_copy(path)
         return loaded
+
+    def _profile_column(series: Any) -> Dict[str, Any]:
+        import pandas as pd
+
+        total_count = int(len(series))
+        null_count = int(series.isna().sum())
+        unique_count = int(series.nunique(dropna=True))
+        profile: Dict[str, Any] = {
+            "dtype": str(series.dtype),
+            "count": total_count,
+            "nulls": null_count,
+            "unique": unique_count,
+        }
+        if pd.api.types.is_numeric_dtype(series):
+            desc = series.describe()
+            profile.update(
+                {
+                    "kind": "numeric",
+                    "mean": _safe_float(desc.get("mean")),
+                    "std": _safe_float(desc.get("std")),
+                    "min": _safe_float(desc.get("min")),
+                    "p25": _safe_float(desc.get("25%")),
+                    "p50": _safe_float(desc.get("50%")),
+                    "p75": _safe_float(desc.get("75%")),
+                    "max": _safe_float(desc.get("max")),
+                }
+            )
+            return profile
+        if pd.api.types.is_datetime64_any_dtype(series):
+            non_null = series.dropna()
+            profile.update(
+                {
+                    "kind": "datetime",
+                    "min": str(non_null.min()) if not non_null.empty else "",
+                    "max": str(non_null.max()) if not non_null.empty else "",
+                }
+            )
+            return profile
+
+        text_values = series.dropna().astype(str)
+        avg_len = float(text_values.str.len().mean()) if not text_values.empty else 0.0
+        categorical_threshold = min(50, max(10, int(total_count * 0.2))) if total_count else 10
+        kind = "categorical" if unique_count <= categorical_threshold else "text"
+        top_values = series.value_counts(dropna=True).head(8).to_dict()
+        profile.update(
+            {
+                "kind": kind,
+                "avg_text_length": round(avg_len, 2),
+                "top_values": {str(key): int(value) for key, value in top_values.items()},
+            }
+        )
+        return profile
+
+    def _profile_loaded_dataset(loaded: LoadedDataset, *, sample_rows: int = 5) -> Dict[str, Any]:
+        df = loaded.dataframe
+        nrows, ncols = df.shape
+        column_profiles = {str(col): _profile_column(df[col]) for col in df.columns}
+        numeric_columns = [
+            str(col)
+            for col, profile in column_profiles.items()
+            if str(profile.get("kind") or "") == "numeric"
+        ]
+        categorical_columns = [
+            str(col)
+            for col, profile in column_profiles.items()
+            if str(profile.get("kind") or "") == "categorical"
+        ]
+        text_columns = [
+            str(col)
+            for col, profile in column_profiles.items()
+            if str(profile.get("kind") or "") == "text"
+        ]
+        sample = [
+            {str(key): _safe_cell(value) for key, value in record.items()}
+            for record in df.head(max(0, int(sample_rows or 0))).to_dict(orient="records")
+        ]
+        row_end = int(nrows) + 1 if int(nrows) > 0 else 1
+        source_ref: Dict[str, Any] = {
+            "doc_id": loaded.resolved_ref,
+            "title": loaded.path.name,
+            "source_path": str(loaded.path),
+            "sheet_name": loaded.sheet_name,
+            "row_start": 1,
+            "row_end": row_end,
+            "cell_range": _sheet_cell_range(nrows, ncols) if loaded.ext in {".xlsx", ".xls"} else "",
+            "columns": [str(col) for col in df.columns],
+        }
+        return {
+            "sheet_name": loaded.sheet_name,
+            "shape": [int(nrows), int(ncols)],
+            "columns": [str(col) for col in df.columns],
+            "dtypes": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
+            "numeric_columns": numeric_columns,
+            "categorical_columns": categorical_columns,
+            "text_columns": text_columns,
+            "column_profiles": column_profiles,
+            "sample_rows": sample,
+            "source_ref": source_ref,
+        }
 
     def _derive_output_destination(
         source_path: Path,
@@ -350,6 +475,59 @@ def make_data_analyst_tools(
         except Exception as exc:
             logger.warning("load_dataset failed for doc_id=%s: %s", doc_id, exc)
             return json.dumps({"error": str(exc)})
+
+    @tool
+    def profile_dataset(doc_id: str = "", sheet_name: str = "", sample_rows: int = 5) -> str:
+        """Profile a CSV or Excel dataset, including sheets, columns, types, samples, and source refs."""
+        try:
+            loaded = _load_dataset_handle(doc_id, sheet_name=sheet_name)
+            sheets: List[Dict[str, Any]] = []
+            if loaded.ext in {".xlsx", ".xls"} and not str(sheet_name or "").strip():
+                for name in list(loaded.sheet_names or []):
+                    sheet_loaded = _load_dataframe(loaded.path, sheet_name=name)
+                    sheet_loaded.resolved_ref = loaded.resolved_ref
+                    sheets.append(_profile_loaded_dataset(sheet_loaded, sample_rows=sample_rows))
+            else:
+                sheets.append(_profile_loaded_dataset(loaded, sample_rows=sample_rows))
+
+            all_columns = []
+            for sheet in sheets:
+                for column in list(sheet.get("columns") or []):
+                    label = str(column)
+                    if label not in all_columns:
+                        all_columns.append(label)
+            source_refs = [dict(sheet.get("source_ref") or {}) for sheet in sheets if isinstance(sheet.get("source_ref"), dict)]
+            summary_parts = [
+                f"{loaded.path.name} has {len(sheets)} profiled sheet(s)",
+                f"{len(all_columns)} distinct column name(s)",
+            ]
+            payload = {
+                "status": "ok",
+                "doc_id": loaded.resolved_ref,
+                "file_path": str(loaded.path),
+                "file_type": loaded.ext.lstrip("."),
+                "sheet_names": list(loaded.sheet_names or ([loaded.sheet_name] if loaded.sheet_name else [])),
+                "sheets": sheets,
+                "summary": "; ".join(summary_parts) + ".",
+                "findings": [
+                    {
+                        "summary": (
+                            f"Sheet '{sheet.get('sheet_name') or 'CSV'}' has "
+                            f"{(sheet.get('shape') or [0, 0])[0]} rows and {(sheet.get('shape') or [0, 0])[1]} columns."
+                        ),
+                        "columns": list(sheet.get("columns") or []),
+                    }
+                    for sheet in sheets
+                ],
+                "source_refs": source_refs,
+                "operations": ["profile_dataset"],
+                "warnings": [],
+                "confidence": 0.9,
+            }
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning("profile_dataset failed for doc_id=%s: %s", doc_id, exc)
+            return json.dumps({"status": "error", "error": str(exc), "warnings": [str(exc)], "confidence": 0.0})
 
     @tool
     def inspect_columns(doc_id: str = "", columns: str = "", sheet_name: str = "") -> str:
@@ -715,6 +893,7 @@ def make_data_analyst_tools(
 
     tools: List[Any] = [
         load_dataset,
+        profile_dataset,
         inspect_columns,
         execute_code,
         run_nlp_column_task,

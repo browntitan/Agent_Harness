@@ -5,7 +5,7 @@ description: Manager role for long-running deep research campaigns over indexed 
 prompt_file: supervisor_agent.md
 skill_scope: coordinator
 allowed_tools: ["spawn_worker", "message_worker", "list_worker_requests", "respond_worker_request", "create_team_channel", "post_team_message", "list_team_messages", "claim_team_messages", "respond_team_message", "list_jobs", "stop_job"]
-allowed_worker_agents: ["planner", "rag_worker", "general", "graph_manager", "finalizer", "verifier"]
+allowed_worker_agents: ["planner", "rag_worker", "rag_researcher", "general", "graph_manager", "finalizer", "verifier"]
 preload_skill_packs: []
 memory_scopes: ["conversation"]
 max_steps: 12

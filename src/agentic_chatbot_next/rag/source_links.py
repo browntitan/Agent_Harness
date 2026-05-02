@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import time
 from typing import Any, Callable
 from urllib.parse import urlencode
@@ -19,6 +20,13 @@ def _join_base_url(base_url: str, path: str) -> str:
     if not clean_path.startswith("/"):
         clean_path = "/" + clean_path
     return f"{clean_base}{clean_path}"
+
+
+def _public_base_url(settings: Any) -> str:
+    return (
+        str(getattr(settings, "gateway_public_base_url", "") or "").strip()
+        or str(os.getenv("PUBLIC_AGENT_API_BASE_URL", "") or "").strip()
+    )
 
 
 def _sign_download_token(
@@ -50,11 +58,13 @@ def _build_signed_source_url(
     conversation_id: str,
     secret: str | None,
     ttl_seconds: int,
+    disposition: str = "inline",
 ) -> str:
     path = f"/v1/documents/{doc_id}/source"
+    normalized_disposition = "inline" if str(disposition or "").strip().lower() == "inline" else "attachment"
     secret_text = str(secret or "").strip()
     if not secret_text:
-        return f"{path}?conversation_id={conversation_id}"
+        return f"{path}?{urlencode({'conversation_id': conversation_id, 'disposition': normalized_disposition})}"
     expires = int(time.time()) + max(1, int(ttl_seconds))
     sig = _sign_download_token(
         download_id=doc_id,
@@ -64,7 +74,17 @@ def _build_signed_source_url(
         expires=expires,
         secret=secret_text,
     )
-    return f"{path}?{urlencode({'tenant_id': tenant_id, 'user_id': user_id, 'conversation_id': conversation_id, 'expires': expires, 'sig': sig})}"
+    query = urlencode(
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "expires": expires,
+            "sig": sig,
+            "disposition": normalized_disposition,
+        }
+    )
+    return f"{path}?{query}"
 
 
 def build_document_source_url(
@@ -75,6 +95,7 @@ def build_document_source_url(
     tenant_id: str = "",
     user_id: str = "",
     conversation_id: str = "",
+    disposition: str = "inline",
 ) -> str:
     clean_doc_id = str(doc_id or "").strip()
     if not clean_doc_id:
@@ -101,8 +122,9 @@ def build_document_source_url(
         conversation_id=resolved_conversation_id,
         secret=getattr(settings, "download_url_secret", None),
         ttl_seconds=int(getattr(settings, "download_url_ttl_seconds", 900) or 900),
+        disposition=disposition,
     )
-    return _join_base_url(str(getattr(settings, "gateway_public_base_url", "") or ""), relative)
+    return _join_base_url(_public_base_url(settings), relative)
 
 
 def make_document_source_url_resolver(settings: Any, session_or_state: Any) -> Callable[[str], str]:

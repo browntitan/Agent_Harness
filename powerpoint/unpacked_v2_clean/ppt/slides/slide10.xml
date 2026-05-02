@@ -208,7 +208,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>55 tools in 8 groups, registered with the harness. Each agent gets a curated subset via its allowed_tools whitelist.</a:t>
+              <a:t>57 tools in 9 groups, registered with the harness. Each agent gets a curated subset via its allowed_tools whitelist.</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -510,7 +510,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>Analyst (12)</a:t>
+              <a:t>Analyst (11)</a:t>
             </a:r>
           </a:p>
         </p:txBody>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Dict, List
 
 from langchain.tools import tool
@@ -36,6 +37,11 @@ def make_rag_agent_tool(
         search_mode: str = "auto",
         max_search_rounds: int = 0,
         scratchpad_context_key: str = "",
+        research_profile: str = "",
+        coverage_goal: str = "",
+        result_mode: str = "",
+        controller_hints_json: str = "",
+        skill_context: str = "",
     ) -> Dict[str, Any]:
         """Answer grounded questions with staged retrieval across KB and uploaded docs.
 
@@ -50,6 +56,31 @@ def make_rag_agent_tool(
         if scratchpad_context_key and scratchpad_context_key in getattr(session, "scratchpad", {}):
             extra = session.scratchpad[scratchpad_context_key]
             conversation_context = f"{extra}\n\n{conversation_context}".strip()
+        controller_hints: Dict[str, Any] = {}
+        if str(controller_hints_json or "").strip():
+            try:
+                parsed = json.loads(str(controller_hints_json))
+            except json.JSONDecodeError as exc:
+                return {
+                    "answer": "",
+                    "citations": [],
+                    "used_citation_ids": [],
+                    "confidence": 0.0,
+                    "retrieval_summary": {"query_used": query, "search_mode": "none"},
+                    "followups": [],
+                    "warnings": [f"INVALID_CONTROLLER_HINTS_JSON: {exc.msg}"],
+                }
+            if not isinstance(parsed, dict):
+                return {
+                    "answer": "",
+                    "citations": [],
+                    "used_citation_ids": [],
+                    "confidence": 0.0,
+                    "retrieval_summary": {"query_used": query, "search_mode": "none"},
+                    "followups": [],
+                    "warnings": ["INVALID_CONTROLLER_HINTS_JSON: expected a JSON object"],
+                }
+            controller_hints = dict(parsed)
 
         callbacks: List[Any] = []
         try:
@@ -75,6 +106,11 @@ def make_rag_agent_tool(
             callbacks=callbacks,
             search_mode=search_mode,
             max_search_rounds=max_search_rounds,
+            research_profile=research_profile,
+            coverage_goal=coverage_goal,
+            result_mode=result_mode,
+            controller_hints=controller_hints,
+            skill_context=skill_context,
             event_sink=event_sink,
         )
         return contract.to_dict()

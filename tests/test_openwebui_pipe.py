@@ -1156,6 +1156,142 @@ def test_pipe_forwards_backend_tool_call_status_cards(monkeypatch) -> None:
     assert "agentic_tool_call" not in emitted[-1]["data"]
 
 
+def test_pipe_forwards_backend_context_audit_status_without_replacing_main_status(monkeypatch) -> None:
+    module = _load_pipe_module()
+    pipe = module.Pipe()
+    emitted: list[dict[str, object]] = []
+    context_status = {
+        "type": "context_trace",
+        "status_id": "context-evt-1",
+        "status_key": "context-evt-1",
+        "description": "general loaded prompt, skills, and context",
+        "status": "complete",
+        "done": True,
+        "hidden": False,
+        "elapsed_ms": 0,
+        "agent": "general",
+        "selected_agent": "general",
+        "phase": "starting",
+        "phase_label": "Starting",
+        "phase_elapsed_ms": 0,
+        "status_elapsed_ms": 0,
+        "source_event_type": "agent_context_loaded",
+        "label": "general loaded prompt, skills, and context",
+        "detail": "2 prompt doc(s), 1 skill doc(s), 2 context section(s)",
+        "job_id": "job-context",
+        "task_id": "",
+        "why": "The runtime assembled agent guidance before calling the model.",
+        "waiting_on": "",
+        "timestamp": 1713139200000,
+        "agentic_audit_item": {
+            "version": 1,
+            "item_id": "context-evt-1",
+            "kind": "context",
+            "status": "completed",
+            "title": "general loaded prompt, skills, and context",
+            "subtitle": "2 prompt doc(s), 1 skill doc(s), 2 context section(s)",
+            "actor": "general",
+            "chips": ["general", "2 prompt doc(s)", "1 skill(s)", "safe_preview"],
+            "input": {
+                "prompt_docs": [{"kind": "agent_definition", "source_path": "/tmp/general.md"}],
+                "skill_docs": [{"kind": "retrievable", "source_path": "/tmp/skill.md"}],
+                "context_sections": [{"name": "base_prompt", "clipped": False}],
+                "memory_context": {"included": True, "preview_redacted": True},
+            },
+            "redacted_fields": ["memory_context.preview"],
+            "payload_limit_chars": 120,
+        },
+    }
+    ready_status = {
+        "status_id": "status-ready",
+        "status_key": "answer_ready\u241fgeneral\u241fdone",
+        "description": "Answer ready • general • Completed in 00:01",
+        "status": "complete",
+        "done": True,
+        "hidden": False,
+        "elapsed_ms": 1000,
+        "status_elapsed_ms": 1000,
+        "agent": "general",
+        "selected_agent": "general",
+        "phase": "answer_ready",
+        "phase_label": "Answer Ready",
+        "phase_elapsed_ms": 1000,
+        "source_event_type": "turn_completed",
+        "label": "Answer ready",
+        "detail": "",
+        "job_id": "",
+        "task_id": "",
+        "why": "",
+        "waiting_on": "",
+        "timestamp": 1713139201000,
+    }
+
+    class _StreamResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            lines = [
+                "event: status",
+                f"data: {json.dumps(context_status)}",
+                "",
+                'data: {"choices":[{"delta":{"content":"Context-backed answer."},"finish_reason":null}]}',
+                "",
+                "event: status",
+                f"data: {json.dumps(ready_status)}",
+                "",
+                "data: [DONE]",
+                "",
+            ]
+            for item in lines:
+                yield item
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _StreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+    class _AsyncClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return None
+
+        def stream(self, method, url, *, headers=None, json=None, **kwargs):
+            del method, url, headers, json, kwargs
+            return _StreamContext()
+
+    async def emit(event):
+        emitted.append(event)
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _AsyncClient)
+
+    result = asyncio.run(
+        pipe.pipe(
+            {"messages": [{"role": "user", "content": "Show context activity."}]},
+            __event_emitter__=emit,
+        )
+    )
+
+    audit_events = [item["data"] for item in emitted if item["data"].get("agentic_audit_item")]
+    main_status_events = [item["data"] for item in emitted if item["data"].get("status_id") == "status-ready"]
+
+    assert result == "Context-backed answer."
+    assert len(audit_events) == 1
+    assert audit_events[0]["agentic_audit_item"]["kind"] == "context"
+    assert audit_events[0]["agentic_audit_item"]["input"]["memory_context"]["preview_redacted"] is True
+    assert len(main_status_events) == 1
+    assert "agentic_audit_item" not in main_status_events[0]
+
+
 def test_pipe_forwards_backend_agent_and_parallel_audit_status_cards(monkeypatch) -> None:
     module = _load_pipe_module()
     pipe = module.Pipe()

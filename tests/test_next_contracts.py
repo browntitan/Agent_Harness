@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from langchain_core.documents import Document
 
 from agentic_chatbot_next.contracts.agents import AgentDefinition
@@ -9,6 +11,7 @@ from agentic_chatbot_next.contracts.rag import Citation, RagContract, RetrievalS
 from agentic_chatbot_next.contracts.tools import ToolDefinition
 from agentic_chatbot_next.rag.citations import build_citations
 from agentic_chatbot_next.rag.engine import render_rag_contract
+from agentic_chatbot_next.rag.source_links import build_document_source_url
 from agentic_chatbot_next.runtime.turn_contracts import resolve_turn_intent
 
 
@@ -193,6 +196,75 @@ def test_rag_citations_preserve_and_render_collection_id() -> None:
 
     assert "KB Collection: default" in rendered
     assert "[api_rate_limits.md](/v1/documents/doc-rate/source?conversation_id=conv)" in rendered
+
+
+def test_rag_renderer_humanizes_inline_and_block_citation_ids() -> None:
+    citation_id = "COLLECTION_UPLOAD_935ee5d6d9#chunk0001"
+    rendered = render_rag_contract(
+        RagContract(
+            answer=f"The approved change drove the cost delta ({citation_id}).",
+            citations=[
+                Citation(
+                    citation_id=citation_id,
+                    doc_id="doc-asterion",
+                    title="asterion_issue_digest_draft.txt",
+                    source_type="upload",
+                    location="chunk 1",
+                    snippet="Cost commentary text.",
+                    collection_id="defense-rag-test",
+                    url="http://localhost:18000/v1/documents/doc-asterion/source?disposition=inline",
+                    source_path="/uploads/asterion_issue_digest_draft.txt",
+                )
+            ],
+            used_citation_ids=[citation_id],
+        )
+    )
+
+    assert citation_id not in rendered
+    assert "([asterion_issue_digest_draft.txt](http://localhost:18000/v1/documents/doc-asterion/source?disposition=inline))" in rendered
+    assert "- [asterion_issue_digest_draft.txt](http://localhost:18000/v1/documents/doc-asterion/source?disposition=inline)" in rendered
+
+
+def test_document_source_url_uses_gateway_public_base_and_inline_disposition() -> None:
+    settings = SimpleNamespace(
+        gateway_public_base_url="https://agent.example.com",
+        download_url_secret="download-secret",
+        download_url_ttl_seconds=900,
+        default_tenant_id="tenant-default",
+        default_user_id="user-default",
+        default_conversation_id="conversation-default",
+    )
+    session = SimpleNamespace(tenant_id="tenant-a", user_id="user-a", conversation_id="conversation-a")
+
+    url = build_document_source_url(settings, session, "doc-asterion")
+
+    assert url.startswith("https://agent.example.com/v1/documents/doc-asterion/source?")
+    assert "tenant_id=tenant-a" in url
+    assert "user_id=user-a" in url
+    assert "conversation_id=conversation-a" in url
+    assert "sig=" in url
+    assert "disposition=inline" in url
+
+
+def test_document_source_url_falls_back_to_public_agent_base(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLIC_AGENT_API_BASE_URL", "https://public-agent.example.com")
+    settings = SimpleNamespace(
+        gateway_public_base_url="",
+        download_url_secret="",
+        download_url_ttl_seconds=900,
+        default_tenant_id="tenant-default",
+        default_user_id="user-default",
+        default_conversation_id="conversation-default",
+    )
+    session = SimpleNamespace(conversation_id="conversation-a")
+
+    url = build_document_source_url(settings, session, "doc-asterion")
+
+    assert (
+        url
+        == "https://public-agent.example.com/v1/documents/doc-asterion/source"
+        "?conversation_id=conversation-a&disposition=inline"
+    )
 
 
 def test_runtime_message_langchain_conversion_preserves_identity_fields() -> None:

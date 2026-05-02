@@ -4,7 +4,7 @@ mode: react
 description: Tabular data analysis specialist using sandboxed Python tools.
 prompt_file: data_analyst_agent.md
 skill_scope: data_analyst
-allowed_tools: ["load_dataset", "inspect_columns", "execute_code", "run_nlp_column_task", "return_file", "calculator", "scratchpad_write", "scratchpad_read", "scratchpad_list", "workspace_write", "workspace_read", "workspace_list", "search_skills", "request_parent_question", "request_parent_approval", "invoke_agent", "post_team_message", "list_team_messages", "claim_team_messages", "respond_team_message"]
+allowed_tools: ["load_dataset", "profile_dataset", "inspect_columns", "execute_code", "run_nlp_column_task", "return_file", "calculator", "scratchpad_write", "scratchpad_read", "scratchpad_list", "workspace_write", "workspace_read", "workspace_list", "search_skills", "request_parent_question", "request_parent_approval", "invoke_agent", "post_team_message", "list_team_messages", "claim_team_messages", "respond_team_message"]
 allowed_worker_agents: ["rag_worker", "utility", "general"]
 preload_skill_packs: []
 memory_scopes: ["conversation"]

@@ -124,6 +124,8 @@ class _FakeSkillStore:
                 checksum="abc123",
                 tenant_id="local-dev",
                 body_markdown="Always run the pinned checklist first.",
+                source_path="/tmp/skills/pinned-workflow.md",
+                description="Pinned checklist metadata.",
                 status="active",
                 enabled=True,
                 version_parent="pinned-workflow",
@@ -162,6 +164,9 @@ class _FakeSkillStore:
                 coverage_goal="cross_document",
                 result_mode="comparison",
                 version_parent="rag-comparison",
+                source_path="/tmp/skills/rag-comparison.md",
+                checksum="def456",
+                description="Compare documents carefully.",
             )
         ]
 
@@ -329,6 +334,153 @@ def test_skill_index_sync_archives_removed_seeded_files_without_touching_operato
         assert "rag-current-guidance" in store.records
 
 
+class _CollectionScopedSkillStore:
+    def __init__(self) -> None:
+        self.records = [
+            SkillPackRecord(
+                skill_id="global-rag",
+                name="Global RAG",
+                agent_scope="rag",
+                checksum="global",
+                tenant_id="local-dev",
+                body_markdown="Global retrieval guidance.",
+                status="active",
+                enabled=True,
+                version_parent="global-rag",
+            ),
+            SkillPackRecord(
+                skill_id="alpha-rag",
+                name="Alpha RAG",
+                agent_scope="rag",
+                checksum="alpha",
+                tenant_id="local-dev",
+                collection_id="alpha",
+                body_markdown="Alpha collection guidance.",
+                status="active",
+                enabled=True,
+                version_parent="alpha-rag",
+            ),
+            SkillPackRecord(
+                skill_id="beta-rag",
+                name="Beta RAG",
+                agent_scope="rag",
+                checksum="beta",
+                tenant_id="local-dev",
+                collection_id="beta",
+                body_markdown="Beta collection guidance.",
+                status="active",
+                enabled=True,
+                version_parent="beta-rag",
+            ),
+        ]
+
+    def _visible(self, *, collection_ids: list[str] | None) -> list[SkillPackRecord]:
+        if collection_ids is None:
+            return list(self.records)
+        scoped = {str(item) for item in collection_ids if str(item)}
+        return [
+            record
+            for record in self.records
+            if not record.collection_id or record.collection_id in scoped
+        ]
+
+    def list_skill_packs(
+        self,
+        *,
+        tenant_id="local-dev",
+        agent_scope="",
+        enabled_only=False,
+        owner_user_id="",
+        visibility="",
+        status="",
+        graph_id="",
+        collection_ids=None,
+        accessible_skill_family_ids=None,
+    ):
+        del owner_user_id, visibility, graph_id, accessible_skill_family_ids
+        rows = []
+        for record in self._visible(collection_ids=collection_ids):
+            if record.tenant_id != tenant_id:
+                continue
+            if agent_scope and record.agent_scope != agent_scope:
+                continue
+            if enabled_only and (not record.enabled or record.status != "active"):
+                continue
+            if status and record.status != status:
+                continue
+            rows.append(record)
+        return rows
+
+    def vector_search(
+        self,
+        query,
+        *,
+        tenant_id,
+        top_k,
+        agent_scope,
+        tool_tags=None,
+        task_tags=None,
+        enabled_only=True,
+        owner_user_id="",
+        graph_ids=None,
+        collection_ids=None,
+        accessible_skill_family_ids=None,
+    ):
+        del query, tool_tags, task_tags, owner_user_id, graph_ids, accessible_skill_family_ids
+        matches = []
+        for index, record in enumerate(self._visible(collection_ids=collection_ids)):
+            if record.tenant_id != tenant_id:
+                continue
+            if agent_scope and record.agent_scope != agent_scope:
+                continue
+            if enabled_only and (not record.enabled or record.status != "active"):
+                continue
+            matches.append(
+                SkillChunkMatch(
+                    skill_id=record.skill_id,
+                    name=record.name,
+                    agent_scope=record.agent_scope,
+                    content=record.body_markdown,
+                    chunk_index=0,
+                    score=1.0 - (index * 0.01),
+                    collection_id=record.collection_id,
+                    version_parent=record.version_parent,
+                )
+            )
+        return matches[:top_k]
+
+    def get_skill_chunks(self, skill_id, *, tenant_id="local-dev"):
+        del tenant_id
+        return [
+            {"content": record.body_markdown}
+            for record in self.records
+            if record.skill_id == skill_id
+        ]
+
+
+def test_skill_context_resolver_filters_collection_scoped_skills() -> None:
+    resolver = SkillContextResolver(
+        SimpleNamespace(skill_search_top_k=5, skill_context_max_chars=4000),
+        SimpleNamespace(skill_store=_CollectionScopedSkillStore()),
+    )
+
+    alpha_context = resolver.resolve(
+        query="collection policy",
+        tenant_id="local-dev",
+        agent_scope="rag",
+        collection_ids=["alpha"],
+    )
+    no_collection_context = resolver.resolve(
+        query="collection policy",
+        tenant_id="local-dev",
+        agent_scope="rag",
+        collection_ids=[],
+    )
+
+    assert [match.skill_id for match in alpha_context.matches] == ["global-rag", "alpha-rag"]
+    assert [match.skill_id for match in no_collection_context.matches] == ["global-rag"]
+
+
 def test_search_skills_prefers_db_backed_matches():
     settings = SimpleNamespace(
         default_tenant_id="local-dev",
@@ -360,6 +512,11 @@ def test_skill_context_resolver_prepends_pinned_skill_packs():
     )
 
     assert context.matches[0].skill_id == "pinned-workflow"
+    assert context.matches[0].source_path.endswith("pinned-workflow.md")
+    assert context.matches[0].checksum == "abc123"
+    assert context.matches[0].description == "Pinned checklist metadata."
+    assert context.matches[1].source_path.endswith("rag-comparison.md")
+    assert context.matches[1].checksum == "def456"
     assert context.text.startswith("[Pinned: Pinned Workflow | pinned-workflow]")
     assert "Comparison Workflow" in context.text
 

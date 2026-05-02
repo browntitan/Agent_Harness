@@ -516,6 +516,51 @@ class _FakeGraphIndexRunStore:
     def list_runs(self, graph_id: str, *, tenant_id: str = "local-dev", limit: int = 20) -> List[GraphIndexRunRecord]:
         return [replace(item) for item in self.records.get(graph_id, []) if item.tenant_id == tenant_id][:limit]
 
+    def list_runs_by_status(
+        self,
+        *,
+        tenant_id: str = "local-dev",
+        status: str = "",
+        graph_id: str = "",
+        limit: int = 100,
+    ) -> List[GraphIndexRunRecord]:
+        rows = [
+            replace(item)
+            for runs in self.records.values()
+            for item in runs
+            if item.tenant_id == tenant_id
+            and (not status or item.status == status)
+            and (not graph_id or item.graph_id == graph_id)
+        ]
+        rows.sort(key=lambda item: str(item.started_at or ""), reverse=True)
+        return rows[:limit]
+
+    def delete_run(
+        self,
+        run_id: str,
+        *,
+        tenant_id: str = "local-dev",
+        graph_id: str = "",
+        statuses: List[str] | None = None,
+    ) -> int:
+        allowed = set(statuses or [])
+        deleted = 0
+        for key, runs in list(self.records.items()):
+            kept = []
+            for run in runs:
+                matches = (
+                    run.tenant_id == tenant_id
+                    and run.run_id == run_id
+                    and (not graph_id or run.graph_id == graph_id)
+                    and (not allowed or run.status in allowed)
+                )
+                if matches:
+                    deleted += 1
+                else:
+                    kept.append(run)
+            self.records[key] = kept
+        return deleted
+
 
 class _FakeGraphQueryCacheStore:
     def __init__(self) -> None:
@@ -2153,6 +2198,25 @@ async def test_admin_graph_routes_create_validate_build_and_bind_graph_skills(
                 "overlay_skill_name": "Release Risk Overlay",
             },
         )
+        skill_drafts = await client.post(
+            "/v1/admin/collections/graph-collection/skill-drafts",
+            headers=_admin_headers(),
+            json={
+                "graph_id": "release_risk",
+                "guidance": "Keep graph relationships tied to release approval sources.",
+                "intent": "vendor_risk",
+            },
+        )
+        skill_drafts_after_preview = await client.get("/v1/admin/graphs/release_risk", headers=_admin_headers())
+        skill_draft_apply = await client.post(
+            "/v1/admin/collections/graph-collection/skill-drafts/apply",
+            headers=_admin_headers(),
+            json={
+                "graph_id": "release_risk",
+                "drafts": skill_drafts.json().get("drafts", []),
+                "actor": "tester",
+            },
+        )
         detail = await client.get("/v1/admin/graphs/release_risk", headers=_admin_headers())
         runs = await client.get("/v1/admin/graphs/release_risk/runs", headers=_admin_headers())
         progress = await client.get("/v1/admin/graphs/release_risk/progress", headers=_admin_headers())
@@ -2205,11 +2269,42 @@ async def test_admin_graph_routes_create_validate_build_and_bind_graph_skills(
     assert skills.status_code == 200
     assert "skill-1" in skills_payload["graph"]["graph_skill_ids"]
     assert any(item["graph_id"] == "release_risk" for item in skills_payload["skills"])
+    graph_skill_scopes = {
+        item["skill_id"]: item["agent_scope"]
+        for item in skills_payload["skills"]
+        if item["graph_id"] == "release_risk"
+    }
+    rag_overlay_id = next(
+        skill_id
+        for skill_id, scope in graph_skill_scopes.items()
+        if skill_id.startswith("graph-release_risk-") and skill_id.endswith("-overlay") and scope == "rag"
+    )
+    graph_manager_overlay_id = next(
+        skill_id
+        for skill_id, scope in graph_skill_scopes.items()
+        if skill_id.startswith("graph-release_risk-") and skill_id.endswith("-graph-manager-overlay") and scope == "graph_manager"
+    )
+    assert rag_overlay_id in skills_payload["graph"]["graph_skill_ids"]
+    assert graph_manager_overlay_id in skills_payload["graph"]["graph_skill_ids"]
+
+    assert skill_drafts.status_code == 200
+    draft_payload = skill_drafts.json()
+    assert draft_payload["mutated"] is False
+    assert {item["agent_scope"] for item in draft_payload["drafts"]} == {"rag", "graph_manager"}
+    assert {item["collection_id"] for item in draft_payload["drafts"]} == {"graph-collection"}
+    assert all("collection-" not in item["skill_id"] for item in skill_drafts_after_preview.json()["skills"])
+    assert skill_draft_apply.status_code == 200
+    assert len(skill_draft_apply.json()["applied_skill_ids"]) == 2
+    graph_bound_skill_ids = skill_draft_apply.json()["graph_bound_skill_ids"]
+    assert len(graph_bound_skill_ids) == 1
+    assert graph_bound_skill_ids[0].startswith("graph-release_risk-")
+    assert graph_bound_skill_ids[0].endswith("-manager-skill")
 
     detail_payload = detail.json()
     assert detail.status_code == 200
     assert detail_payload["graph"]["display_name"] == "Release Risk"
     assert any(item["graph_id"] == "release_risk" for item in detail_payload["skills"])
+    assert any(item["skill_id"] == graph_bound_skill_ids[0] for item in detail_payload["skills"])
     assert detail_payload["logs"][0]["name"] == "index.log"
 
     runs_payload = runs.json()
@@ -2232,3 +2327,78 @@ async def test_admin_graph_routes_create_validate_build_and_bind_graph_skills(
     assert deleted.json()["artifact_deleted"] is False
     assert graph_root.exists()
     assert after_delete.json()["graphs"] == []
+
+
+@pytest.mark.asyncio
+async def test_admin_graph_failed_run_cleanup_routes(tmp_path: Path) -> None:
+    settings = _control_panel_settings(tmp_path)
+    manager = _FakeManager(settings)
+    run_store = manager.get_snapshot().bot.ctx.stores.graph_index_run_store
+
+    async with _admin_client(manager) as client:
+        created = await client.post(
+            "/v1/admin/graphs",
+            headers=_admin_headers(),
+            json={
+                "graph_id": "failed-runs-graph",
+                "display_name": "Failed Runs Graph",
+                "collection_id": "default",
+                "source_doc_ids": ["DOC-1"],
+                "actor": "tester",
+            },
+        )
+        assert created.status_code == 200
+        run_store.upsert_run(
+            GraphIndexRunRecord(
+                run_id="failed-run-1",
+                graph_id="failed_runs_graph",
+                tenant_id=settings.default_tenant_id,
+                operation="build",
+                status="failed",
+                detail="Build failed.",
+                started_at="2026-04-08T10:05:00Z",
+                completed_at="2026-04-08T10:05:30Z",
+            )
+        )
+        run_store.upsert_run(
+            GraphIndexRunRecord(
+                run_id="running-run-1",
+                graph_id="failed_runs_graph",
+                tenant_id=settings.default_tenant_id,
+                operation="build",
+                status="running",
+                detail="Build running.",
+                started_at="2026-04-08T10:06:00Z",
+            )
+        )
+
+        failed = await client.get("/v1/admin/graphs/runs?status=failed", headers=_admin_headers())
+        blocked = await client.request(
+            "DELETE",
+            "/v1/admin/graphs/failed_runs_graph/runs/running-run-1",
+            headers=_admin_headers(),
+            json={"status": "failed", "actor": "tester"},
+        )
+        deleted = await client.request(
+            "DELETE",
+            "/v1/admin/graphs/failed_runs_graph/runs/failed-run-1",
+            headers=_admin_headers(),
+            json={"status": "failed", "actor": "tester"},
+        )
+        after_delete = await client.get("/v1/admin/graphs/runs?status=failed", headers=_admin_headers())
+        cleanup = await client.post(
+            "/v1/admin/graphs/runs/cleanup",
+            headers=_admin_headers(),
+            json={"status": "failed", "actor": "tester"},
+        )
+
+    assert failed.status_code == 200
+    assert [item["run_id"] for item in failed.json()["runs"]] == ["failed-run-1"]
+    assert blocked.status_code == 400
+    assert "Active graph runs" in blocked.json()["detail"]
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert after_delete.status_code == 200
+    assert after_delete.json()["runs"] == []
+    assert cleanup.status_code == 200
+    assert cleanup.json()["deleted_count"] == 0

@@ -431,6 +431,7 @@ class SkillPackUpsertRequest(BaseModel):
     name: Optional[str] = None
     agent_scope: Optional[str] = None
     graph_id: Optional[str] = None
+    collection_id: Optional[str] = None
     tool_tags: List[str] = Field(default_factory=list)
     task_tags: List[str] = Field(default_factory=list)
     version: Optional[str] = None
@@ -1240,7 +1241,9 @@ def _stream_with_progress(
     """
     helper_task_type = str((request_metadata or {}).get("openwebui_helper_task_type") or "").strip()
     tracker = None if helper_task_type else TurnStatusTracker(turn_started_at=time.monotonic())
-    progress_sink = LiveProgressSink()
+    frontend_settings = getattr(runtime, "settings", None) or getattr(getattr(bot, "ctx", None), "settings", None)
+    progress_sink = LiveProgressSink(settings=frontend_settings)
+    frontend_policy = progress_sink.policy
     try:
         progress_cb = ProgressCallback(progress_sink)
         progress_source = progress_sink
@@ -1292,7 +1295,8 @@ def _stream_with_progress(
 
     if tracker is not None:
         for snapshot in tracker.start_snapshots(time.monotonic()):
-            yield _named_sse_event("status", snapshot)
+            if frontend_policy.allows_status_snapshot(snapshot):
+                yield _named_sse_event("status", snapshot)
 
     # Stream progress events while process_turn is running
     while True:
@@ -1304,7 +1308,8 @@ def _stream_with_progress(
             if delay == 0.0:
                 snapshot = tracker.heartbeat_snapshot(time.monotonic())
                 if snapshot is not None:
-                    yield _named_sse_event("status", snapshot)
+                    if frontend_policy.allows_status_snapshot(snapshot):
+                        yield _named_sse_event("status", snapshot)
                 continue
             timeout = delay if delay is not None else 1.0
         else:
@@ -1315,7 +1320,8 @@ def _stream_with_progress(
             if tracker is not None:
                 snapshot = tracker.heartbeat_snapshot(time.monotonic())
                 if snapshot is not None:
-                    yield _named_sse_event("status", snapshot)
+                    if frontend_policy.allows_status_snapshot(snapshot):
+                        yield _named_sse_event("status", snapshot)
                     continue
             # BASIC turns may emit no progress events for a while; keep waiting
             # while the worker thread is still computing the final answer.
@@ -1328,15 +1334,18 @@ def _stream_with_progress(
             isinstance(event.get(key), dict)
             for key in ("agentic_tool_call", "agentic_agent_activity", "agentic_parallel_group", "agentic_audit_item")
         ):
-            yield _named_sse_event("status", event)
+            if frontend_policy.allows_status_snapshot(event):
+                yield _named_sse_event("status", event)
             if tracker is not None and not isinstance(event.get("agentic_tool_call"), dict):
                 for snapshot in tracker.progress_snapshots(event, time.monotonic()):
-                    yield _named_sse_event("status", snapshot)
+                    if frontend_policy.allows_status_snapshot(snapshot):
+                        yield _named_sse_event("status", snapshot)
             continue
         yield f"event: progress\ndata: {_json_dumps(event)}\n\n"
         if tracker is not None:
             for snapshot in tracker.progress_snapshots(event, time.monotonic()):
-                yield _named_sse_event("status", snapshot)
+                if frontend_policy.allows_status_snapshot(snapshot):
+                    yield _named_sse_event("status", snapshot)
 
     thread.join(timeout=1)
 
@@ -1345,7 +1354,8 @@ def _stream_with_progress(
         if tracker is not None:
             failure = tracker.failure_snapshot(time.monotonic())
             if failure is not None:
-                yield _named_sse_event("status", failure)
+                if frontend_policy.allows_status_snapshot(failure):
+                    yield _named_sse_event("status", failure)
         err_text = f"Error: {str(exc_holder['error'])[:200]}"
         yield from _stream_chat_chunks(model, err_text)
         yield "data: [DONE]\n\n"
@@ -1360,7 +1370,8 @@ def _stream_with_progress(
             label="Synthesizing answer",
             detail="Preparing final response",
         ):
-            yield _named_sse_event("status", snapshot)
+            if frontend_policy.allows_status_snapshot(snapshot):
+                yield _named_sse_event("status", snapshot)
     yield from _stream_chat_chunks(model, answer)
     artifacts = latest_assistant_artifacts(getattr(session, "messages", []) or [])
     if artifacts:
@@ -1383,7 +1394,8 @@ def _stream_with_progress(
         yield f"event: metadata\ndata: {_json_dumps(metadata)}\n\n"
     if tracker is not None:
         for snapshot in tracker.completion_snapshots(time.monotonic(), metadata=metadata):
-            yield _named_sse_event("status", snapshot)
+            if frontend_policy.allows_status_snapshot(snapshot):
+                yield _named_sse_event("status", snapshot)
     yield "data: [DONE]\n\n"
 
 
@@ -1524,6 +1536,7 @@ def _serialize_skill_pack(
         "name": record.name,
         "agent_scope": record.agent_scope,
         "graph_id": record.graph_id,
+        "collection_id": record.collection_id,
         "tenant_id": record.tenant_id,
         "tool_tags": list(record.tool_tags),
         "task_tags": list(record.task_tags),
@@ -1672,6 +1685,7 @@ def _materialize_skill_pack(
             "name": request.name or (existing.name if existing is not None else ""),
             "agent_scope": default_agent_scope,
             "graph_id": request.graph_id if request.graph_id is not None else (existing.graph_id if existing is not None else ""),
+            "collection_id": request.collection_id if request.collection_id is not None else (existing.collection_id if existing is not None else ""),
             "tool_tags": list(request.tool_tags or _default_skill_tool_tags(default_agent_scope, existing)),
             "task_tags": list(request.task_tags or _default_skill_task_tags(default_agent_scope, existing)),
             "version": request.version or (existing.version if existing is not None else "1"),
@@ -1718,6 +1732,11 @@ def _materialize_skill_pack(
         if request.graph_id is not None
         else (parsed.graph_id or (existing.graph_id if existing is not None else ""))
     ).strip()
+    parsed.collection_id = str(
+        request.collection_id
+        if request.collection_id is not None
+        else (parsed.collection_id or (existing.collection_id if existing is not None else ""))
+    ).strip()
     parsed.tool_tags = list(request.tool_tags or parsed.tool_tags or (existing.tool_tags if existing is not None else []))
     parsed.task_tags = list(request.task_tags or parsed.task_tags or (existing.task_tags if existing is not None else []))
     parsed.version = str(request.version or parsed.version or (existing.version if existing is not None else "1")).strip() or "1"
@@ -1759,6 +1778,7 @@ def _skill_pack_to_record(pack: SkillPackFile, *, tenant_id: str) -> SkillPackRe
         skill_id=pack.skill_id,
         tenant_id=tenant_id,
         graph_id=pack.graph_id,
+        collection_id=pack.collection_id,
         name=pack.name,
         agent_scope=pack.agent_scope,
         checksum=pack.checksum,
@@ -4535,6 +4555,7 @@ def document_source_file(
     user_id: Optional[str] = None,
     expires: Optional[int] = None,
     sig: Optional[str] = None,
+    disposition: str = "attachment",
     runtime: Runtime = Depends(get_runtime_or_503),
     authorization: Optional[str] = Header(None, alias="Authorization"),
     x_conversation_id: Optional[str] = Header(None, alias="X-Conversation-ID"),
@@ -4586,6 +4607,7 @@ def document_source_file(
         state,
         collection_id=str(getattr(record, "collection_id", "") or ""),
     )
+    content_disposition_type = "inline" if str(disposition or "").strip().lower() == "inline" else "attachment"
     source_metadata = dict(getattr(record, "source_metadata", {}) or {})
     blob_ref = blob_ref_from_record(record)
     filename = (
@@ -4606,7 +4628,7 @@ def document_source_file(
                     or blob_ref.content_type
                     or _document_source_media_type(record, Path(filename or getattr(record, "title", "source")))
                 ),
-                headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
+                headers={"Content-Disposition": f'{content_disposition_type}; filename="{download_filename}"'},
             )
         try:
             local_source = blob_store.materialize_to_path(blob_ref)
@@ -4621,6 +4643,7 @@ def document_source_file(
         path=source_path,
         media_type=_document_source_media_type(record, source_path),
         filename=filename,
+        content_disposition_type=content_disposition_type,
     )
 
 

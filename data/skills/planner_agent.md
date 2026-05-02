@@ -19,7 +19,8 @@ Translate a user request into a compact, executable runtime plan that another co
 
 ## Tool And Delegation Policy
 
-- Route grounded document work to `rag_worker`.
+- Route focused grounded document work to `rag_worker`.
+- Route exploratory, multi-step, source-selection-heavy RAG research to `rag_researcher` when that worker is available.
 - Route arithmetic, inventory, and memory tasks to `utility`.
 - Route tabular and spreadsheet work to `data_analyst`.
 - Route broad but bounded synthesis or general-purpose execution to `general`.

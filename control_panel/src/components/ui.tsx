@@ -681,6 +681,11 @@ export function Dialog(props: {
   const descId = props.description ? `${autoId}-desc` : undefined
   const containerRef = useRef<HTMLDivElement | null>(null)
   const previousActiveRef = useRef<Element | null>(null)
+  const onCloseRef = useRef(props.onClose)
+
+  useEffect(() => {
+    onCloseRef.current = props.onClose
+  }, [props.onClose])
 
   useEffect(() => {
     if (!props.open) return
@@ -695,7 +700,7 @@ export function Dialog(props: {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.stopPropagation()
-        props.onClose()
+        onCloseRef.current()
       }
     }
     document.addEventListener('keydown', onKey)
@@ -709,7 +714,7 @@ export function Dialog(props: {
         previousActiveRef.current.focus()
       }
     }
-  }, [props.open, props.onClose])
+  }, [props.open])
 
   if (!props.open) return null
 

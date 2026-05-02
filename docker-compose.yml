@@ -29,6 +29,12 @@ x-app-env: &app-env
   OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-gpt-oss:20b}
   OLLAMA_JUDGE_MODEL: ${OLLAMA_JUDGE_MODEL:-gpt-oss:20b}
   OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text:latest}
+  RERANK_ENABLED: ${RERANK_ENABLED:-true}
+  RERANK_PROVIDER: ${RERANK_PROVIDER:-ollama}
+  RERANK_MODEL: ${RERANK_MODEL:-rjmalagon/mxbai-rerank-large-v2:1.5b-fp16}
+  RERANK_TOP_N: ${RERANK_TOP_N:-12}
+  RERANK_TIMEOUT_SECONDS: ${RERANK_TIMEOUT_SECONDS:-30}
+  RERANK_FALLBACK_TO_HEURISTICS: ${RERANK_FALLBACK_TO_HEURISTICS:-true}
   EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
   DATA_DIR: ${DATA_DIR:-./data}
   KB_DIR: ${KB_DIR:-./data/kb}
@@ -44,6 +50,7 @@ x-app-env: &app-env
   GRAPH_BACKEND: ${GRAPH_BACKEND:-microsoft_graphrag}
   GRAPH_IMPORT_ENABLED: ${GRAPH_IMPORT_ENABLED:-true}
   GRAPH_SOURCE_PLANNING_ENABLED: ${GRAPH_SOURCE_PLANNING_ENABLED:-true}
+  GRAPH_QUERY_LLM_PLANNING_ENABLED: ${GRAPH_QUERY_LLM_PLANNING_ENABLED:-false}
   GRAPH_SQL_ENABLED: ${GRAPH_SQL_ENABLED:-true}
   GRAPH_SQL_ALLOWED_VIEWS: ${GRAPH_SQL_ALLOWED_VIEWS:-documents,graph_indexes}
   GRAPHRAG_PROJECTS_DIR: ${GRAPHRAG_PROJECTS_DIR:-./data/graphrag/projects}
@@ -74,6 +81,8 @@ x-app-env: &app-env
   DEFAULT_CONVERSATION_ID: ${DEFAULT_CONVERSATION_ID:-openwebui-session}
   GATEWAY_MODEL_ID: ${GATEWAY_MODEL_ID:-enterprise-agent}
   GATEWAY_SHARED_BEARER_TOKEN: ${GATEWAY_SHARED_BEARER_TOKEN:-change-me-openwebui-shared-token}
+  PUBLIC_AGENT_API_BASE_URL: ${PUBLIC_AGENT_API_BASE_URL:-http://localhost:18000}
+  GATEWAY_PUBLIC_BASE_URL: ${GATEWAY_PUBLIC_BASE_URL:-http://localhost:18000}
   DOWNLOAD_URL_SECRET: ${DOWNLOAD_URL_SECRET:-change-me-download-url-secret}
   DOWNLOAD_URL_TTL_SECONDS: ${DOWNLOAD_URL_TTL_SECONDS:-900}
   CONNECTOR_SECRET_API_KEY: ${CONNECTOR_SECRET_API_KEY:-change-me-connector-secret}
@@ -132,6 +141,8 @@ services:
     restart: unless-stopped
     ports:
       - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-3}
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -149,7 +160,7 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_BOOTSTRAP_MODELS: ${OLLAMA_BOOTSTRAP_MODELS:-gpt-oss:20b,nomic-embed-text:latest}
+      OLLAMA_BOOTSTRAP_MODELS: ${OLLAMA_BOOTSTRAP_MODELS:-gpt-oss:20b,rjmalagon/mxbai-rerank-large-v2:1.5b-fp16,nomic-embed-text:latest}
     entrypoint: >
       /bin/sh -c "
       set -eu;

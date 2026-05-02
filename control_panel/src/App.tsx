@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Search } from 'lucide-react'
 import { api, isApiError } from './api'
@@ -55,6 +55,8 @@ import type {
   ArchitectureSnapshot,
   CapabilitySectionStatus,
   CanonicalRoutingPath,
+  CollectionSkillDraftApplyPayload,
+  CollectionSkillDraftRecord,
   CollectionHealthReport,
   CollectionOperationResult,
   CollectionSummary,
@@ -87,6 +89,14 @@ function useSectionRoute(): [Section, (next: Section) => void] {
     [navigate, location.pathname],
   )
   return [active, setActive]
+}
+
+function HelpCue({ content }: { content: ReactNode }) {
+  return (
+    <Tooltip content={content}>
+      <span className="help-cue" tabIndex={0} aria-label="More information">?</span>
+    </Tooltip>
+  )
 }
 
 const NEW_SKILL_TEMPLATE = `# New Skill
@@ -123,8 +133,9 @@ type AgentsTab = 'workspace' | 'catalog'
 type PromptsTab = 'edit' | 'compare'
 type CollectionsTab = 'workspace'
 type CollectionActionMode = 'upload' | 'local' | 'registered' | 'sync'
-type GraphsTab = 'workspace' | 'runs'
+type GraphsTab = 'workspace' | 'runs' | 'failed-runs'
 type GraphSourceMode = 'collection' | 'manual'
+type WizardCollectionMode = 'existing' | 'new'
 type KnowledgeSourceKind = 'local_folder' | 'local_repo'
 type SkillsTab = 'editor' | 'preview'
 type AccessResourceType = 'agent' | 'agent_group' | 'collection' | 'graph' | 'skill' | 'skill_family' | 'tool' | 'tool_group' | 'worker_request'
@@ -133,11 +144,12 @@ type AccessTab = 'overview' | 'users' | 'groups' | 'roles' | 'grants' | 'effecti
 type AccessWizardMode = 'setup' | 'grant' | 'user' | 'group' | null
 type AccessGroupPurpose = 'permission' | 'team' | 'admin'
 type AccessPresetId = 'kb_reader' | 'graph_builder' | 'agent_operator' | 'approval_manager' | 'custom'
-type IngestionWizardStep = 'collection' | 'source' | 'graph' | 'tuning' | 'review'
+type IngestionWizardStep = 'collection' | 'source' | 'graph' | 'tuning' | 'skills' | 'review'
 type OperationsTab = 'reloads' | 'jobs' | 'audit'
 
+const ALL_CONFIG_GROUP_ID = '__all__'
 const COLLECTION_ACTION_MODES: CollectionActionMode[] = ['upload', 'local', 'registered', 'sync']
-const INGESTION_WIZARD_STEPS: IngestionWizardStep[] = ['collection', 'source', 'graph', 'tuning', 'review']
+const INGESTION_WIZARD_STEPS: IngestionWizardStep[] = ['collection', 'source', 'graph', 'tuning', 'skills', 'review']
 const ACCESS_TABS: Array<{ id: AccessTab; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'users', label: 'Users' },
@@ -196,6 +208,31 @@ const GRAPH_RESEARCH_TUNE_TARGETS = [
   'drift_reduce_prompt.txt',
   'basic_search_system_prompt.txt',
 ] as const
+const DEFAULT_GRAPH_RESEARCH_TUNE_TARGETS = [...GRAPH_RESEARCH_TUNE_TARGETS]
+
+const SOURCE_MODE_HELP: Record<CollectionActionMode, { label: string; help: string }> = {
+  upload: {
+    label: 'Upload Files',
+    help: 'Browser-selected files or folders are sent to the backend and indexed into this collection.',
+  },
+  local: {
+    label: 'Local Source',
+    help: 'Server-readable paths typed now. Use this when the API process can read the folder or repository path.',
+  },
+  registered: {
+    label: 'Registered Source',
+    help: 'Saved folder or repository source refresh. The backend remembers paths and include/exclude rules.',
+  },
+  sync: {
+    label: 'Sync Existing',
+    help: 'Backend-configured KB roots only. This does not upload files or scan newly typed paths.',
+  },
+}
+
+const WIZARD_SKILL_HELP: Record<string, string> = {
+  collection_rag: 'Creates a collection-scoped RAG skill with strict KB collection hints, retrieval workflow guidance, and source authority rules.',
+  graph_manager: 'Creates a graph-manager skill bound to the graph and collection, then applies it to graph_skill_ids only when you explicitly apply it.',
+}
 
 type ResourceGrantSummary = {
   roleNames: string[]
@@ -204,6 +241,15 @@ type ResourceGrantSummary = {
 
 function normalizeCollectionId(value: string): string {
   return value.trim()
+}
+
+function slugGraphId(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
 }
 
 function getMessage(error: unknown): string {
@@ -769,9 +815,11 @@ export default function App() {
   const [graphDetail, setGraphDetail] = useState<GraphDetailPayload | null>(null)
   const [graphValidation, setGraphValidation] = useState<Record<string, unknown> | null>(null)
   const [graphRuns, setGraphRuns] = useState<GraphIndexRunRecord[]>([])
+  const [failedGraphRuns, setFailedGraphRuns] = useState<GraphIndexRunRecord[]>([])
   const [graphProgress, setGraphProgress] = useState<GraphProgressPayload | null>(null)
   const [deleteGraphArtifacts, setDeleteGraphArtifacts] = useState(false)
   const [graphLifecycleBusy, setGraphLifecycleBusy] = useState(false)
+  const [graphRunCleanupBusy, setGraphRunCleanupBusy] = useState(false)
   const [graphCollectionId, setGraphCollectionId] = useState('')
   const [graphCollectionDocs, setGraphCollectionDocs] = useState<Array<Record<string, unknown>>>([])
   const [graphSelectedDocIds, setGraphSelectedDocIds] = useState<string[]>([])
@@ -787,18 +835,27 @@ export default function App() {
   const [graphSmokeResult, setGraphSmokeResult] = useState<GraphAssistantPayload | null>(null)
   const [graphAdvancedOpen, setGraphAdvancedOpen] = useSessionBooleanState('control-panel-ui-graph-advanced-open', false)
   const [graphTuneGuidance, setGraphTuneGuidance] = useState('')
-  const [graphTuneTargets, setGraphTuneTargets] = useState<string[]>(['extract_graph.txt'])
+  const [graphTuneTargets, setGraphTuneTargets] = useState<string[]>(DEFAULT_GRAPH_RESEARCH_TUNE_TARGETS)
   const [graphTuneResult, setGraphTuneResult] = useState<GraphResearchTunePayload | null>(null)
   const [graphTuneSelectedPrompts, setGraphTuneSelectedPrompts] = useState<string[]>([])
   const [graphTuneRunning, setGraphTuneRunning] = useState(false)
   const [ingestionWizardOpen, setIngestionWizardOpen] = useState(false)
   const [ingestionWizardStep, setIngestionWizardStep] = useState<IngestionWizardStep>('collection')
+  const [wizardCollectionMode, setWizardCollectionMode] = useState<WizardCollectionMode>('existing')
+  const [wizardCollectionSearch, setWizardCollectionSearch] = useState('')
   const [wizardCollectionId, setWizardCollectionId] = useState('')
+  const [wizardGraphIdTouched, setWizardGraphIdTouched] = useState(false)
   const [wizardCreateGraph, setWizardCreateGraph] = useState(true)
   const [wizardStartBuild, setWizardStartBuild] = useState(false)
   const [wizardRunTune, setWizardRunTune] = useState(false)
   const [wizardApplyTune, setWizardApplyTune] = useState(false)
   const [wizardRequireTuneBeforeBuild, setWizardRequireTuneBeforeBuild] = useState(false)
+  const [wizardSkillDrafts, setWizardSkillDrafts] = useState<CollectionSkillDraftRecord[]>([])
+  const [wizardSkillDraftEdits, setWizardSkillDraftEdits] = useState<Record<string, string>>({})
+  const [wizardSkillSelectedIds, setWizardSkillSelectedIds] = useState<string[]>([])
+  const [wizardSkillDraftRunning, setWizardSkillDraftRunning] = useState(false)
+  const [wizardSkillApplyRunning, setWizardSkillApplyRunning] = useState(false)
+  const [wizardSkillApplyResult, setWizardSkillApplyResult] = useState<CollectionSkillDraftApplyPayload | null>(null)
   const [skills, setSkills] = useState<Array<Record<string, unknown>>>([])
   const [selectedSkill, setSelectedSkill] = useState('')
   const [skillSearch, setSkillSearch] = useSessionStringState<string>('control-panel-ui-skill-search', '')
@@ -908,6 +965,19 @@ export default function App() {
       })
       .filter(([, fields]) => fields.length > 0)
   }, [groupedConfigFields, settingsSearch])
+  const configGroupTabs = useMemo(() => {
+    if (filteredConfigGroups.length === 0) return []
+    return [
+      { id: ALL_CONFIG_GROUP_ID, label: 'All' },
+      ...filteredConfigGroups.map(([group]) => ({ id: group, label: group })),
+    ]
+  }, [filteredConfigGroups])
+  const activeConfigSelection = activeConfigGroup && filteredConfigGroups.some(([group]) => group === activeConfigGroup)
+    ? activeConfigGroup
+    : ALL_CONFIG_GROUP_ID
+  const visibleConfigGroups = activeConfigSelection === ALL_CONFIG_GROUP_ID
+    ? filteredConfigGroups
+    : filteredConfigGroups.filter(([group]) => group === activeConfigSelection)
   const activeMeta = SECTION_META.find(item => item.id === active) ?? SECTION_META[0]
   const activeSectionSupport = compatibility?.sections?.[active] ?? null
   const activeSectionSupported = activeSectionSupport?.supported ?? true
@@ -920,7 +990,6 @@ export default function App() {
   const unsupportedSectionMessage = !activeSectionSupported
     ? buildUnsupportedSectionMessage(active, activeSectionSupport, compatibilitySource)
     : null
-  const visibleConfigGroup = filteredConfigGroups.find(([group]) => group === activeConfigGroup) ?? filteredConfigGroups[0] ?? null
   const architectureNodeMap = useMemo(() => new Map((architecture?.nodes ?? []).map(node => [node.id, node])), [architecture])
   const architectureEdgeMap = useMemo(() => new Map((architecture?.edges ?? []).map(edge => [edge.id, edge])), [architecture])
   const selectedArchitectureNode = architectureNodeMap.get(selectedArchitectureNodeId) ?? null
@@ -1052,6 +1121,17 @@ export default function App() {
       graph.status,
     ))
   }, [graphs, graphSearch])
+  const filteredWizardCollections = useMemo(() => {
+    return collections.filter(collection => matchesTextQuery(
+      wizardCollectionSearch,
+      collection.collection_id,
+      collection.maintenance_policy,
+      collection.status?.reason,
+    ))
+  }, [collections, wizardCollectionSearch])
+  const graphById = useMemo(() => {
+    return new Map(graphs.map(graph => [graph.graph_id, graph]))
+  }, [graphs])
   const filteredSkills = useMemo(() => {
     return skills.filter(skill => matchesTextQuery(
       skillSearch,
@@ -1123,7 +1203,20 @@ export default function App() {
   const graphTuneCoverage = asRecord(graphTuneResult?.coverage)
   const graphTuneCorpusProfile = asRecord(graphTuneResult?.corpus_profile)
   const graphTunePromptDraftEntries = Object.entries(graphTuneResult?.prompt_drafts ?? {})
+  const validGraphTunePromptFiles = graphTunePromptDraftEntries
+    .filter(([, draft]) => {
+      const draftRecord = asRecord(draft)
+      const validation = asRecord(draftRecord?.validation)
+      return validation?.ok !== false
+    })
+    .map(([promptFile]) => promptFile)
   const graphTuneWarnings = asArray<string>(graphTuneResult?.warnings)
+  const wizardSelectedSkillDrafts = wizardSkillDrafts.filter(draft => wizardSkillSelectedIds.includes(asString(draft.skill_id)))
+  const wizardSkillDraftStatus = wizardSkillApplyResult
+    ? `Applied ${formatWholeNumber(wizardSkillApplyResult.applied_skill_ids.length)} skill draft(s)`
+    : wizardSkillDrafts.length > 0
+      ? `${formatWholeNumber(wizardSkillDrafts.length)} previewed, not applied`
+      : 'No drafts generated'
   const selectedSkillStatus = asString(skillDetail?.status, 'unknown')
   const skillDependencyValidation = asRecord(skillDetail?.dependency_validation)
   const skillHealth = asRecord(skillDetail?.skill_health)
@@ -1501,6 +1594,12 @@ export default function App() {
     return nextGraphId
   }
 
+  async function refreshFailedGraphRuns(): Promise<GraphIndexRunRecord[]> {
+    const payload = await api.listGraphRuns(token, { status: 'failed', limit: 100 })
+    setFailedGraphRuns(payload.runs)
+    return payload.runs
+  }
+
   async function refreshSelectedGraph(graphId: string): Promise<GraphDetailPayload | null> {
     if (!graphId) {
       setGraphDetail(null)
@@ -1538,11 +1637,20 @@ export default function App() {
     ))
   }
 
+  function selectAllGraphDocs() {
+    setGraphSelectedDocIds(uniqueList(graphCollectionDocs.map(doc => asString(doc.doc_id)).filter(Boolean)))
+  }
+
+  function clearGraphDocs() {
+    setGraphSelectedDocIds([])
+  }
+
   function hydrateGraphForm(detail: GraphDetailPayload) {
     const graph = detail.graph
     setGraphCollectionId(asString(graph.collection_id))
     setGraphSelectedDocIds(asArray<string>(graph.source_doc_ids))
     setGraphDraftId(asString(graph.graph_id))
+    setWizardGraphIdTouched(true)
     setGraphDisplayNameDraft(asString(graph.display_name))
     setGraphPromptDraft(JSON.stringify(graph.prompt_overrides_json ?? {}, null, 2))
     setGraphConfigDraft(JSON.stringify(graph.config_json ?? {}, null, 2))
@@ -1892,6 +2000,11 @@ export default function App() {
   }, [active, selectedGraph, token])
 
   useEffect(() => {
+    if (!token || active !== 'graphs' || graphsTab !== 'failed-runs') return
+    void refreshFailedGraphRuns().catch(err => setError(getMessage(err)))
+  }, [active, graphsTab, token])
+
+  useEffect(() => {
     if (!token || active !== 'graphs' || !selectedGraph || !graphBuildRunning) return
     let cancelled = false
     const poll = async () => {
@@ -1926,14 +2039,20 @@ export default function App() {
   }, [active, graphCollectionId, token])
 
   useEffect(() => {
+    if (!token || !ingestionWizardOpen || !graphCollectionId) return
+    void refreshGraphCollectionDocs(graphCollectionId).catch(err => setError(getMessage(err)))
+  }, [graphCollectionId, ingestionWizardOpen, token])
+
+  useEffect(() => {
     if (active !== 'config') return
-    const firstGroup = groupedConfigFields[0]?.[0] ?? ''
-    if (!firstGroup) {
+    if (groupedConfigFields.length === 0) {
       if (activeConfigGroup) setActiveConfigGroup('')
       return
     }
     const hasActiveGroup = groupedConfigFields.some(([group]) => group === activeConfigGroup)
-    if (!hasActiveGroup) setActiveConfigGroup(firstGroup)
+    if (!activeConfigGroup || (activeConfigGroup !== ALL_CONFIG_GROUP_ID && !hasActiveGroup)) {
+      setActiveConfigGroup(ALL_CONFIG_GROUP_ID)
+    }
   }, [active, activeConfigGroup, groupedConfigFields])
 
   useEffect(() => {
@@ -2326,8 +2445,8 @@ export default function App() {
         source_doc_ids: graphSourceMode === 'manual' ? graphSelectedDocIds : [],
       })
       setGraphCollectionId(collectionId)
-      setGraphDraftId(asString(payload.graph_id, graphDraftId))
-      setGraphDisplayNameDraft(asString(payload.display_name, graphDisplayNameDraft))
+      if (!graphDraftId.trim()) setGraphDraftId(asString(payload.graph_id))
+      if (!graphDisplayNameDraft.trim()) setGraphDisplayNameDraft(asString(payload.display_name))
       setGraphConfigDraft(JSON.stringify(payload.config_overrides ?? {}, null, 2))
       setGraphPromptDraft(JSON.stringify(payload.prompt_overrides ?? {}, null, 2))
       if (graphSourceMode === 'manual') {
@@ -2498,6 +2617,22 @@ export default function App() {
       setError('Choose a collection ID for the graph.')
       return
     }
+    if (!graphDisplayNameDraft.trim()) {
+      setError('Choose a display name for the graph.')
+      return
+    }
+    if (!graphDraftId.trim()) {
+      setError('Choose a graph ID before saving the graph draft.')
+      return
+    }
+    if (graphSourceMode === 'manual' && graphSelectedDocIds.length === 0) {
+      setError('Select at least one document or switch to the entire collection before saving the graph draft.')
+      return
+    }
+    if (graphCollectionDocs.length === 0) {
+      setError('This collection has no indexed documents yet. Ingest documents before creating the graph.')
+      return
+    }
     try {
       const payload = await api.createGraph(token, {
         graph_id: graphDraftId,
@@ -2532,13 +2667,50 @@ export default function App() {
 
   function openIngestionWizard(collectionId = '') {
     const normalized = normalizeCollectionId(collectionId || selectedCollection || collectionDraft || graphCollectionId)
+    const defaultDisplayName = normalized ? `${humanizeKey(normalized)} Graph` : ''
     setWizardCollectionId(normalized)
+    setWizardCollectionMode(normalized && collections.some(collection => collection.collection_id === normalized) ? 'existing' : 'new')
+    setWizardCollectionSearch('')
     if (normalized) {
       setCollectionDraft(normalized)
       setGraphCollectionId(normalized)
     }
+    if (defaultDisplayName && !graphDisplayNameDraft.trim()) {
+      setGraphDisplayNameDraft(defaultDisplayName)
+      if (!graphDraftId.trim()) {
+        setGraphDraftId(slugGraphId(defaultDisplayName))
+        setWizardGraphIdTouched(false)
+      }
+    }
     setIngestionWizardStep('collection')
+    setWizardSkillDrafts([])
+    setWizardSkillDraftEdits({})
+    setWizardSkillSelectedIds([])
+    setWizardSkillApplyResult(null)
     setIngestionWizardOpen(true)
+  }
+
+  function resolveWizardCollectionId(): string {
+    return normalizeCollectionId(wizardCollectionId || selectedCollection || collectionDraft)
+  }
+
+  function applyWizardCollectionId(collectionId: string) {
+    const normalized = normalizeCollectionId(collectionId)
+    setWizardCollectionId(normalized)
+    setCollectionDraft(normalized)
+    setGraphCollectionId(normalized)
+    if (normalized && !graphDisplayNameDraft.trim()) {
+      const displayName = `${humanizeKey(normalized)} Graph`
+      setGraphDisplayNameDraft(displayName)
+      if (!wizardGraphIdTouched && !graphDraftId.trim()) {
+        setGraphDraftId(slugGraphId(displayName))
+      }
+    }
+  }
+
+  function handleWizardGraphDisplayNameChange(value: string) {
+    setGraphDisplayNameDraft(value)
+    if (!wizardGraphIdTouched) setGraphDraftId(slugGraphId(value))
   }
 
   async function ensureWizardCollection(collectionId: string): Promise<void> {
@@ -2551,8 +2723,156 @@ export default function App() {
     setGraphCollectionId(collectionId)
   }
 
+  async function ensureWizardCollectionForSource(): Promise<string> {
+    const collectionId = resolveWizardCollectionId()
+    if (!collectionId) {
+      throw new Error('Choose a collection ID before indexing source documents.')
+    }
+    await ensureWizardCollection(collectionId)
+    return collectionId
+  }
+
+  async function handleWizardCollectionFilesUpload(files: FileList | File[] | null) {
+    if (!files || files.length === 0) return
+    try {
+      const collectionId = await ensureWizardCollectionForSource()
+      const fileArray = Array.isArray(files) ? files : Array.from(files)
+      const relativePaths = fileArray.map(file => {
+        const relativePath = asString((file as File & { webkitRelativePath?: string }).webkitRelativePath)
+        return relativePath || file.name
+      })
+      const result = await api.uploadFiles(token, collectionId, fileArray, relativePaths, metadataProfile, indexPreview, 'collection_upload')
+      applyCollectionSelection(collectionId)
+      const preferredDocId = asString(asArray<string>(result.doc_ids)[0])
+      await refreshCollectionWorkspace(collectionId, preferredDocId)
+      await refreshGraphCollectionDocs(collectionId)
+      setCollectionActivity(result)
+      setError('')
+      notifyOk(indexPreview ? 'Upload preview ready' : 'Documents indexed', collectionId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Wizard upload failed', err)
+    }
+  }
+
+  async function handleWizardPathIngest() {
+    try {
+      const collectionId = await ensureWizardCollectionForSource()
+      const paths = pathDraft.split('\n').map(item => item.trim()).filter(Boolean)
+      if (paths.length === 0) {
+        setError('Add at least one local file or folder path first.')
+        return
+      }
+      const result = await api.ingestPaths(
+        token,
+        collectionId,
+        paths,
+        metadataProfile,
+        indexPreview,
+        knowledgeSourceKind,
+      )
+      applyCollectionSelection(collectionId)
+      await refreshCollectionWorkspace(collectionId)
+      await refreshGraphCollectionDocs(collectionId)
+      setCollectionActivity(result)
+      setError('')
+      notifyOk(indexPreview ? 'Path ingest preview ready' : 'Paths indexed', collectionId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Wizard path ingest failed', err)
+    }
+  }
+
+  async function handleWizardRegisterSource() {
+    try {
+      const collectionId = await ensureWizardCollectionForSource()
+      const paths = multilineList(pathDraft)
+      if (paths.length === 0) {
+        setError('Add at least one local folder or repository path first.')
+        return
+      }
+      const result = await api.registerSource(token, {
+        paths,
+        source_kind: knowledgeSourceKind,
+        collection_id: collectionId,
+        include_globs: sourceGlobs(sourceIncludeGlobs),
+        exclude_globs: sourceGlobs(sourceExcludeGlobs),
+        metadata_profile: metadataProfile,
+      })
+      setSourceScan(result.scan)
+      await refreshSources(result.source.source_id)
+      setSelectedSourceId(result.source.source_id)
+      setError('')
+      notifyOk('Source registered', result.source.display_name)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Wizard source registration failed', err)
+    }
+  }
+
+  async function handleWizardIndexLocalSource() {
+    try {
+      const collectionId = await ensureWizardCollectionForSource()
+      const paths = multilineList(pathDraft)
+      if (paths.length === 0) {
+        setError('Add at least one local folder or repository path first.')
+        return
+      }
+      const registered = await api.registerSource(token, {
+        paths,
+        source_kind: knowledgeSourceKind,
+        collection_id: collectionId,
+        include_globs: sourceGlobs(sourceIncludeGlobs),
+        exclude_globs: sourceGlobs(sourceExcludeGlobs),
+        metadata_profile: metadataProfile,
+      })
+      setSourceScan(registered.scan)
+      setSelectedSourceId(registered.source.source_id)
+      await refreshSources(registered.source.source_id)
+      const result = await api.refreshSource(token, registered.source.source_id, {
+        metadata_profile: metadataProfile,
+        index_preview: indexPreview,
+        background: false,
+      })
+      const scan = asRecord(result.scan) as SourceScanPayload | null
+      if (scan) setSourceScan(scan)
+      applyCollectionSelection(collectionId)
+      await refreshCollectionWorkspace(collectionId)
+      await refreshGraphCollectionDocs(collectionId)
+      await refreshSources(registered.source.source_id)
+      setCollectionActivity(result)
+      setError('')
+      notifyOk(indexPreview ? 'Source index preview ready' : 'Source indexed', registered.source.display_name)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Wizard source index failed', err)
+    }
+  }
+
+  async function handleWizardSyncCollection() {
+    try {
+      const collectionId = await ensureWizardCollectionForSource()
+      const result = await api.syncCollection(token, collectionId)
+      applyCollectionSelection(collectionId)
+      await refreshCollectionWorkspace(collectionId)
+      await refreshGraphCollectionDocs(collectionId)
+      setCollectionActivity(result)
+      setError('')
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Wizard sync failed', err)
+    }
+  }
+
   async function ensureWizardGraphDraft(collectionId: string): Promise<string> {
-    const currentGraphId = asString(graphDraftId || selectedGraph)
+    const currentGraphId = asString(graphDraftId)
+    const currentDisplayName = asString(graphDisplayNameDraft)
+    if (!currentDisplayName.trim()) {
+      throw new Error('Choose a graph display name before creating the graph draft.')
+    }
+    if (!currentGraphId.trim()) {
+      throw new Error('Choose a graph ID before creating the graph draft.')
+    }
     if (currentGraphId) {
       try {
         const existing = await api.getGraph(token, currentGraphId)
@@ -2570,10 +2890,10 @@ export default function App() {
     const suggestion = await api.suggestGraph(token, {
       collection_id: collectionId,
       intent: graphIntent,
-      source_doc_ids: [],
+      source_doc_ids: graphSourceMode === 'manual' ? graphSelectedDocIds : [],
     })
-    const graphId = asString(suggestion.graph_id, graphDraftId)
-    const displayName = asString(suggestion.display_name, graphDisplayNameDraft || graphId)
+    const graphId = currentGraphId || asString(suggestion.graph_id)
+    const displayName = currentDisplayName || asString(suggestion.display_name, graphId)
     setGraphDraftId(graphId)
     setGraphDisplayNameDraft(displayName)
     setGraphConfigDraft(JSON.stringify(suggestion.config_overrides ?? {}, null, 2))
@@ -2595,7 +2915,7 @@ export default function App() {
       graph_id: graphId,
       display_name: displayName,
       collection_id: collectionId,
-      source_doc_ids: [],
+      source_doc_ids: graphSourceMode === 'manual' ? graphSelectedDocIds : [],
       backend: 'microsoft_graphrag',
       visibility: 'tenant',
       config_overrides: suggestion.config_overrides ?? {},
@@ -2632,7 +2952,7 @@ export default function App() {
   }
 
   async function handleWizardRunTune() {
-    const collectionId = normalizeCollectionId(wizardCollectionId || selectedCollection || collectionDraft)
+    const collectionId = resolveWizardCollectionId()
     if (!collectionId) {
       setError('Choose a collection before running prompt tuning.')
       return
@@ -2657,8 +2977,104 @@ export default function App() {
     }
   }
 
+  function wizardSkillDraftKey(draft: CollectionSkillDraftRecord): string {
+    return asString(draft.skill_id) || asString(draft.draft_type)
+  }
+
+  function wizardSkillDraftMarkdown(draft: CollectionSkillDraftRecord): string {
+    const key = wizardSkillDraftKey(draft)
+    return wizardSkillDraftEdits[key] ?? asString(draft.body_markdown || draft.markdown)
+  }
+
+  function toggleWizardSkillDraft(skillId: string) {
+    setWizardSkillSelectedIds(current => (
+      current.includes(skillId)
+        ? current.filter(item => item !== skillId)
+        : [...current, skillId]
+    ))
+  }
+
+  function selectAllWizardSkillDrafts() {
+    setWizardSkillSelectedIds(wizardSkillDrafts.map(draft => wizardSkillDraftKey(draft)).filter(Boolean))
+  }
+
+  function clearWizardSkillDrafts() {
+    setWizardSkillSelectedIds([])
+  }
+
+  async function handleWizardGenerateSkillDrafts() {
+    const collectionId = resolveWizardCollectionId()
+    if (!collectionId) {
+      setError('Choose a collection before generating skill drafts.')
+      return
+    }
+    setWizardSkillDraftRunning(true)
+    try {
+      await ensureWizardCollection(collectionId)
+      const graphId = wizardCreateGraph ? asString(graphDraftId) : ''
+      const payload = await api.draftCollectionSkills(token, collectionId, {
+        graph_id: graphId,
+        guidance: graphTuneGuidance,
+        intent: graphIntent,
+      })
+      const drafts = payload.drafts ?? []
+      setWizardSkillDrafts(drafts)
+      setWizardSkillDraftEdits(Object.fromEntries(drafts.map(draft => [wizardSkillDraftKey(draft), asString(draft.body_markdown || draft.markdown)])))
+      setWizardSkillSelectedIds(drafts.map(draft => wizardSkillDraftKey(draft)).filter(Boolean))
+      setWizardSkillApplyResult(null)
+      setError('')
+      notifyOk('Skill drafts ready', collectionId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Skill draft preview failed', err)
+    } finally {
+      setWizardSkillDraftRunning(false)
+    }
+  }
+
+  async function handleWizardApplySkillDrafts() {
+    const collectionId = resolveWizardCollectionId()
+    if (!collectionId) {
+      setError('Choose a collection before applying skill drafts.')
+      return
+    }
+    if (wizardSelectedSkillDrafts.length === 0) {
+      setError('Select at least one skill draft to apply.')
+      return
+    }
+    setWizardSkillApplyRunning(true)
+    try {
+      await ensureWizardCollection(collectionId)
+      let graphId = wizardCreateGraph ? asString(graphDraftId) : ''
+      const applyingGraphSkill = wizardSelectedSkillDrafts.some(draft => asString(draft.agent_scope) === 'graph_manager')
+      if (applyingGraphSkill) {
+        graphId = await ensureWizardGraphDraft(collectionId)
+      }
+      const payload = await api.applyCollectionSkillDrafts(token, collectionId, {
+        graph_id: graphId,
+        drafts: wizardSelectedSkillDrafts.map(draft => ({
+          ...draft,
+          selected: true,
+          body_markdown: wizardSkillDraftMarkdown(draft),
+          markdown: wizardSkillDraftMarkdown(draft),
+        })),
+      })
+      setWizardSkillApplyResult(payload)
+      const list = await api.listSkills(token)
+      setSkills(list.data)
+      if (graphId) await refreshSelectedGraph(graphId)
+      setError('')
+      notifyOk('Skill drafts applied', collectionId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Skill draft apply failed', err)
+    } finally {
+      setWizardSkillApplyRunning(false)
+    }
+  }
+
   async function handleWizardFinish() {
-    const collectionId = normalizeCollectionId(wizardCollectionId || selectedCollection || collectionDraft)
+    const collectionId = resolveWizardCollectionId()
     if (!collectionId) {
       setError('Choose a collection ID before finishing the wizard.')
       return
@@ -2670,7 +3086,24 @@ export default function App() {
         setCollectionActivity(result)
         await refreshCollectionWorkspace(collectionId)
       }
+      const sourceDocs = await refreshGraphCollectionDocs(collectionId)
       if (wizardCreateGraph) {
+        if (!graphDisplayNameDraft.trim()) {
+          setError('Choose a graph display name before finishing the wizard.')
+          return
+        }
+        if (!graphDraftId.trim()) {
+          setError('Choose a graph ID before finishing the wizard.')
+          return
+        }
+        if (graphSourceMode === 'manual' && graphSelectedDocIds.length === 0) {
+          setError('Select at least one document or switch to the entire collection before finishing the wizard.')
+          return
+        }
+        if (sourceDocs.length === 0) {
+          setError('This collection has no indexed documents yet. Add source documents before creating or building a graph.')
+          return
+        }
         const createdGraphId = await ensureWizardGraphDraft(collectionId)
         let tuneResult = graphTuneResult
         if (wizardRunTune && asString(tuneResult?.graph_id) !== createdGraphId) {
@@ -2802,14 +3235,11 @@ export default function App() {
     try {
       const payload = await api.deleteGraph(token, selectedGraph, { delete_artifacts: deleteGraphArtifacts })
       const deletedGraphId = selectedGraph
-      const nextGraphId = await refreshGraphs()
-      if (nextGraphId) {
-        await refreshSelectedGraph(nextGraphId)
-      } else {
-        setGraphDetail(null)
-        setGraphRuns([])
-        setGraphProgress(null)
-      }
+      await refreshGraphs()
+      setSelectedGraph('')
+      setGraphDetail(null)
+      setGraphRuns([])
+      setGraphProgress(null)
       setGraphValidation(payload)
       setDeleteGraphArtifacts(false)
       setError('')
@@ -2819,6 +3249,46 @@ export default function App() {
       notifyError('Delete graph failed', err)
     } finally {
       setGraphLifecycleBusy(false)
+    }
+  }
+
+  async function handleDeleteFailedGraphRun(run: GraphIndexRunRecord) {
+    const graphId = asString(run.graph_id)
+    const runId = asString(run.run_id)
+    if (!graphId || !runId) {
+      setError('This failed run is missing a graph ID or run ID.')
+      return
+    }
+    setGraphRunCleanupBusy(true)
+    try {
+      const payload = await api.deleteGraphRun(token, graphId, runId, { status: 'failed' })
+      setGraphValidation(payload)
+      await refreshFailedGraphRuns()
+      if (selectedGraph === graphId) await refreshSelectedGraph(graphId)
+      setError('')
+      notifyOk('Failed graph run deleted', runId)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Delete failed run failed', err)
+    } finally {
+      setGraphRunCleanupBusy(false)
+    }
+  }
+
+  async function handleCleanupFailedGraphRuns() {
+    setGraphRunCleanupBusy(true)
+    try {
+      const payload = await api.cleanupGraphRuns(token, { status: 'failed' })
+      setGraphValidation(payload)
+      await refreshFailedGraphRuns()
+      if (selectedGraph) await refreshSelectedGraph(selectedGraph)
+      setError('')
+      notifyOk('Failed graph runs deleted', `${formatWholeNumber(payload.deleted_count)} removed`)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Failed run cleanup failed', err)
+    } finally {
+      setGraphRunCleanupBusy(false)
     }
   }
 
@@ -2866,12 +3336,28 @@ export default function App() {
     ))
   }
 
+  function selectAllGraphTuneTargets() {
+    setGraphTuneTargets([...GRAPH_RESEARCH_TUNE_TARGETS])
+  }
+
+  function clearGraphTuneTargets() {
+    setGraphTuneTargets([])
+  }
+
   function toggleGraphTuneSelectedPrompt(promptFile: string) {
     setGraphTuneSelectedPrompts(current => (
       current.includes(promptFile)
         ? current.filter(item => item !== promptFile)
         : [...current, promptFile]
     ))
+  }
+
+  function selectAllValidGraphTuneDrafts() {
+    setGraphTuneSelectedPrompts(validGraphTunePromptFiles)
+  }
+
+  function clearGraphTuneDrafts() {
+    setGraphTuneSelectedPrompts([])
   }
 
   async function handleGraphResearchTune() {
@@ -3510,8 +3996,8 @@ export default function App() {
         )}
       </label>
       <SectionTabs
-        tabs={filteredConfigGroups.map(([group]) => ({ id: group, label: group }))}
-        active={visibleConfigGroup?.[0] ?? filteredConfigGroups[0]?.[0] ?? ''}
+        tabs={configGroupTabs}
+        active={activeConfigSelection}
         onChange={group => setActiveConfigGroup(group)}
         ariaLabel="Config groups"
       />
@@ -3562,6 +4048,7 @@ export default function App() {
       tabs={[
         { id: 'workspace', label: 'Workspace' },
         { id: 'runs', label: 'Runs' },
+        { id: 'failed-runs', label: 'Failed Runs' },
       ]}
       active={graphsTab}
       onChange={tab => setGraphsTab(tab as GraphsTab)}
@@ -3589,6 +4076,39 @@ export default function App() {
       ariaLabel="Operations views"
     />
   ) : undefined
+
+  function wizardNextRequiredAction(): string {
+    if (ingestionWizardStep === 'collection') {
+      return resolveWizardCollectionId() ? 'Confirm the source workflow for this collection.' : 'Choose or create a collection ID.'
+    }
+    if (ingestionWizardStep === 'source') {
+      return collectionAction === 'upload'
+        ? 'Upload browser-selected files or continue if the collection is already indexed.'
+        : collectionAction === 'local'
+          ? 'Preview, register, or index the server-readable paths.'
+          : collectionAction === 'registered'
+            ? 'Pick a saved source and refresh it, or continue if it is already current.'
+            : 'Sync backend-configured KB roots or continue if they are already current.'
+    }
+    if (ingestionWizardStep === 'graph') {
+      return wizardCreateGraph ? 'Confirm graph name, ID, source scope, and build timing.' : 'Continue without creating a graph draft.'
+    }
+    if (ingestionWizardStep === 'tuning') {
+      return wizardCreateGraph && wizardRunTune ? 'Run Research & Tune, then choose which valid prompt drafts to apply.' : 'Skip tuning or enable it before moving on.'
+    }
+    if (ingestionWizardStep === 'skills') {
+      return wizardSkillDrafts.length > 0 ? 'Review, edit, select, and explicitly apply any skill drafts you want active.' : 'Generate collection and graph skill previews.'
+    }
+    return 'Review the workflow summary, then Finish to run only the selected actions.'
+  }
+
+  function wizardFinishAction(): string {
+    if (!wizardCreateGraph) return 'Finish creates or refreshes the collection/source workflow only.'
+    const buildCopy = wizardStartBuild ? 'starts the graph build' : 'leaves the graph as a draft'
+    const tuneCopy = wizardRunTune && wizardApplyTune ? 'after applying selected prompt drafts' : 'with current graph prompts'
+    const skillCopy = wizardSkillApplyResult ? 'using applied scoped skills' : 'without auto-applying skill drafts'
+    return `Finish creates the graph draft, ${buildCopy} ${tuneCopy}, ${skillCopy}.`
+  }
 
   if (!token) {
     return (
@@ -4665,127 +5185,146 @@ export default function App() {
               </div>
             </div>
           )}
-          <div className="card-grid">
-            {visibleConfigGroup ? (
-              <SurfaceCard key={visibleConfigGroup[0]} title={visibleConfigGroup[0]} subtitle="Review the live value, make a draft change, then validate before applying.">
-                <div className="field-stack">
-                  {visibleConfigGroup[1].map(field => {
-                    const fieldName = configFieldName(field)
-                    const draftValue = configChanges[fieldName] ?? ''
-                    const currentValue = configEffective[fieldName] ?? field.value
-                    const changed = draftValue !== ''
-                    const sliderDraftValue = changed
-                      ? draftValue
-                      : asString(currentValue, asString(field.min_value ?? 0))
-                    return (
-                      <div
-                        key={fieldName}
-                        className={[
-                          'config-row',
-                          changed ? 'config-row-changed' : '',
-                          field.readonly ? 'config-row-readonly' : '',
-                        ].filter(Boolean).join(' ')}
-                      >
-                        <div className="config-head">
-                          <div>
-                            <label className="config-label" htmlFor={fieldName}>{field.label}</label>
-                            <p className="muted-copy">{field.description}</p>
-                          </div>
-                          <div className="badge-cluster">
-                            {field.readonly && (
-                              <Tooltip content="Surfaced here for reference; must be set via env var or host config.">
-                                <StatusBadge tone="warning">Read only</StatusBadge>
-                              </Tooltip>
-                            )}
-                            {field.secret && (
-                              <Tooltip content="Value is masked in the UI and redacted from audit logs.">
-                                <StatusBadge tone="neutral">Secret</StatusBadge>
-                              </Tooltip>
-                            )}
-                            {!field.readonly && changed && (
-                              <Tooltip content="Change staged locally but not yet applied to the runtime.">
-                                <StatusBadge tone="accent">Drafted</StatusBadge>
-                              </Tooltip>
-                            )}
-                            <Tooltip content={field.reload_scope === 'live' ? 'Change takes effect immediately on save.' : 'Change requires a service restart before it takes effect.'}>
-                              <StatusBadge tone="neutral">{field.reload_scope}</StatusBadge>
-                            </Tooltip>
-                          </div>
-                        </div>
-                        <div className="config-values">
-                          <div className="value-panel">
-                            <span>Current</span>
-                            <code>{maskSecret(field, asString(currentValue))}</code>
-                          </div>
-                          <div className="value-panel">
-                            <span>Draft</span>
-                            {field.readonly ? (
-                              <div className="static-pill">Managed at startup only</div>
-                            ) : field.ui_control === 'slider' ? (
-                              <div className="slider-field">
-                                <div className="slider-value-row">
-                                  <strong>{sliderDraftValue}</strong>
-                                  <span className="muted-copy">0-100</span>
-                                </div>
-                                <input
-                                  id={fieldName}
-                                  aria-label={field.label}
-                                  type="range"
-                                  min={field.min_value ?? 0}
-                                  max={field.max_value ?? 100}
-                                  step={field.step ?? 1}
-                                  value={asNumber(sliderDraftValue) ?? field.min_value ?? 0}
-                                  onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
-                                />
-                                <div className="slider-scale" aria-hidden="true">
-                                  <span>0</span>
-                                  <span>50</span>
-                                  <span>100</span>
-                                </div>
-                                <div className="slider-cues" aria-hidden="true">
-                                  <span>Proceed</span>
-                                  <span>Balanced</span>
-                                  <span>Ask early</span>
+          <div className="card-grid config-card-grid">
+            {visibleConfigGroups.length > 0 ? (
+              <div className="config-group-stack">
+                {visibleConfigGroups.map(([group, fields]) => (
+                  <SurfaceCard
+                    key={group}
+                    title={group}
+                    subtitle={`${fields.length} ${fields.length === 1 ? 'setting' : 'settings'} available for review and runtime edits.`}
+                    className="config-group-card"
+                    bodyClassName="config-group-body"
+                  >
+                    <div className="config-table" role="table" aria-label={`${group} settings`}>
+                      <div className="config-table-head" role="row">
+                        <span role="columnheader">Setting</span>
+                        <span role="columnheader">Current</span>
+                        <span role="columnheader">Draft</span>
+                        <span role="columnheader">Status</span>
+                      </div>
+                      <div className="config-table-body" role="rowgroup">
+                        {fields.map(field => {
+                          const fieldName = configFieldName(field)
+                          const draftValue = configChanges[fieldName] ?? ''
+                          const currentValue = configEffective[fieldName] ?? field.value
+                          const changed = draftValue !== ''
+                          const sliderDraftValue = changed
+                            ? draftValue
+                            : asString(currentValue, asString(field.min_value ?? 0))
+                          return (
+                            <div
+                              key={fieldName}
+                              role="row"
+                              className={[
+                                'config-row',
+                                changed ? 'config-row-changed' : '',
+                                field.readonly ? 'config-row-readonly' : '',
+                              ].filter(Boolean).join(' ')}
+                            >
+                              <div className="config-cell config-setting-cell" role="cell">
+                                <span className="config-cell-label">Setting</span>
+                                <label className="config-label" htmlFor={fieldName}>{field.label}</label>
+                                <p className="muted-copy">{field.description}</p>
+                              </div>
+                              <div className="config-cell value-panel config-current-cell" role="cell">
+                                <span className="config-cell-label">Current</span>
+                                <code>{maskSecret(field, asString(currentValue))}</code>
+                              </div>
+                              <div className="config-cell value-panel config-draft-cell" role="cell">
+                                <span className="config-cell-label">Draft</span>
+                                {field.readonly ? (
+                                  <div className="static-pill">Managed at startup only</div>
+                                ) : field.ui_control === 'slider' ? (
+                                  <div className="slider-field">
+                                    <div className="slider-value-row">
+                                      <strong>{sliderDraftValue}</strong>
+                                      <span className="muted-copy">{field.min_value ?? 0}-{field.max_value ?? 100}</span>
+                                    </div>
+                                    <input
+                                      id={fieldName}
+                                      aria-label={field.label}
+                                      type="range"
+                                      min={field.min_value ?? 0}
+                                      max={field.max_value ?? 100}
+                                      step={field.step ?? 1}
+                                      value={asNumber(sliderDraftValue) ?? field.min_value ?? 0}
+                                      onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
+                                    />
+                                    <div className="slider-scale" aria-hidden="true">
+                                      <span>0</span>
+                                      <span>50</span>
+                                      <span>100</span>
+                                    </div>
+                                    <div className="slider-cues" aria-hidden="true">
+                                      <span>Proceed</span>
+                                      <span>Balanced</span>
+                                      <span>Ask early</span>
+                                    </div>
+                                  </div>
+                                ) : field.kind === 'enum' ? (
+                                  <select
+                                    id={fieldName}
+                                    aria-label={field.label}
+                                    value={draftValue}
+                                    onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
+                                  >
+                                    <option value="">No change</option>
+                                    {field.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
+                                  </select>
+                                ) : field.kind === 'bool' ? (
+                                  <select
+                                    id={fieldName}
+                                    aria-label={field.label}
+                                    value={draftValue}
+                                    onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
+                                  >
+                                    <option value="">No change</option>
+                                    <option value="true">true</option>
+                                    <option value="false">false</option>
+                                  </select>
+                                ) : (
+                                  <input
+                                    id={fieldName}
+                                    aria-label={field.label}
+                                    type={field.secret ? 'password' : 'text'}
+                                    value={draftValue}
+                                    onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
+                                    placeholder={field.secret && field.is_configured ? 'configured' : 'Set new value'}
+                                  />
+                                )}
+                              </div>
+                              <div className="config-cell config-status-cell" role="cell">
+                                <span className="config-cell-label">Status</span>
+                                <div className="badge-cluster">
+                                  {field.readonly && (
+                                    <Tooltip content="Surfaced here for reference; must be set via env var or host config.">
+                                      <StatusBadge tone="warning">Read only</StatusBadge>
+                                    </Tooltip>
+                                  )}
+                                  {field.secret && (
+                                    <Tooltip content="Value is masked in the UI and redacted from audit logs.">
+                                      <StatusBadge tone="neutral">Secret</StatusBadge>
+                                    </Tooltip>
+                                  )}
+                                  {!field.readonly && changed && (
+                                    <Tooltip content="Change staged locally but not yet applied to the runtime.">
+                                      <StatusBadge tone="accent">Drafted</StatusBadge>
+                                    </Tooltip>
+                                  )}
+                                  <Tooltip content={field.reload_scope === 'live' ? 'Change takes effect immediately on save.' : 'Change requires a service restart before it takes effect.'}>
+                                    <StatusBadge tone="neutral">{field.reload_scope}</StatusBadge>
+                                  </Tooltip>
                                 </div>
                               </div>
-                            ) : field.kind === 'enum' ? (
-                              <select
-                                id={fieldName}
-                                aria-label={field.label}
-                                value={draftValue}
-                                onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
-                              >
-                                <option value="">No change</option>
-                                {field.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
-                              </select>
-                            ) : field.kind === 'bool' ? (
-                              <select
-                                id={fieldName}
-                                aria-label={field.label}
-                                value={draftValue}
-                                onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
-                              >
-                                <option value="">No change</option>
-                                <option value="true">true</option>
-                                <option value="false">false</option>
-                              </select>
-                            ) : (
-                              <input
-                                id={fieldName}
-                                aria-label={field.label}
-                                type={field.secret ? 'password' : 'text'}
-                                value={draftValue}
-                                onChange={event => setConfigChanges(current => ({ ...current, [fieldName]: event.target.value }))}
-                                placeholder={field.secret && field.is_configured ? 'configured' : 'Set new value'}
-                              />
-                            )}
-                          </div>
-                        </div>
+                            </div>
+                          )
+                        })}
                       </div>
-                    )
-                  })}
-                </div>
-              </SurfaceCard>
+                    </div>
+                  </SurfaceCard>
+                ))}
+              </div>
             ) : (
               <SurfaceCard title="No settings match" subtitle="Try another setting name, environment variable, provider, or capability.">
                 <EmptyState title="No settings found" body="The current search filters out every settings group." />
@@ -6604,6 +7143,7 @@ export default function App() {
                   setGraphProgress(null)
                   setGraphDraftId('')
                   setGraphDisplayNameDraft('')
+                  setWizardGraphIdTouched(false)
                   setGraphPromptDraft('{}')
                   setGraphConfigDraft('{}')
                   setGraphSkillIdsDraft('')
@@ -6643,6 +7183,22 @@ export default function App() {
               ) : (
                 <EmptyState title="No graphs yet" body="Create a graph draft here, then validate and build it once the source collection is ready." />
               )}
+              <ActionBar>
+                <ActionButton
+                  tone="destructive"
+                  onClick={() => askConfirm({
+                    title: 'Delete selected graph?',
+                    description: deleteGraphArtifacts
+                      ? `Delete "${selectedGraphRecord?.display_name || selectedGraph}" and remove its on-disk GraphRAG artifacts. This cannot be undone.`
+                      : `Delete "${selectedGraphRecord?.display_name || selectedGraph}" from the catalog and keep on-disk GraphRAG artifacts.`,
+                    confirmLabel: 'Delete Graph',
+                    run: handleDeleteGraph,
+                  })}
+                  disabled={!selectedGraph || graphBuildRunning || graphLifecycleBusy}
+                >
+                  Delete Selected Graph
+                </ActionButton>
+              </ActionBar>
             </SurfaceCard>
 
             <div className="content-stack">
@@ -6665,7 +7221,10 @@ export default function App() {
                     <input
                       aria-label="Graph ID"
                       value={graphDraftId}
-                      onChange={event => setGraphDraftId(event.target.value)}
+                      onChange={event => {
+                        setWizardGraphIdTouched(true)
+                        setGraphDraftId(event.target.value)
+                      }}
                       placeholder="vendor-risk"
                     />
                   </label>
@@ -6726,35 +7285,47 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="checkbox-list">
-                      {graphCollectionDocs.length > 0 ? graphCollectionDocs.map(doc => {
-                        const docId = asString(doc.doc_id)
-                        const checked = graphSelectedDocIds.includes(docId)
-                        const displayPath = asString(doc.source_display_path || doc.source_path || docId)
-                        return (
-                          <label key={docId} className={checked ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleGraphDocSelection(docId)}
-                            />
-                            <span className="checkbox-copy">
-                              <strong>{asString(doc.title, docId)}</strong>
-                              <span>{displayPath}</span>
-                              <span>{shortId(docId)}</span>
-                            </span>
-                          </label>
-                        )
-                      }) : (
-                        <EmptyState title="No documents in this collection" body="Use the Collections workspace to ingest KB documents, then come back to build the graph from indexed documents." />
-                      )}
+                    <div className="field-stack">
+                      <ActionBar>
+                        <ActionButton tone="secondary" onClick={selectAllGraphDocs} disabled={graphCollectionDocs.length === 0}>Select All</ActionButton>
+                        <ActionButton tone="ghost" onClick={clearGraphDocs} disabled={graphSelectedDocIds.length === 0}>Clear</ActionButton>
+                      </ActionBar>
+                      <div className="checkbox-list">
+                        {graphCollectionDocs.length > 0 ? graphCollectionDocs.map(doc => {
+                          const docId = asString(doc.doc_id)
+                          const checked = graphSelectedDocIds.includes(docId)
+                          const displayPath = asString(doc.source_display_path || doc.source_path || docId)
+                          return (
+                            <label key={docId} className={checked ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleGraphDocSelection(docId)}
+                              />
+                              <span className="checkbox-copy">
+                                <strong>{asString(doc.title, docId)}</strong>
+                                <span>{displayPath}</span>
+                                <span>{shortId(docId)}</span>
+                              </span>
+                            </label>
+                          )
+                        }) : (
+                          <EmptyState title="No documents in this collection" body="Use the Collections workspace to ingest KB documents, then come back to build the graph from indexed documents." />
+                        )}
+                      </div>
                     </div>
                     )}
                 </div>
 
                 <ActionBar>
                   <ActionButton tone="secondary" onClick={() => void handleGraphSuggest()}>Suggest Defaults</ActionButton>
-                  <ActionButton tone="primary" onClick={() => void handleGraphCreate()}>Save Draft</ActionButton>
+                  <ActionButton
+                    tone="primary"
+                    onClick={() => void handleGraphCreate()}
+                    disabled={!graphCollectionId.trim() || !graphDisplayNameDraft.trim() || !graphDraftId.trim() || (graphSourceMode === 'manual' && graphSelectedDocIds.length === 0)}
+                  >
+                    Save Draft
+                  </ActionButton>
                   <ActionButton tone="secondary" onClick={() => void handleGraphValidate()} disabled={!selectedGraph}>Run Preflight</ActionButton>
                   <ActionButton tone="ghost" onClick={() => void handleGraphBuild(false)} disabled={!selectedGraph || graphBuildRunning || graphLifecycleBusy}>Build</ActionButton>
                   <ActionButton tone="ghost" onClick={() => void handleGraphBuild(true)} disabled={!selectedGraph || graphBuildRunning || graphLifecycleBusy}>Refresh</ActionButton>
@@ -6894,6 +7465,10 @@ export default function App() {
 
                 <div className="field-stack">
                   <span className="field-label">Prompt Targets</span>
+                  <ActionBar>
+                    <ActionButton tone="secondary" onClick={selectAllGraphTuneTargets}>Select All</ActionButton>
+                    <ActionButton tone="ghost" onClick={clearGraphTuneTargets} disabled={graphTuneTargets.length === 0}>Clear</ActionButton>
+                  </ActionBar>
                   <div className="checkbox-list">
                     {GRAPH_RESEARCH_TUNE_TARGETS.map(promptFile => {
                       const checked = graphTuneTargets.includes(promptFile)
@@ -6972,6 +7547,10 @@ export default function App() {
 
                     {graphTunePromptDraftEntries.length > 0 ? (
                       <div className="field-stack">
+                        <ActionBar>
+                          <ActionButton tone="secondary" onClick={selectAllValidGraphTuneDrafts} disabled={validGraphTunePromptFiles.length === 0}>Select All Valid</ActionButton>
+                          <ActionButton tone="ghost" onClick={clearGraphTuneDrafts} disabled={graphTuneSelectedPrompts.length === 0}>Clear</ActionButton>
+                        </ActionBar>
                         {graphTunePromptDraftEntries.map(([promptFile, draft]) => {
                           const draftRecord = asRecord(draft) ?? {}
                           const validation = asRecord(draftRecord.validation)
@@ -7052,7 +7631,7 @@ export default function App() {
                     rows={10}
                     value={graphSkillOverlayDraft}
                     onChange={event => setGraphSkillOverlayDraft(event.target.value)}
-                    placeholder="# Graph Overlay&#10;agent_scope: rag&#10;&#10;## Workflow&#10;&#10;- Explain ontology-specific graph cues here."
+                    placeholder="# Graph Overlay&#10;&#10;## Search Guidance&#10;&#10;- Describe collection terminology, source authority patterns, and generic rewrite cues. Saved overlays are bound to both rag and graph_manager scopes."
                   />
                 </label>
                 <ActionBar>
@@ -7284,7 +7863,7 @@ export default function App() {
               )}
             </SurfaceCard>
           </div>
-        ) : (
+        ) : graphsTab === 'runs' ? (
           <div className="content-stack">
             <SurfaceCard title="Graph Runs" subtitle="Operational history for the selected graph build, refresh, and validation steps.">
               {graphRuns.length > 0 ? (
@@ -7304,6 +7883,69 @@ export default function App() {
                 <EmptyState title="No graph runs yet" body="Select a graph and validate or build it to populate run history." />
               )}
               {graphDetail && <JsonInspector label="Technical details" value={graphDetail} />}
+            </SurfaceCard>
+          </div>
+        ) : (
+          <div className="content-stack">
+            <SurfaceCard
+              title="Failed Graph Runs"
+              subtitle="Review failed graph build, refresh, validation, and tuning runs across all graphs, then delete stale failure records once they are no longer useful."
+            >
+              <ActionBar>
+                <ActionButton tone="secondary" onClick={() => void refreshFailedGraphRuns()} disabled={graphRunCleanupBusy}>Refresh Failed Runs</ActionButton>
+                <ActionButton
+                  tone="destructive"
+                  onClick={() => askConfirm({
+                    title: 'Delete all failed graph runs?',
+                    description: `Delete ${formatWholeNumber(failedGraphRuns.length)} failed graph run record(s). Running and cancelled runs will be left alone.`,
+                    confirmLabel: 'Delete Failed Runs',
+                    run: handleCleanupFailedGraphRuns,
+                  })}
+                  disabled={failedGraphRuns.length === 0 || graphRunCleanupBusy}
+                >
+                  Delete Failed Runs
+                </ActionButton>
+              </ActionBar>
+              {failedGraphRuns.length > 0 ? (
+                <div className="timeline-list">
+                  {failedGraphRuns.map(run => {
+                    const graph = graphById.get(run.graph_id)
+                    return (
+                      <article key={run.run_id} className="timeline-item">
+                        <div className="timeline-dot" aria-hidden="true" />
+                        <div>
+                          <strong>{run.operation || 'graph run'}</strong>
+                          <p>{run.detail || 'Run failed without a detail message.'}</p>
+                          <span>{graph?.display_name || run.graph_id} - {formatTimestamp(run.completed_at || run.started_at)}</span>
+                          <div className="badge-cluster">
+                            <StatusBadge tone="danger">{run.status}</StatusBadge>
+                            <StatusBadge tone="neutral">{shortId(run.run_id)}</StatusBadge>
+                          </div>
+                          <ActionBar>
+                            <ActionButton
+                              tone="destructive"
+                              onClick={() => askConfirm({
+                                title: 'Delete failed run?',
+                                description: `Delete failed run ${shortId(run.run_id)} for "${graph?.display_name || run.graph_id}".`,
+                                confirmLabel: 'Delete Failed Run',
+                                run: () => handleDeleteFailedGraphRun(run),
+                              })}
+                              disabled={graphRunCleanupBusy}
+                            >
+                              Delete Failed Run
+                            </ActionButton>
+                          </ActionBar>
+                          {run.metadata && Object.keys(run.metadata).length > 0 && (
+                            <JsonInspector label="Failure metadata" value={run.metadata} />
+                          )}
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <EmptyState title="No failed graph runs" body="Failed build, refresh, validation, and tuning runs will appear here when cleanup is needed." />
+              )}
             </SurfaceCard>
           </div>
         )
@@ -8523,7 +9165,11 @@ export default function App() {
                 Next
               </ActionButton>
             ) : (
-              <ActionButton tone="primary" onClick={() => void handleWizardFinish()}>
+              <ActionButton
+                tone="primary"
+                onClick={() => void handleWizardFinish()}
+                disabled={!resolveWizardCollectionId() || (wizardCreateGraph && (!graphDisplayNameDraft.trim() || !graphDraftId.trim() || (graphSourceMode === 'manual' && graphSelectedDocIds.length === 0)))}
+              >
                 Finish
               </ActionButton>
             )}
@@ -8543,43 +9189,69 @@ export default function App() {
               </button>
             ))}
           </div>
+          <div className="wizard-guide">
+            <div>
+              <span>Current Step</span>
+              <strong>{humanizeKey(ingestionWizardStep)}</strong>
+            </div>
+            <div>
+              <span>Next Required Action</span>
+              <strong>{wizardNextRequiredAction()}</strong>
+            </div>
+            <div>
+              <span>Finish Will</span>
+              <strong>{wizardFinishAction()}</strong>
+            </div>
+          </div>
 
           {ingestionWizardStep === 'collection' && (
             <div className="field-stack">
+              <SegmentedControl<WizardCollectionMode>
+                ariaLabel="Wizard collection mode"
+                value={wizardCollectionMode}
+                onChange={setWizardCollectionMode}
+                options={[
+                  { value: 'existing', label: 'Use Existing Collection' },
+                  { value: 'new', label: 'Create New Collection' },
+                ]}
+              />
               <label className="field">
                 <span>Collection ID</span>
                 <input
                   aria-label="Wizard Collection ID"
                   value={wizardCollectionId}
-                  onChange={event => {
-                    const next = normalizeCollectionId(event.target.value)
-                    setWizardCollectionId(next)
-                    setCollectionDraft(next)
-                    setGraphCollectionId(next)
-                  }}
-                  placeholder="vendor-risk"
+                  onChange={event => applyWizardCollectionId(event.target.value)}
+                  placeholder={wizardCollectionMode === 'new' ? 'defense-rag-test-v2' : 'Choose an existing collection below'}
                 />
               </label>
-              <div className="checkbox-list">
-                {collections.slice(0, 6).map(collection => (
-                  <label key={collection.collection_id} className={wizardCollectionId === collection.collection_id ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
-                    <input
-                      type="radio"
-                      name="wizard-collection"
-                      checked={wizardCollectionId === collection.collection_id}
-                      onChange={() => {
-                        setWizardCollectionId(collection.collection_id)
-                        setCollectionDraft(collection.collection_id)
-                        setGraphCollectionId(collection.collection_id)
-                      }}
-                    />
-                    <span className="checkbox-copy">
-                      <strong>{collection.collection_id}</strong>
-                      <span>{formatWholeNumber(collection.document_count)} documents, {formatWholeNumber(collection.graph_count)} graphs</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
+              {wizardCollectionMode === 'existing' ? (
+                <>
+                  <ResourceSearch value={wizardCollectionSearch} onChange={setWizardCollectionSearch} placeholder="Search existing collections" />
+                  <div className="checkbox-list">
+                    {filteredWizardCollections.length > 0 ? filteredWizardCollections.map(collection => (
+                      <label key={collection.collection_id} className={wizardCollectionId === collection.collection_id ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                        <input
+                          type="radio"
+                          name="wizard-collection"
+                          checked={wizardCollectionId === collection.collection_id}
+                          onChange={() => applyWizardCollectionId(collection.collection_id)}
+                        />
+                        <span className="checkbox-copy">
+                          <strong>{collection.collection_id}</strong>
+                          <span>{formatWholeNumber(collection.document_count)} documents, {formatWholeNumber(collection.graph_count)} graphs</span>
+                        </span>
+                      </label>
+                    )) : (
+                      <EmptyState title="No matching collections" body="Search again or switch to Create New Collection." />
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="inline-alert inline-alert-warning">
+                  <span>New collection</span>
+                  <strong>The wizard will create this collection before uploading files, indexing local paths, or creating a graph.</strong>
+                </div>
+              )}
             </div>
           )}
 
@@ -8591,7 +9263,7 @@ export default function App() {
                 multiple
                 hidden
                 onChange={event => {
-                  void handleCollectionFilesUpload(event.target.files)
+                  void handleWizardCollectionFilesUpload(event.target.files)
                   event.currentTarget.value = ''
                 }}
               />
@@ -8603,21 +9275,29 @@ export default function App() {
                 // @ts-expect-error webkitdirectory is still the browser-supported folder picker attribute.
                 webkitdirectory="true"
                 onChange={event => {
-                  void handleCollectionFilesUpload(event.target.files)
+                  void handleWizardCollectionFilesUpload(event.target.files)
                   event.currentTarget.value = ''
                 }}
               />
               <SectionTabs
                 tabs={[
-                  { id: 'upload', label: 'Upload Files' },
-                  { id: 'local', label: 'Local Source' },
-                  { id: 'registered', label: 'Registered Source' },
-                  { id: 'sync', label: 'Sync Existing' },
+                  { id: 'upload', label: SOURCE_MODE_HELP.upload.label },
+                  { id: 'local', label: SOURCE_MODE_HELP.local.label },
+                  { id: 'registered', label: SOURCE_MODE_HELP.registered.label },
+                  { id: 'sync', label: SOURCE_MODE_HELP.sync.label },
                 ]}
                 active={collectionAction}
                 onChange={value => setCollectionAction(value as CollectionActionMode)}
                 ariaLabel="Wizard source mode"
               />
+              <div className="wizard-help-grid" aria-label="Source mode help">
+                {COLLECTION_ACTION_MODES.map(mode => (
+                  <span key={mode} className={collectionAction === mode ? 'wizard-help-item wizard-help-item-active' : 'wizard-help-item'}>
+                    {SOURCE_MODE_HELP[mode].label}
+                    <HelpCue content={SOURCE_MODE_HELP[mode].help} />
+                  </span>
+                ))}
+              </div>
 
               {collectionAction === 'upload' && (
                 <div className="collection-action-panel collection-action-panel-compact">
@@ -8714,8 +9394,9 @@ export default function App() {
                   </div>
                   <ActionBar>
                     <ActionButton tone="secondary" onClick={() => void handleSourceScan()}>Preview Scan</ActionButton>
-                    <ActionButton tone="ghost" onClick={() => void handleRegisterSource()}>Register Source</ActionButton>
-                    <ActionButton tone="primary" onClick={() => void handleIndexLocalSource()}>Index Source</ActionButton>
+                    <ActionButton tone="ghost" onClick={() => void handleWizardRegisterSource()}>Register Source</ActionButton>
+                    <ActionButton tone="secondary" onClick={() => void handleWizardPathIngest()}>Ingest Paths</ActionButton>
+                    <ActionButton tone="primary" onClick={() => void handleWizardIndexLocalSource()}>Index Source</ActionButton>
                   </ActionBar>
                 </div>
               )}
@@ -8761,7 +9442,7 @@ export default function App() {
                     <strong>Sync runtime-configured KB sources</strong>
                     <p>Use this only when the collection should mirror KB source roots configured on the backend. It does not upload arbitrary files or scan a new typed path.</p>
                   </div>
-                  <ActionButton tone="primary" onClick={() => void handleSyncCollection()}>
+                  <ActionButton tone="primary" onClick={() => void handleWizardSyncCollection()}>
                     Sync Configured Sources
                   </ActionButton>
                 </div>
@@ -8777,7 +9458,10 @@ export default function App() {
                   checked={wizardCreateGraph}
                   onChange={event => setWizardCreateGraph(event.target.checked)}
                 />
-                <span>Create a graph draft for this collection</span>
+                <span>
+                  Create a graph draft for this collection
+                  <HelpCue content="Creates an admin-managed GraphRAG draft from the selected collection and document scope. The graph can be tuned, assigned skills, and built from the wizard." />
+                </span>
               </label>
               <label className="inline-check">
                 <input
@@ -8786,10 +9470,41 @@ export default function App() {
                   onChange={event => setWizardStartBuild(event.target.checked)}
                   disabled={!wizardCreateGraph}
                 />
-                <span>Start the graph build after creating the draft</span>
+                <span>
+                  Start the graph build after creating the draft
+                  <HelpCue content="When enabled, Finish starts the GraphRAG build after any explicitly applied prompt tuning and skill draft steps have completed." />
+                </span>
               </label>
+              <div className="form-grid form-grid-compact">
+                <label className="field">
+                  <span>Graph Display Name</span>
+                  <input
+                    aria-label="Wizard Graph Display Name"
+                    value={graphDisplayNameDraft}
+                    onChange={event => handleWizardGraphDisplayNameChange(event.target.value)}
+                    placeholder="defense rag test graph v2"
+                    disabled={!wizardCreateGraph}
+                  />
+                </label>
+                <label className="field">
+                  <span>Graph ID</span>
+                  <input
+                    aria-label="Wizard Graph ID"
+                    value={graphDraftId}
+                    onChange={event => {
+                      setWizardGraphIdTouched(true)
+                      setGraphDraftId(slugGraphId(event.target.value))
+                    }}
+                    placeholder="defense_rag_test_graph_v2"
+                    disabled={!wizardCreateGraph}
+                  />
+                </label>
+              </div>
               <label className="field">
-                <span>Graph Intent</span>
+                <span>
+                  Graph Intent
+                  <HelpCue content="Guides suggested GraphRAG defaults and skill draft wording. It does not restrict the collection by itself." />
+                </span>
                 <select value={graphIntent} onChange={event => setGraphIntent(event.target.value)}>
                   <option value="general">General Knowledge</option>
                   <option value="vendor_risk">Vendor Risk</option>
@@ -8798,6 +9513,54 @@ export default function App() {
                   <option value="research">Research Corpus</option>
                 </select>
               </label>
+              <SectionTabs
+                tabs={[
+                  { id: 'collection', label: 'Use Entire Collection' },
+                  { id: 'manual', label: 'Choose Documents' },
+                ]}
+                active={graphSourceMode}
+                onChange={value => setGraphSourceMode(value as GraphSourceMode)}
+                ariaLabel="Wizard graph source mode"
+              />
+              <div className="wizard-help-grid" aria-label="Graph scope help">
+                <span className={graphSourceMode === 'collection' ? 'wizard-help-item wizard-help-item-active' : 'wizard-help-item'}>
+                  Use Entire Collection
+                  <HelpCue content="Build the graph over every indexed document in the selected collection." />
+                </span>
+                <span className={graphSourceMode === 'manual' ? 'wizard-help-item wizard-help-item-active' : 'wizard-help-item'}>
+                  Choose Documents
+                  <HelpCue content="Build the graph only from selected documents. Use this for narrower graphs inside a larger collection." />
+                </span>
+              </div>
+              {graphSourceMode === 'manual' && (
+                <div className="field-stack">
+                  <ActionBar>
+                    <ActionButton tone="secondary" onClick={selectAllGraphDocs} disabled={graphCollectionDocs.length === 0}>Select All</ActionButton>
+                    <ActionButton tone="ghost" onClick={clearGraphDocs} disabled={graphSelectedDocIds.length === 0}>Clear</ActionButton>
+                  </ActionBar>
+                  <div className="checkbox-list">
+                    {graphCollectionDocs.length > 0 ? graphCollectionDocs.map(doc => {
+                      const docId = asString(doc.doc_id)
+                      const checked = graphSelectedDocIds.includes(docId)
+                      return (
+                        <label key={docId} className={checked ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleGraphDocSelection(docId)}
+                          />
+                          <span className="checkbox-copy">
+                            <strong>{asString(doc.title, docId)}</strong>
+                            <span>{asString(doc.source_display_path || doc.source_path || docId)}</span>
+                          </span>
+                        </label>
+                      )
+                    }) : (
+                      <EmptyState title="No documents loaded" body="Index documents in the source step, then return here to choose specific graph sources." />
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -8811,7 +9574,10 @@ export default function App() {
                       checked={wizardRunTune}
                       onChange={event => setWizardRunTune(event.target.checked)}
                     />
-                    <span>Run prompt tuning before the graph build</span>
+                    <span>
+                      Run prompt tuning before the graph build
+                      <HelpCue content="Runs Research & Tune against the graph sources and drafts GraphRAG prompt overrides. Drafts are previewed before they affect the graph." />
+                    </span>
                   </label>
                   <label className="inline-check">
                     <input
@@ -8820,7 +9586,10 @@ export default function App() {
                       onChange={event => setWizardApplyTune(event.target.checked)}
                       disabled={!wizardRunTune || !graphTuneResult?.run_id || graphTuneSelectedPrompts.length === 0}
                     />
-                    <span>Apply selected prompt drafts before build</span>
+                    <span>
+                      Apply selected prompt drafts before build
+                      <HelpCue content="Only valid drafts you select are written to graph prompt overrides. Unselected drafts remain preview-only." />
+                    </span>
                   </label>
                   <label className="inline-check">
                     <input
@@ -8829,10 +9598,16 @@ export default function App() {
                       onChange={event => setWizardRequireTuneBeforeBuild(event.target.checked)}
                       disabled={!wizardRunTune}
                     />
-                    <span>Require prompt tuning to succeed before starting build</span>
+                    <span>
+                      Require prompt tuning to succeed before starting build
+                      <HelpCue content="If tuning fails, Finish stops before build instead of continuing with existing prompts." />
+                    </span>
                   </label>
                   <label className="field">
-                    <span>Research Guidance</span>
+                    <span>
+                      Research Guidance
+                      <HelpCue content="Optional operator guidance that steers prompt drafts and skill drafts toward the relationships, entities, or evidence rules you care about." />
+                    </span>
                     <textarea
                       aria-label="Wizard Prompt Tuning Guidance"
                       rows={4}
@@ -8842,7 +9617,14 @@ export default function App() {
                     />
                   </label>
                   <div className="field-stack">
-                    <span className="field-label">Prompt Targets</span>
+                    <span className="field-label">
+                      Prompt Targets
+                      <HelpCue content="Common GraphRAG prompt files to rewrite. The backend uses installed GraphRAG baselines first and local fallbacks when a package prompt is unavailable." />
+                    </span>
+                    <ActionBar>
+                      <ActionButton tone="secondary" onClick={selectAllGraphTuneTargets}>Select All</ActionButton>
+                      <ActionButton tone="ghost" onClick={clearGraphTuneTargets} disabled={graphTuneTargets.length === 0}>Clear</ActionButton>
+                    </ActionBar>
                     <div className="checkbox-list">
                       {GRAPH_RESEARCH_TUNE_TARGETS.map(promptFile => {
                         const checked = graphTuneTargets.includes(promptFile)
@@ -8887,6 +9669,12 @@ export default function App() {
                           <strong>{formatWholeNumber(Object.keys(graphTuneResult.prompt_drafts ?? {}).length)}</strong>
                         </div>
                       </div>
+                      {Object.keys(graphTuneResult.prompt_drafts ?? {}).length > 0 && (
+                        <ActionBar>
+                          <ActionButton tone="secondary" onClick={selectAllValidGraphTuneDrafts} disabled={validGraphTunePromptFiles.length === 0}>Select All Valid</ActionButton>
+                          <ActionButton tone="ghost" onClick={clearGraphTuneDrafts} disabled={graphTuneSelectedPrompts.length === 0}>Clear</ActionButton>
+                        </ActionBar>
+                      )}
                     </div>
                   ) : (
                     <EmptyState title="Prompt tuning is optional" body="Enable tuning and run it here to draft GraphRAG prompt overrides before building the graph." />
@@ -8898,19 +9686,123 @@ export default function App() {
             </div>
           )}
 
+          {ingestionWizardStep === 'skills' && (
+            <div className="field-stack">
+              <div className="inline-alert inline-alert-info">
+                <span>Preview first</span>
+                <strong>Skill drafts are editable previews. They become active only when you click Apply Selected Drafts.</strong>
+              </div>
+              <ActionBar>
+                <ActionButton tone="primary" onClick={() => void handleWizardGenerateSkillDrafts()} disabled={wizardSkillDraftRunning}>
+                  {wizardSkillDraftRunning ? 'Generating Drafts' : 'Generate Skill Drafts'}
+                </ActionButton>
+                <ActionButton
+                  tone="secondary"
+                  onClick={() => void handleWizardApplySkillDrafts()}
+                  disabled={wizardSkillApplyRunning || wizardSelectedSkillDrafts.length === 0}
+                >
+                  {wizardSkillApplyRunning ? 'Applying Drafts' : 'Apply Selected Drafts'}
+                </ActionButton>
+                <HelpCue content="Apply creates or updates the selected skills. Graph-manager skills are also added to the graph's bound skill IDs." />
+              </ActionBar>
+              {wizardSkillDrafts.length > 0 ? (
+                <div className="field-stack">
+                  <ActionBar>
+                    <ActionButton tone="secondary" onClick={selectAllWizardSkillDrafts}>Select All</ActionButton>
+                    <ActionButton tone="ghost" onClick={clearWizardSkillDrafts} disabled={wizardSkillSelectedIds.length === 0}>Clear</ActionButton>
+                  </ActionBar>
+                  {wizardSkillDrafts.map(draft => {
+                    const skillId = wizardSkillDraftKey(draft)
+                    const selected = wizardSkillSelectedIds.includes(skillId)
+                    const draftType = asString(draft.draft_type)
+                    return (
+                      <div key={skillId} className="preview-card">
+                        <div className="tool-card-head">
+                          <label className="inline-check">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={() => toggleWizardSkillDraft(skillId)}
+                            />
+                            <strong>
+                              {asString(draft.label, asString(draft.name, skillId))}
+                              <HelpCue content={WIZARD_SKILL_HELP[draftType] || 'Creates an active skill from this edited markdown when applied.'} />
+                            </strong>
+                          </label>
+                          <StatusBadge tone={asString(draft.agent_scope) === 'graph_manager' ? 'accent' : 'neutral'}>
+                            {asString(draft.agent_scope)}
+                          </StatusBadge>
+                        </div>
+                        <div className="summary-list">
+                          <div className="summary-row">
+                            <span>Skill ID</span>
+                            <strong>{skillId}</strong>
+                          </div>
+                          <div className="summary-row">
+                            <span>Collection Scope</span>
+                            <strong>{asString(draft.collection_id, resolveWizardCollectionId())}</strong>
+                          </div>
+                          <div className="summary-row">
+                            <span>Graph Scope</span>
+                            <strong>{asString(draft.graph_id, asString(draft.agent_scope) === 'graph_manager' ? graphDraftId || 'Missing graph id' : 'Not graph-bound')}</strong>
+                          </div>
+                        </div>
+                        <label className="field">
+                          <span>
+                            Draft Markdown
+                            <HelpCue content="You can edit the skill body and metadata before applying. Keep collection_id and graph_id metadata if you want scoped resolution." />
+                          </span>
+                          <textarea
+                            aria-label={`Wizard Skill Draft ${skillId}`}
+                            rows={14}
+                            value={wizardSkillDraftMarkdown(draft)}
+                            onChange={event => setWizardSkillDraftEdits(current => ({
+                              ...current,
+                              [skillId]: event.target.value,
+                            }))}
+                          />
+                        </label>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <EmptyState title="No skill previews yet" body="Generate previews to draft a collection-scoped RAG skill and, when a graph ID is available, a graph-manager skill." />
+              )}
+              {wizardSkillApplyResult && (
+                <div className="inline-alert inline-alert-success">
+                  <span>Applied</span>
+                  <strong>{wizardSkillDraftStatus}</strong>
+                </div>
+              )}
+            </div>
+          )}
+
           {ingestionWizardStep === 'review' && (
             <div className="summary-list">
+              <div className="summary-row">
+                <span>Collection Mode</span>
+                <strong>{wizardCollectionMode === 'new' ? 'Create new collection' : 'Use existing collection'}</strong>
+              </div>
               <div className="summary-row">
                 <span>Collection</span>
                 <strong>{wizardCollectionId || 'Not selected'}</strong>
               </div>
               <div className="summary-row">
                 <span>Source Workflow</span>
-                <strong>{humanizeKey(collectionAction)}</strong>
+                <strong>{SOURCE_MODE_HELP[collectionAction].label}</strong>
               </div>
               <div className="summary-row">
                 <span>Graph Draft</span>
+                <strong>{wizardCreateGraph ? `${graphDisplayNameDraft || 'Unnamed graph'} (${graphDraftId || 'missing id'})` : 'Skipped'}</strong>
+              </div>
+              <div className="summary-row">
+                <span>Graph Intent</span>
                 <strong>{wizardCreateGraph ? humanizeKey(graphIntent) : 'Skipped'}</strong>
+              </div>
+              <div className="summary-row">
+                <span>Document Scope</span>
+                <strong>{graphSourceMode === 'manual' ? `${formatWholeNumber(graphSelectedDocIds.length)} selected documents` : `${formatWholeNumber(graphCollectionDocs.length)} collection documents`}</strong>
               </div>
               <div className="summary-row">
                 <span>Build</span>
@@ -8919,6 +9811,10 @@ export default function App() {
               <div className="summary-row">
                 <span>Prompt Tuning</span>
                 <strong>{wizardCreateGraph && wizardRunTune ? `${wizardApplyTune ? 'Run and apply selected drafts' : 'Run only'}` : 'Skipped'}</strong>
+              </div>
+              <div className="summary-row">
+                <span>Skill Drafts</span>
+                <strong>{wizardSkillDraftStatus}</strong>
               </div>
             </div>
           )}

@@ -1090,6 +1090,18 @@ def _ensure_agentic_status_payload(payload: Mapping[str, Any]) -> Dict[str, Any]
     return normalized
 
 
+def _is_agentic_activity_payload(payload: Mapping[str, Any]) -> bool:
+    return any(
+        isinstance(payload.get(key), dict)
+        for key in (
+            "agentic_agent_activity",
+            "agentic_parallel_group",
+            "agentic_tool_call",
+            "agentic_audit_item",
+        )
+    )
+
+
 def _status_signature(payload: Mapping[str, Any]) -> str:
     parts = [
         str(payload.get("status_id") or ""),
@@ -1613,7 +1625,8 @@ class Pipe:
         payload = _ensure_agentic_status_payload(status_payload)
         if not payload:
             return
-        if state is not None:
+        is_activity_payload = _is_agentic_activity_payload(payload)
+        if state is not None and not is_activity_payload:
             now = self._now()
             async with state.emit_lock:
                 incoming_phase = str(payload.get("phase") or "").strip()

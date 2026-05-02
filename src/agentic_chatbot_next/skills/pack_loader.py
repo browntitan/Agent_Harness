@@ -38,6 +38,7 @@ class SkillPackFile:
     chunks: List[str]
     checksum: str
     graph_id: str = ""
+    collection_id: str = ""
     tool_tags: List[str] = field(default_factory=list)
     task_tags: List[str] = field(default_factory=list)
     version: str = "1"
@@ -426,6 +427,7 @@ def load_skill_pack_from_text(
         chunks=chunks,
         checksum=checksum,
         graph_id=metadata.get("graph_id", ""),
+        collection_id=metadata.get("collection_id", ""),
         tool_tags=normalized_tool_tags,
         task_tags=_split_tags(metadata.get("task_tags", "")),
         version=metadata.get("version", "1"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, List, Optional
@@ -920,6 +921,73 @@ def benchmark_ollama_throughput(
     if output is not None:
         output.write_text(payload + "\n", encoding="utf-8")
     console.print(payload)
+
+
+@app.command("evaluate-public-benchmarks")
+def evaluate_public_benchmarks(
+    profile: str = typer.Option("smoke", "--profile", help="Benchmark profile: smoke, diagnostic, or full."),
+    benchmarks: str = typer.Option(
+        "beir:scifact,hotpotqa,ragbench",
+        "--benchmarks",
+        help="Comma-separated benchmark specs such as beir:scifact,hotpotqa,ragbench,bfcl.",
+    ),
+    data_root: Path = typer.Option(Path("data/public_benchmarks"), "--data-root"),
+    collection_prefix: str = typer.Option("public", "--collection-prefix"),
+    api_base: str = typer.Option("http://127.0.0.1:18000", "--api-base"),
+    model: str = typer.Option("enterprise-agent", "--model"),
+    token_env: str = typer.Option("GATEWAY_SHARED_BEARER_TOKEN", "--token-env"),
+    token: str = typer.Option("", "--token"),
+    judge: str = typer.Option("auto", "--judge", help="Use auto or off."),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir"),
+    limit: int = typer.Option(0, "--limit"),
+    timeout_seconds: float = typer.Option(180.0, "--timeout-seconds"),
+    fail_fast: bool = typer.Option(False, "--fail-fast"),
+    available_capability: Optional[List[str]] = typer.Option(
+        None,
+        "--available-capability",
+        help="Repeat to mark benchmark capabilities as available, e.g. --available-capability tool_calling.",
+    ),
+    dotenv: Optional[str] = typer.Option(None, "--dotenv"),
+):
+    """Run public benchmark adapters through the OpenAI-compatible live gateway."""
+
+    from datetime import datetime, timezone
+
+    from agentic_chatbot_next.benchmark.public_suite import run_public_benchmark_suite  # noqa: PLC0415
+
+    if profile not in {"smoke", "diagnostic", "full"}:
+        console.print("Profile must be one of: smoke, diagnostic, full.")
+        raise typer.Exit(code=2)
+    if judge not in {"auto", "off"}:
+        console.print("Judge must be one of: auto, off.")
+        raise typer.Exit(code=2)
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(dotenv_path=dotenv or None)
+    except Exception:
+        pass
+
+    effective_token = token or os.environ.get(token_env, "")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    effective_output_dir = output_dir or Path("data/runtime/public_benchmark_runs") / timestamp
+    summary = run_public_benchmark_suite(
+        benchmarks=benchmarks,
+        profile=profile,
+        data_root=data_root,
+        collection_prefix=collection_prefix,
+        api_base=api_base,
+        model=model,
+        token=effective_token,
+        judge=judge,
+        output_dir=effective_output_dir,
+        limit=limit,
+        timeout_seconds=timeout_seconds,
+        fail_fast=fail_fast,
+        available_capabilities=available_capability or ["chat", "rag"],
+        dotenv_path=dotenv or "",
+    )
+    console.print(json.dumps(summary.to_dict(), indent=2, ensure_ascii=False))
 
 
 @app.command("delete-document")

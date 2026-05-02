@@ -27,6 +27,16 @@ from agentic_chatbot_next.benchmark.ollama_throughput import (
     benchmark_ollama_model,
     run_ollama_throughput_benchmark,
 )
+from agentic_chatbot_next.benchmark.public_suite import (
+    PublicBenchmarkCase,
+    PublicBenchmarkResult,
+    PublicBenchmarkSummary,
+    answer_token_f1,
+    load_public_cases,
+    run_public_benchmark_suite,
+    score_public_case,
+    summarize_results as summarize_public_results,
+)
 
 __all__ = [
     "DEFENSE_COLLECTION_ID",
@@ -52,4 +62,12 @@ __all__ = [
     "OllamaThroughputRun",
     "benchmark_ollama_model",
     "run_ollama_throughput_benchmark",
+    "PublicBenchmarkCase",
+    "PublicBenchmarkResult",
+    "PublicBenchmarkSummary",
+    "answer_token_f1",
+    "load_public_cases",
+    "run_public_benchmark_suite",
+    "score_public_case",
+    "summarize_public_results",
 ]

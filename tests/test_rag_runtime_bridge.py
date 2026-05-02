@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from agentic_chatbot_next.contracts.messages import SessionState
 from agentic_chatbot_next.runtime.kernel import RuntimeKernel
-from agentic_chatbot_next.rag.fanout import RagSearchTask
+from agentic_chatbot_next.rag.fanout import RagSearchTask, TabularEvidenceTask
 
 
 def _runtime_settings(tmp_path: Path, *, provider_name: str) -> SimpleNamespace:
@@ -116,3 +116,58 @@ def test_kernel_rag_runtime_bridge_falls_back_to_serial_for_local_ollama(monkeyp
     assert bridge.can_run_parallel(task_count=2) is False
     assert batch.parallel_workers_used is False
     assert call_order == ["task_1", "task_2"]
+
+
+def test_kernel_rag_runtime_bridge_runs_tabular_evidence_worker_inline(monkeypatch, tmp_path: Path) -> None:
+    kernel = RuntimeKernel(_runtime_settings(tmp_path, provider_name="ollama"), providers=SimpleNamespace(), stores=SimpleNamespace())
+    bridge = kernel.build_rag_runtime_bridge(_session_state())
+    captured = {}
+
+    def fake_run_agent(agent, session_state, *, user_text, callbacks, task_payload=None):
+        del session_state, callbacks
+        worker_request = dict((task_payload or {}).get("worker_request") or {})
+        captured["agent_name"] = agent.name
+        captured["prompt"] = user_text
+        captured["worker_request"] = worker_request
+        payload = {
+            "task_id": worker_request["task_id"],
+            "status": "ok",
+            "summary": "The CDR date is 2028-09-26.",
+            "findings": [{"summary": "Current Date: 2028-09-26"}],
+            "source_refs": [
+                {
+                    "doc_id": "doc-xlsx",
+                    "title": "tracker.xlsx",
+                    "sheet_name": "IMS",
+                    "row_start": 2,
+                    "row_end": 2,
+                    "cell_range": "A2:C2",
+                    "columns": ["Current Date"],
+                }
+            ],
+            "operations": ["profile_dataset"],
+            "warnings": [],
+            "confidence": 0.9,
+        }
+        return SimpleNamespace(text=json.dumps(payload), messages=[], metadata={})
+
+    monkeypatch.setattr(kernel, "run_agent", fake_run_agent)
+
+    batch = bridge.run_tabular_evidence_tasks(
+        [
+            TabularEvidenceTask(
+                task_id="tabular_1",
+                query="What is the current CDR date?",
+                doc_id="doc-xlsx",
+                title="tracker.xlsx",
+                file_type="xlsx",
+                sheet_hints=["IMS"],
+            )
+        ]
+    )
+
+    assert captured["agent_name"] == "data_analyst"
+    assert "Return ONLY valid JSON" in captured["prompt"]
+    assert captured["worker_request"]["metadata"]["answer_mode"] == "tabular_evidence_json"
+    assert batch.results[0].summary == "The CDR date is 2028-09-26."
+    assert batch.results[0].source_refs[0]["sheet_name"] == "IMS"

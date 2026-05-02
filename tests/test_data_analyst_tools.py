@@ -193,6 +193,27 @@ class TestLoadDatasetXlsx:
         assert result["columns"] == ["name", "value", "category"]
         assert result["shape"][0] == 3  # 3 data rows
 
+    def test_profile_dataset_profiles_all_workbook_sheets(self, tmp_path):
+        pytest.importorskip("openpyxl")
+        xlsx_file = tmp_path / "reviews.xlsx"
+        _write_multisheet_xlsx(xlsx_file)
+
+        session = _make_session()
+        stores = _make_stores(source_path=str(xlsx_file))
+        settings = _make_settings()
+
+        from agentic_chatbot_next.tools.data_analyst_tools import make_data_analyst_tools
+        tools = make_data_analyst_tools(stores, session, settings=settings)
+        profile_tool = next(t for t in tools if t.name == "profile_dataset")
+        result = json.loads(profile_tool.invoke({"doc_id": "reviews_doc"}))
+
+        assert result["status"] == "ok"
+        assert result["sheet_names"] == ["raw_reviews", "metadata"]
+        assert [sheet["sheet_name"] for sheet in result["sheets"]] == ["raw_reviews", "metadata"]
+        assert result["source_refs"][0]["sheet_name"] == "raw_reviews"
+        assert result["source_refs"][0]["cell_range"]
+        assert "review" in result["sheets"][0]["columns"]
+
 
 # ---------------------------------------------------------------------------
 # load_dataset — error cases

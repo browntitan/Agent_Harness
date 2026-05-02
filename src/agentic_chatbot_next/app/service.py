@@ -534,7 +534,14 @@ class RuntimeService:
             return ["coordinator", "data_analyst", "general", "rag_worker"]
 
         allowed: List[str] = []
-        for agent in registry.list_routable():
+        override_candidates = list(registry.list_routable())
+        list_agents = getattr(registry, "list", None)
+        if callable(list_agents):
+            for agent in list_agents():
+                metadata = dict(getattr(agent, "metadata", {}) or {})
+                if bool(metadata.get("manual_override_allowed")) and agent not in override_candidates:
+                    override_candidates.append(agent)
+        for agent in override_candidates:
             if str(getattr(agent, "mode", "") or "").strip().lower() == "basic":
                 continue
             name = str(getattr(agent, "name", "") or "").strip().lower()
@@ -997,6 +1004,10 @@ class RuntimeService:
                 session.tenant_id,
                 attempt_sync=bool(getattr(self.ctx.settings, "seed_demo_kb_on_startup", True)),
             )
+        registered_live_sink = False
+        if progress_sink is not None and getattr(session, "session_id", ""):
+            self.kernel.register_live_progress_sink(session.session_id, progress_sink)
+            registered_live_sink = True
         if _should_shortcut_to_rag_worker(
             user_text=routing_user_text,
             request_metadata=request_metadata,
@@ -1022,16 +1033,19 @@ class RuntimeService:
                 "effective_user_text": routing_user_text[:500],
                 "runtime_diagnostics": runtime_settings_diagnostics(self.ctx.settings),
             }
-            return self.kernel.process_agent_turn(
-                session,
-                user_text=routing_user_text,
-                callbacks=extra_callbacks,
-                agent_name="rag_worker",
-                route_metadata=route_metadata,
-                chat_max_output_tokens=request_chat_max_output_tokens,
-            )
-        registered_live_sink = False
-        if progress_sink is not None and getattr(session, "session_id", ""):
+            try:
+                return self.kernel.process_agent_turn(
+                    session,
+                    user_text=routing_user_text,
+                    callbacks=extra_callbacks,
+                    agent_name="rag_worker",
+                    route_metadata=route_metadata,
+                    chat_max_output_tokens=request_chat_max_output_tokens,
+                )
+            finally:
+                if registered_live_sink:
+                    self.kernel.unregister_live_progress_sink(session.session_id, progress_sink)
+        if not registered_live_sink and progress_sink is not None and getattr(session, "session_id", ""):
             self.kernel.register_live_progress_sink(session.session_id, progress_sink)
             registered_live_sink = True
 

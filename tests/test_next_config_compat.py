@@ -1,6 +1,22 @@
 from __future__ import annotations
 
 from agentic_chatbot_next.config import load_settings, runtime_settings_diagnostics
+from agentic_chatbot_next.control_panel.config_catalog import build_config_catalog
+
+
+FRONTEND_EVENT_ENV_NAMES = {
+    "FRONTEND_EVENTS_ENABLED",
+    "FRONTEND_EVENTS_SHOW_STATUS",
+    "FRONTEND_EVENTS_SHOW_AGENTS",
+    "FRONTEND_EVENTS_SHOW_TOOLS",
+    "FRONTEND_EVENTS_SHOW_PARALLEL_GROUPS",
+    "FRONTEND_EVENTS_SHOW_GUIDANCE",
+    "FRONTEND_EVENTS_SHOW_SKILLS",
+    "FRONTEND_EVENTS_SHOW_CONTEXT",
+    "FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT",
+    "FRONTEND_EVENTS_DETAIL_LEVEL",
+    "FRONTEND_EVENTS_PREVIEW_CHARS",
+}
 
 
 def test_deprecated_runtime_compat_env_vars_no_longer_block_settings_load(monkeypatch, tmp_path):
@@ -108,6 +124,73 @@ def test_session_history_window_settings_support_defaults_and_overrides(monkeypa
     assert overrides.session_transcript_page_size == 55
 
 
+def test_frontend_event_settings_support_defaults_and_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    cleared = {name: None for name in FRONTEND_EVENT_ENV_NAMES}
+
+    defaults = load_settings(env_overrides=cleared)
+    assert defaults.frontend_events_enabled is True
+    assert defaults.frontend_events_show_status is True
+    assert defaults.frontend_events_show_agents is True
+    assert defaults.frontend_events_show_tools is True
+    assert defaults.frontend_events_show_parallel_groups is True
+    assert defaults.frontend_events_show_guidance is True
+    assert defaults.frontend_events_show_skills is True
+    assert defaults.frontend_events_show_context is True
+    assert defaults.frontend_events_show_memory_context is False
+    assert defaults.frontend_events_detail_level == "safe_preview"
+    assert defaults.frontend_events_preview_chars == 480
+
+    overrides = load_settings(
+        env_overrides={
+            **cleared,
+            "FRONTEND_EVENTS_SHOW_TOOLS": "false",
+            "FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT": "true",
+            "FRONTEND_EVENTS_DETAIL_LEVEL": "metadata",
+            "FRONTEND_EVENTS_PREVIEW_CHARS": "72",
+        }
+    )
+
+    assert overrides.frontend_events_show_tools is False
+    assert overrides.frontend_events_show_memory_context is True
+    assert overrides.frontend_events_detail_level == "metadata"
+    assert overrides.frontend_events_preview_chars == 72
+
+
+def test_frontend_event_control_panel_schema_and_validation():
+    catalog = build_config_catalog()
+    fields = {field.env_name: field for field in catalog.fields}
+
+    assert set(FRONTEND_EVENT_ENV_NAMES).issubset(fields)
+    assert fields["FRONTEND_EVENTS_DETAIL_LEVEL"].choices == ("metadata", "safe_preview")
+    assert fields["FRONTEND_EVENTS_PREVIEW_CHARS"].min_value == 0
+
+    valid = catalog.validate_changes(
+        {
+            "FRONTEND_EVENTS_SHOW_TOOLS": "off",
+            "FRONTEND_EVENTS_DETAIL_LEVEL": "metadata",
+            "FRONTEND_EVENTS_PREVIEW_CHARS": "12",
+        }
+    )
+    invalid = catalog.validate_changes(
+        {
+            "FRONTEND_EVENTS_SHOW_TOOLS": "maybe",
+            "FRONTEND_EVENTS_DETAIL_LEVEL": "raw",
+            "FRONTEND_EVENTS_PREVIEW_CHARS": "-1",
+        }
+    )
+
+    assert valid["valid"] is True
+    assert valid["normalized_changes"]["FRONTEND_EVENTS_SHOW_TOOLS"] == "false"
+    assert valid["normalized_changes"]["FRONTEND_EVENTS_DETAIL_LEVEL"] == "metadata"
+    assert invalid["valid"] is False
+    assert set(invalid["errors"]) == {
+        "FRONTEND_EVENTS_SHOW_TOOLS",
+        "FRONTEND_EVENTS_DETAIL_LEVEL",
+        "FRONTEND_EVENTS_PREVIEW_CHARS",
+    }
+
+
 def test_runtime_limit_defaults_restore_interactive_baseline(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.delenv("WORKER_JOB_WAIT_TIMEOUT_SECONDS", raising=False)
@@ -161,6 +244,34 @@ def test_rag_top_k_defaults_are_15_each(monkeypatch, tmp_path):
     assert settings.retrieval_quality_verifier_enabled is False
 
 
+def test_rerank_settings_default_to_mixedbread_ollama_adapter(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("RERANK_ENABLED", raising=False)
+    monkeypatch.delenv("RERANK_PROVIDER", raising=False)
+    monkeypatch.delenv("RERANK_MODEL", raising=False)
+    monkeypatch.delenv("RERANK_TOP_N", raising=False)
+    monkeypatch.delenv("RERANK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("RERANK_FALLBACK_TO_HEURISTICS", raising=False)
+
+    settings = load_settings(
+        env_overrides={
+            "RERANK_ENABLED": None,
+            "RERANK_PROVIDER": None,
+            "RERANK_MODEL": None,
+            "RERANK_TOP_N": None,
+            "RERANK_TIMEOUT_SECONDS": None,
+            "RERANK_FALLBACK_TO_HEURISTICS": None,
+        }
+    )
+
+    assert settings.rerank_enabled is True
+    assert settings.rerank_provider == "ollama"
+    assert settings.rerank_model == "rjmalagon/mxbai-rerank-large-v2:1.5b-fp16"
+    assert settings.rerank_top_n == 12
+    assert settings.rerank_timeout_seconds == 30
+    assert settings.rerank_fallback_to_heuristics is True
+
+
 def test_max_parallel_tool_calls_supports_defaults_and_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
 
@@ -185,6 +296,7 @@ def test_runtime_settings_diagnostics_include_models_overlay_and_fingerprint(mon
     assert diagnostics["models"]["judge_model"] == settings.ollama_judge_model
     assert diagnostics["models"]["graphrag_chat_model"] == settings.graphrag_chat_model
     assert diagnostics["models"]["graphrag_index_chat_model"] == settings.graphrag_index_chat_model
+    assert diagnostics["models"]["rerank_model"] == settings.rerank_model
 
 
 def test_runtime_timeout_settings_support_overrides(monkeypatch, tmp_path):

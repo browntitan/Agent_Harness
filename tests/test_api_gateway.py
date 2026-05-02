@@ -19,6 +19,7 @@ from agentic_chatbot_next.authz import AccessSnapshot, normalize_user_email
 from agentic_chatbot_next.contracts.jobs import TeamMailboxChannel, TeamMailboxMessage, WorkerMailboxMessage
 from agentic_chatbot_next.contracts.messages import RuntimeMessage, SessionState
 from agentic_chatbot_next.persistence.postgres.skills import SkillChunkMatch, SkillPackRecord, SkillTelemetryEventRecord
+from agentic_chatbot_next.observability.events import RuntimeEvent
 from agentic_chatbot_next.rag.ingest import KBCoverageStatus
 from agentic_chatbot_next.runtime.kernel import RuntimeKernel
 from agentic_chatbot_next.runtime.context import filesystem_key
@@ -2835,6 +2836,59 @@ def test_stream_with_progress_forwards_rich_progress_events_in_order():
     assert '"content": "Streamed answer"' in payload
 
 
+def test_stream_with_progress_forwards_agent_context_loaded_status_event():
+    class _ProgressBot:
+        def process_turn(
+            self,
+            session,
+            *,
+            user_text,
+            upload_paths=None,
+            force_agent=False,
+            requested_agent="",
+            extra_callbacks=None,
+            progress_sink=None,
+        ):
+            del session, user_text, upload_paths, force_agent, requested_agent, extra_callbacks
+            assert progress_sink is not None
+            progress_sink.emit(
+                RuntimeEvent(
+                    event_id="evt-context",
+                    event_type="agent_context_loaded",
+                    session_id="tenant:user:conv",
+                    agent_name="general",
+                    payload={
+                        "title": "general loaded prompt, skills, and context",
+                        "detail": "1 prompt doc(s), 0 skill doc(s), 1 context section(s)",
+                        "detail_level": "safe_preview",
+                        "prompt_docs": [{"kind": "agent_definition", "source_path": "/tmp/general.md"}],
+                        "skill_docs": [],
+                        "context_sections": [{"name": "base_prompt"}],
+                        "memory_context": {},
+                    },
+                )
+            )
+            return "Context streamed answer"
+
+    payload = "".join(
+        api_main._stream_with_progress(
+            model="enterprise-agent",
+            session=object(),
+            user_text="Hello",
+            bot=_ProgressBot(),
+            force_agent=False,
+            requested_agent="",
+            prompt_tokens=1,
+        )
+    )
+
+    assert "event: status" in payload
+    assert '"type": "context_trace"' in payload
+    assert '"source_event_type": "agent_context_loaded"' in payload
+    assert '"kind": "context"' in payload
+    assert '"content": "Context streamed answer"' in payload
+
+
 def test_stream_with_progress_emits_structured_status_events_for_agents():
     class _ProgressBot:
         def process_turn(self, session, *, user_text, upload_paths=None, force_agent=False, requested_agent="", extra_callbacks=None, progress_sink=None):
@@ -3338,6 +3392,10 @@ async def test_document_source_file_serves_repository_source_with_bearer(tmp_pat
             "/v1/documents/DOC-1/source",
             headers={"Authorization": "Bearer shared-secret", "X-Conversation-ID": "source-conv"},
         )
+        inline_response = await client.get(
+            "/v1/documents/DOC-1/source?disposition=inline",
+            headers={"Authorization": "Bearer shared-secret", "X-Conversation-ID": "source-conv"},
+        )
     finally:
         await client.aclose()
         _clear_overrides()
@@ -3345,6 +3403,10 @@ async def test_document_source_file_serves_repository_source_with_bearer(tmp_pat
     assert response.status_code == 200
     assert response.text == "source body\n"
     assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert inline_response.status_code == 200
+    assert inline_response.text == "source body\n"
+    assert inline_response.headers["content-disposition"].startswith("inline;")
 
 
 @pytest.mark.asyncio
@@ -3395,6 +3457,10 @@ async def test_document_source_file_streams_remote_blob_source(tmp_path, monkeyp
             "/v1/documents/DOC-REMOTE/source",
             headers={"Authorization": "Bearer shared-secret", "X-Conversation-ID": "source-conv"},
         )
+        inline_response = await client.get(
+            "/v1/documents/DOC-REMOTE/source?disposition=inline",
+            headers={"Authorization": "Bearer shared-secret", "X-Conversation-ID": "source-conv"},
+        )
     finally:
         await client.aclose()
         _clear_overrides()
@@ -3402,6 +3468,10 @@ async def test_document_source_file_streams_remote_blob_source(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.text == "remote source\n"
     assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert inline_response.status_code == 200
+    assert inline_response.text == "remote source\n"
+    assert inline_response.headers["content-disposition"].startswith("inline;")
 
 
 @pytest.mark.asyncio
@@ -3436,7 +3506,7 @@ async def test_document_source_file_accepts_valid_signed_url_without_bearer(tmp_
         conversation_id="source-conv",
         secret=settings.download_url_secret,
         ttl_seconds=settings.download_url_ttl_seconds,
-        path="/v1/documents/DOC-SIGNED/source",
+        path="/v1/documents/DOC-SIGNED/source?disposition=inline",
     )
 
     try:
@@ -3447,6 +3517,7 @@ async def test_document_source_file_accepts_valid_signed_url_without_bearer(tmp_
 
     assert response.status_code == 200
     assert response.text == "signed body\n"
+    assert response.headers["content-disposition"].startswith("inline;")
 
 
 @pytest.mark.asyncio

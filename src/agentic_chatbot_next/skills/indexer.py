@@ -107,6 +107,7 @@ class SkillIndexSync:
                     checksum=pack.checksum,
                     tenant_id=tenant_id,
                     graph_id=pack.graph_id,
+                    collection_id=pack.collection_id,
                     tool_tags=pack.tool_tags,
                     task_tags=pack.task_tags,
                     version=pack.version,
@@ -179,6 +180,7 @@ class SkillIndexSync:
                     checksum=pack.checksum,
                     tenant_id=tenant_id,
                     graph_id=pack.graph_id,
+                    collection_id=pack.collection_id,
                     tool_tags=pack.tool_tags,
                     task_tags=pack.task_tags,
                     version=pack.version,
@@ -243,6 +245,7 @@ class SkillContextResolver:
         task_tags: Optional[List[str]] = None,
         owner_user_id: str = "",
         graph_ids: Optional[List[str]] = None,
+        collection_ids: Optional[List[str]] = None,
         top_k: Optional[int] = None,
         max_chars: Optional[int] = None,
         pinned_skill_ids: Optional[List[str]] = None,
@@ -255,6 +258,7 @@ class SkillContextResolver:
                     tenant_id=tenant_id,
                     agent_scope=agent_scope,
                     owner_user_id=owner_user_id,
+                    collection_ids=collection_ids,
                     accessible_skill_family_ids=accessible_skill_family_ids,
                 )
             except TypeError:
@@ -276,20 +280,33 @@ class SkillContextResolver:
                 enabled_only=True,
                 owner_user_id=owner_user_id,
                 graph_ids=graph_ids,
+                collection_ids=collection_ids,
                 accessible_skill_family_ids=accessible_skill_family_ids,
             )
         except TypeError:
-            matches = self.stores.skill_store.vector_search(
-                query,
-                tenant_id=tenant_id,
-                top_k=top_k or int(getattr(self.settings, "skill_search_top_k", 4)),
-                agent_scope=agent_scope,
-                tool_tags=tool_tags,
-                task_tags=task_tags,
-                enabled_only=True,
-                owner_user_id=owner_user_id,
-                graph_ids=graph_ids,
-            )
+            try:
+                matches = self.stores.skill_store.vector_search(
+                    query,
+                    tenant_id=tenant_id,
+                    top_k=top_k or int(getattr(self.settings, "skill_search_top_k", 4)),
+                    agent_scope=agent_scope,
+                    tool_tags=tool_tags,
+                    task_tags=task_tags,
+                    enabled_only=True,
+                    owner_user_id=owner_user_id,
+                    graph_ids=graph_ids,
+                )
+            except TypeError:
+                matches = self.stores.skill_store.vector_search(
+                    query,
+                    tenant_id=tenant_id,
+                    top_k=top_k or int(getattr(self.settings, "skill_search_top_k", 4)),
+                    agent_scope=agent_scope,
+                    tool_tags=tool_tags,
+                    task_tags=task_tags,
+                    enabled_only=True,
+                    owner_user_id=owner_user_id,
+                )
         limit = max_chars or int(getattr(self.settings, "skill_context_max_chars", 3000))
         parts: List[str] = []
         consumed = 0
@@ -328,6 +345,8 @@ class SkillContextResolver:
                     content=body,
                     chunk_index=0,
                     score=1.0,
+                    graph_id=record.graph_id,
+                    collection_id=record.collection_id,
                     tool_tags=list(record.tool_tags),
                     task_tags=list(record.task_tags),
                     retrieval_profile=record.retrieval_profile,
@@ -338,6 +357,9 @@ class SkillContextResolver:
                     visibility=record.visibility,
                     status=record.status,
                     version_parent=record.version_parent or record.skill_id,
+                    source_path=record.source_path,
+                    checksum=record.checksum,
+                    description=record.description,
                     kind=record.kind,
                     execution_config=dict(record.execution_config),
                 )

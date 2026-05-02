@@ -45,6 +45,7 @@ type SkillState = {
   name: string
   agent_scope: string
   graph_id?: string
+  collection_id?: string
   body_markdown: string
   enabled: boolean
   status: string
@@ -129,6 +130,15 @@ function parseSkillName(bodyMarkdown: string): string {
   return firstLine.startsWith('# ') ? firstLine.slice(2).trim() || 'New Skill' : 'New Skill'
 }
 
+function parseSkillMetadata(bodyMarkdown: string): Record<string, string> {
+  const metadata: Record<string, string> = {}
+  for (const line of bodyMarkdown.split('\n')) {
+    const match = /^([a-zA-Z_][a-zA-Z0-9_-]*):\s*(.+?)\s*$/.exec(line.trim())
+    if (match) metadata[match[1].toLowerCase().replace(/-/g, '_')] = match[2]
+  }
+  return metadata
+}
+
 function createFetchMock(options: {
   operationsError?: string
   compatibilityMode?: 'full' | 'no-endpoint' | 'partial-architecture'
@@ -183,6 +193,7 @@ function createFetchMock(options: {
         name: 'Existing Skill',
         agent_scope: 'general',
         graph_id: '',
+        collection_id: '',
         body_markdown: '# Existing Skill\nagent_scope: general\n\n## Workflow\n\n- Existing step.\n',
         enabled: true,
         status: 'active',
@@ -597,6 +608,7 @@ function createFetchMock(options: {
         name: skill.name,
         agent_scope: skill.agent_scope,
         graph_id: skill.graph_id ?? '',
+        collection_id: skill.collection_id ?? '',
         version: skill.version,
         enabled: skill.enabled,
         status: skill.status,
@@ -1798,7 +1810,8 @@ function createFetchMock(options: {
     if (path === '/v1/admin/graphs' && method === 'POST') {
       const body = readJsonBody(init)
       const displayName = String(body.display_name ?? 'New Graph')
-      const graphId = slugify(String(body.graph_id ?? displayName))
+      const requestedGraphId = String(body.graph_id ?? '').trim()
+      const graphId = requestedGraphId || slugify(displayName)
       const collectionId = String(body.collection_id ?? 'default')
       ensureCollection(collectionId)
       const requestedSourceDocIds = Array.isArray(body.source_doc_ids) ? body.source_doc_ids.map(String) : []
@@ -1830,6 +1843,34 @@ function createFetchMock(options: {
         completed_at: '2026-04-08T10:00:00Z',
       }]
       return jsonResponse({ created: true, graph_id: graphId, graph: state.graphs[graphId], sources: [] })
+    }
+
+    if (path === '/v1/admin/graphs/runs' && method === 'GET') {
+      const requestUrl = input instanceof URL ? input.href : typeof input === 'string' ? input : input.url
+      const searchParams = new URL(requestUrl, 'http://test.local').searchParams
+      const status = searchParams.get('status') ?? ''
+      const limit = Number(searchParams.get('limit') ?? 100)
+      const runs = Object.values(state.graphRuns)
+        .flat()
+        .filter(run => !status || String(run.status) === status)
+        .slice(0, limit)
+      return jsonResponse({ runs })
+    }
+
+    if (path === '/v1/admin/graphs/runs/cleanup' && method === 'POST') {
+      const body = readJsonBody(init)
+      const status = String(body.status ?? 'failed')
+      let deletedCount = 0
+      for (const graphId of Object.keys(state.graphRuns)) {
+        const runs = state.graphRuns[graphId] ?? []
+        const kept = runs.filter(run => {
+          const shouldDelete = String(run.status) === status
+          if (shouldDelete) deletedCount += 1
+          return !shouldDelete
+        })
+        state.graphRuns[graphId] = kept
+      }
+      return jsonResponse({ deleted: deletedCount > 0, deleted_count: deletedCount, status, runs: [] })
     }
 
     const graphMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)$/)
@@ -1932,6 +1973,28 @@ function createFetchMock(options: {
       const [, graphId, action] = graphBuildMatch
       const graph = state.graphs[graphId]
       if (!graph) return jsonResponse({ detail: 'Graph not found.' }, 404)
+      if (graphId.includes('failed')) {
+        graph.status = 'failed'
+        graph.query_ready = false
+        state.graphRuns[graphId] = [
+          {
+            run_id: `${graphId}-${action}-failed`,
+            graph_id: graphId,
+            operation: action,
+            status: 'failed',
+            detail: `${action} failed during indexing.`,
+            metadata: { failure_mode: 'test_failure' },
+            started_at: '2026-04-08T10:02:00Z',
+            completed_at: '2026-04-08T10:02:30Z',
+          },
+          ...(state.graphRuns[graphId] ?? []),
+        ]
+        return jsonResponse({
+          ...graphDetailPayload(graphId),
+          status: 'failed',
+          detail: `${action} failed during indexing.`,
+        })
+      }
       graph.status = 'ready'
       graph.query_ready = true
       graph.query_backend = 'graphrag_python_api_preferred'
@@ -1972,6 +2035,17 @@ function createFetchMock(options: {
       state.graphRuns[graphId] = runs.map(run => run.run_id === runId ? { ...run, status: 'cancelled', completed_at: '2026-04-08T10:03:00Z' } : run)
       if (state.graphs[graphId]) state.graphs[graphId].status = 'failed'
       return jsonResponse({ graph_id: graphId, status: 'cancelled', run: state.graphRuns[graphId][0] })
+    }
+
+    const graphRunDeleteMatch = path.match(/^\/v1\/admin\/graphs\/([^/]+)\/runs\/([^/]+)$/)
+    if (graphRunDeleteMatch && method === 'DELETE') {
+      const [, graphId, runId] = graphRunDeleteMatch
+      const runs = state.graphRuns[graphId] ?? []
+      const target = runs.find(run => run.run_id === runId)
+      if (!target) return jsonResponse({ detail: 'Graph run not found.' }, 404)
+      if (String(target.status) !== 'failed') return jsonResponse({ detail: 'Only failed graph runs can be deleted through this cleanup action.' }, 400)
+      state.graphRuns[graphId] = runs.filter(run => run.run_id !== runId)
+      return jsonResponse({ deleted: true, deleted_count: 1, graph_id: graphId, run_id: runId, status: 'failed', run: target })
     }
 
     if (graphMatch && method === 'DELETE') {
@@ -2126,6 +2200,122 @@ function createFetchMock(options: {
       return jsonResponse(graphDetailPayload(graphId))
     }
 
+    const collectionSkillDraftMatch = path.match(/^\/v1\/admin\/collections\/([^/]+)\/skill-drafts$/)
+    if (collectionSkillDraftMatch && method === 'POST') {
+      const [, collectionId] = collectionSkillDraftMatch
+      const body = readJsonBody(init)
+      const graphId = String(body.graph_id ?? '')
+      const collectionSkillId = `collection-${collectionId.replace(/[^a-zA-Z0-9_-]+/g, '-')}-rag-skill`
+      const drafts: Array<Record<string, unknown>> = [
+        {
+          draft_type: 'collection_rag',
+          label: 'Collection RAG skill',
+          skill_id: collectionSkillId,
+          name: `${collectionId} RAG Skill`,
+          agent_scope: 'rag',
+          collection_id: collectionId,
+          graph_id: '',
+          body_markdown: [
+            `# ${collectionId} RAG Skill`,
+            `skill_id: ${collectionSkillId}`,
+            'agent_scope: rag',
+            `collection_id: ${collectionId}`,
+            'description: Collection scoped test skill.',
+            'version: 1',
+            'enabled: true',
+            'tool_tags: search_indexed_docs',
+            'task_tags: collection_research',
+            '',
+            '## Workflow',
+            '',
+            '- Stay inside the collection.',
+          ].join('\n'),
+          selected: true,
+        },
+      ]
+      if (graphId) {
+        const graphSkillId = `graph-${graphId}-manager-skill`
+        drafts.push({
+          draft_type: 'graph_manager',
+          label: 'Graph skill',
+          skill_id: graphSkillId,
+          name: `${graphId} Graph Skill`,
+          agent_scope: 'graph_manager',
+          collection_id: collectionId,
+          graph_id: graphId,
+          body_markdown: [
+            `# ${graphId} Graph Skill`,
+            `skill_id: ${graphSkillId}`,
+            'agent_scope: graph_manager',
+            `graph_id: ${graphId}`,
+            `collection_id: ${collectionId}`,
+            'description: Graph scoped test skill.',
+            'version: 1',
+            'enabled: true',
+            'tool_tags: list_graph_indexes, inspect_graph_index',
+            'task_tags: graph_research',
+            '',
+            '## Workflow',
+            '',
+            '- Prefer source-backed graph relationships.',
+          ].join('\n'),
+          selected: true,
+        })
+      }
+      return jsonResponse({
+        object: 'collection.skill_draft.list',
+        collection_id: collectionId,
+        graph_id: graphId,
+        drafts,
+        mutated: false,
+      })
+    }
+
+    const collectionSkillDraftApplyMatch = path.match(/^\/v1\/admin\/collections\/([^/]+)\/skill-drafts\/apply$/)
+    if (collectionSkillDraftApplyMatch && method === 'POST') {
+      const [, collectionId] = collectionSkillDraftApplyMatch
+      const body = readJsonBody(init)
+      const graphId = String(body.graph_id ?? '')
+      const drafts = Array.isArray(body.drafts) ? body.drafts as Array<Record<string, unknown>> : []
+      const appliedSkillIds: string[] = []
+      const graphBoundSkillIds: string[] = []
+      for (const draft of drafts) {
+        const markdown = String(draft.body_markdown ?? draft.markdown ?? '')
+        const metadata = parseSkillMetadata(markdown)
+        const skillId = String(metadata.skill_id ?? draft.skill_id ?? `skill-new-${state.nextSkillIndex++}`)
+        const agentScope = String(metadata.agent_scope ?? draft.agent_scope ?? 'rag')
+        const draftGraphId = String(metadata.graph_id ?? draft.graph_id ?? graphId)
+        state.skills[skillId] = {
+          skill_id: skillId,
+          name: parseSkillName(markdown),
+          agent_scope: agentScope,
+          graph_id: draftGraphId,
+          collection_id: collectionId,
+          body_markdown: markdown,
+          enabled: true,
+          status: 'active',
+          version: '1',
+          version_parent: skillId,
+          updated_at: '2026-04-08T10:03:00Z',
+        }
+        appliedSkillIds.push(skillId)
+        if (agentScope === 'graph_manager' && draftGraphId && state.graphs[draftGraphId]) {
+          if (!state.graphs[draftGraphId].graph_skill_ids.includes(skillId)) {
+            state.graphs[draftGraphId].graph_skill_ids.push(skillId)
+          }
+          graphBoundSkillIds.push(skillId)
+        }
+      }
+      return jsonResponse({
+        object: 'collection.skill_draft.apply',
+        collection_id: collectionId,
+        graph_id: graphId,
+        applied_skill_ids: appliedSkillIds,
+        graph_bound_skill_ids: graphBoundSkillIds,
+        skills: appliedSkillIds.map(skillId => state.skills[skillId]),
+      })
+    }
+
     if (path === '/v1/skills' && method === 'GET') {
       return jsonResponse(listSkillsPayload())
     }
@@ -2164,6 +2354,7 @@ function createFetchMock(options: {
         name,
         agent_scope: 'general',
         graph_id: String(body.graph_id ?? ''),
+        collection_id: String(body.collection_id ?? ''),
         body_markdown: bodyMarkdown,
         enabled: true,
         status: 'active',
@@ -2182,6 +2373,7 @@ function createFetchMock(options: {
         ...state.skills[skillId],
         name: parseSkillName(bodyMarkdown),
         graph_id: String(body.graph_id ?? state.skills[skillId]?.graph_id ?? ''),
+        collection_id: String(body.collection_id ?? state.skills[skillId]?.collection_id ?? ''),
         body_markdown: bodyMarkdown,
       }
       return jsonResponse({ object: 'skill', data: state.skills[skillId] })
@@ -2537,8 +2729,10 @@ describe('App', () => {
     openSection('Config')
     expect(navButton('Config')).toHaveAttribute('aria-current', 'page')
     const configTabs = await screen.findByRole('tablist', { name: 'Config groups' })
-    expect(within(configTabs).getByRole('tab', { name: 'Runtime' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(configTabs).getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(configTabs).getByRole('tab', { name: 'Runtime' })).toHaveAttribute('aria-selected', 'false')
     expect(within(configTabs).getByRole('tab', { name: 'Providers' })).toHaveAttribute('aria-selected', 'false')
+    expect(await screen.findByLabelText('Ollama Chat Model')).toBeInTheDocument()
     const clarificationSlider = await screen.findByLabelText('Clarification Sensitivity')
     expect(clarificationSlider).toHaveAttribute('type', 'range')
     expect(within(getSection('Runtime')).getByText('Proceed')).toBeInTheDocument()
@@ -2592,7 +2786,7 @@ describe('App', () => {
     expect(architectureCalls.length).toBeGreaterThanOrEqual(2)
   })
 
-  it('shows one config group at a time and switches fields with the group selector', async () => {
+  it('shows all config groups by default and switches fields with the group selector', async () => {
     const { fetchMock } = createFetchMock()
     vi.stubGlobal('fetch', fetchMock)
 
@@ -2604,19 +2798,29 @@ describe('App', () => {
     openSection('Config')
 
     const groupTabs = await screen.findByRole('tablist', { name: 'Config groups' })
+    const allTab = within(groupTabs).getByRole('tab', { name: 'All' })
     const runtimeTab = within(groupTabs).getByRole('tab', { name: 'Runtime' })
     const providersTab = within(groupTabs).getByRole('tab', { name: 'Providers' })
 
-    expect(runtimeTab).toHaveAttribute('aria-selected', 'true')
+    expect(allTab).toHaveAttribute('aria-selected', 'true')
+    expect(runtimeTab).toHaveAttribute('aria-selected', 'false')
+    expect(providersTab).toHaveAttribute('aria-selected', 'false')
     expect(await screen.findByLabelText('Max Agent Steps')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Ollama Chat Model')).not.toBeInTheDocument()
+    expect(await screen.findByLabelText('Ollama Chat Model')).toBeInTheDocument()
 
     fireEvent.click(providersTab)
 
     expect(providersTab).toHaveAttribute('aria-selected', 'true')
+    expect(allTab).toHaveAttribute('aria-selected', 'false')
     expect(runtimeTab).toHaveAttribute('aria-selected', 'false')
     expect(await screen.findByLabelText('Ollama Chat Model')).toBeInTheDocument()
     expect(screen.queryByLabelText('Max Agent Steps')).not.toBeInTheDocument()
+
+    fireEvent.click(allTab)
+
+    expect(allTab).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByLabelText('Max Agent Steps')).toBeInTheDocument()
+    expect(await screen.findByLabelText('Ollama Chat Model')).toBeInTheDocument()
   })
 
   it('filters settings groups and workspace resources from search inputs', async () => {
@@ -2636,8 +2840,9 @@ describe('App', () => {
 
     fireEvent.change(screen.getByPlaceholderText('Search settings'), { target: { value: 'ollama' } })
 
+    expect(within(groupTabs).getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true')
     expect(within(groupTabs).queryByRole('tab', { name: 'Runtime' })).not.toBeInTheDocument()
-    expect(within(groupTabs).getByRole('tab', { name: 'Providers' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(groupTabs).getByRole('tab', { name: 'Providers' })).toHaveAttribute('aria-selected', 'false')
     expect(await screen.findByLabelText('Ollama Chat Model')).toBeInTheDocument()
     expect(screen.queryByLabelText('Max Agent Steps')).not.toBeInTheDocument()
 
@@ -3006,25 +3211,87 @@ describe('App', () => {
     expect(within(dialog).queryByLabelText('Wizard Server-Readable Local Paths')).not.toBeInTheDocument()
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Graph' }))
-    fireEvent.click(within(dialog).getByLabelText('Start the graph build after creating the draft'))
+    fireEvent.click(within(dialog).getByLabelText(/Start the graph build after creating the draft/))
     fireEvent.click(within(dialog).getByRole('button', { name: 'Tuning' }))
-    fireEvent.click(within(dialog).getByLabelText('Run prompt tuning before the graph build'))
+    fireEvent.click(within(dialog).getByLabelText(/Run prompt tuning before the graph build/))
     fireEvent.change(within(dialog).getByLabelText('Wizard Prompt Tuning Guidance'), {
       target: { value: 'Prioritize supplier ownership and approval chains.' },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Run Research & Tune' }))
 
     await waitFor(() => expect(within(dialog).getByText('Prompt tuning result')).toBeInTheDocument())
-    fireEvent.click(within(dialog).getByLabelText('Apply selected prompt drafts before build'))
+    fireEvent.click(within(dialog).getByLabelText(/Apply selected prompt drafts before build/))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Skills' }))
+    expect(within(dialog).getByText('Preview first')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Generate Skill Drafts' }))
+    await waitFor(() => expect(within(dialog).getByText('Collection RAG skill')).toBeInTheDocument())
+    expect(within(dialog).getByText('Graph skill')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Apply Selected Drafts' }))
+    await waitFor(() => expect(within(dialog).getByText(/Applied 2 skill draft/)).toBeInTheDocument())
     fireEvent.click(within(dialog).getByRole('button', { name: 'Review' }))
     expect(within(dialog).getByText('Run and apply selected drafts')).toBeInTheDocument()
+    expect(within(dialog).getByText(/Applied 2 skill draft/)).toBeInTheDocument()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Finish' }))
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Ingestion Wizard' })).not.toBeInTheDocument())
-    const applyIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input).includes('/research-tune/default-general-graph-tune-1/apply'))
-    const buildIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input) === '/v1/admin/graphs/default-general-graph/build')
+    const skillApplyIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input) === '/v1/admin/collections/default/skill-drafts/apply')
+    const applyIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input).includes('/research-tune/default_graph-tune-1/apply'))
+    const buildIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input) === '/v1/admin/graphs/default_graph/build')
+    expect(skillApplyIndex).toBeGreaterThanOrEqual(0)
     expect(applyIndex).toBeGreaterThanOrEqual(0)
+    expect(buildIndex).toBeGreaterThan(skillApplyIndex)
     expect(buildIndex).toBeGreaterThan(applyIndex)
+  })
+
+  it('creates a named graph from the wizard after creating a new collection and ingesting local paths', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+
+    openSection('Collections')
+    fireEvent.click(await screen.findByRole('button', { name: 'Ingestion Wizard' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Ingestion Wizard' })
+
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Create New Collection' }))
+    fireEvent.change(within(dialog).getByLabelText('Wizard Collection ID'), {
+      target: { value: 'defense-rag-test-v2' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Source' }))
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Local Source' }))
+    fireEvent.change(within(dialog).getByLabelText('Wizard Server-Readable Local Paths'), {
+      target: { value: '/tmp/defense-rag/doc-one.md' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ingest Paths' }))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/collections/defense-rag-test-v2/ingest-paths')).toBe(true)
+    })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Graph' }))
+    fireEvent.change(within(dialog).getByLabelText('Wizard Graph Display Name'), {
+      target: { value: 'defense rag test graph v2' },
+    })
+    expect(within(dialog).getByLabelText('Wizard Graph ID')).toHaveValue('defense_rag_test_graph_v2')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Review' }))
+    expect(within(dialog).getByText('defense rag test graph v2 (defense_rag_test_graph_v2)')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Finish' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Ingestion Wizard' })).not.toBeInTheDocument())
+    const createCollectionIndex = fetchMock.mock.calls.findIndex(([input, init]) => (
+      requestPath(input) === '/v1/admin/collections' && requestMethod(input, init) === 'POST'
+    ))
+    const ingestIndex = fetchMock.mock.calls.findIndex(([input]) => requestPath(input) === '/v1/admin/collections/defense-rag-test-v2/ingest-paths')
+    const graphCreateCall = fetchMock.mock.calls.find(([input, init]) => (
+      requestPath(input) === '/v1/admin/graphs' && requestMethod(input, init) === 'POST'
+      && readJsonBody(init).graph_id === 'defense_rag_test_graph_v2'
+    ))
+    expect(createCollectionIndex).toBeGreaterThanOrEqual(0)
+    expect(ingestIndex).toBeGreaterThan(createCollectionIndex)
+    expect(readJsonBody(graphCreateCall?.[1]).display_name).toBe('defense rag test graph v2')
+    expect(readJsonBody(graphCreateCall?.[1]).collection_id).toBe('defense-rag-test-v2')
   })
 
   it('renders collection inspector metadata including storage tables, dims, and mismatch warnings', async () => {
@@ -3140,7 +3407,7 @@ describe('App', () => {
     fireEvent.click(within(tuneSection).getByRole('button', { name: 'Run Research & Tune' }))
     await waitFor(() => expect(within(tuneSection).getByText('Scratchpad Preview')).toBeInTheDocument())
     expect(within(tuneSection).getByText('Vendor risk corpus summary with controls, approvers, exceptions, and supplier aliases.')).toBeInTheDocument()
-    expect(within(tuneSection).getByText('Valid')).toBeInTheDocument()
+    expect(within(tuneSection).getAllByText('Valid').length).toBeGreaterThan(0)
     expect((screen.getByLabelText('Graph Prompt Overrides') as HTMLTextAreaElement).value).toContain('Use vendor-centric extraction.')
     expect((screen.getByLabelText('Graph Prompt Overrides') as HTMLTextAreaElement).value).not.toContain('Dataset-Specific Curation Guidance')
     expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/graphs/vendor-risk/research-tune/vendor-risk-tune-1/apply')).toBe(false)
@@ -3169,6 +3436,65 @@ describe('App', () => {
     await waitFor(() => expect(within(getSection('Graph Inspector')).getAllByText(/Vendor Risk Graph|Query Ready/).length).toBeGreaterThan(0))
     expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/graphs/vendor-risk/build')).toBe(true)
     expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/graphs/vendor-risk/skills')).toBe(true)
+  })
+
+  it('bulk-selects graph documents and prompt targets, and blocks empty manual graph drafts', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+
+    openSection('Graphs')
+    const graphWorkspace = await screen.findByRole('heading', { name: 'Graph Workspace', level: 3 }).then(() => getSection('Graph Workspace'))
+    fireEvent.change(within(graphWorkspace).getByLabelText('Graph Display Name'), { target: { value: 'Manual Graph' } })
+    fireEvent.change(within(graphWorkspace).getByLabelText('Graph ID'), { target: { value: 'manual-graph' } })
+    fireEvent.change(within(graphWorkspace).getByLabelText('Graph Collection'), { target: { value: 'default' } })
+    fireEvent.click(within(graphWorkspace).getByRole('tab', { name: 'Choose Documents' }))
+    await waitFor(() => expect(within(graphWorkspace).getByRole('button', { name: 'Select All' })).toBeInTheDocument())
+
+    expect(within(graphWorkspace).getByRole('button', { name: 'Save Draft' })).toBeDisabled()
+    fireEvent.click(within(graphWorkspace).getByRole('button', { name: 'Select All' }))
+    expect(within(graphWorkspace).getByRole('button', { name: 'Save Draft' })).not.toBeDisabled()
+    fireEvent.click(within(graphWorkspace).getByRole('button', { name: 'Clear' }))
+    expect(within(graphWorkspace).getByRole('button', { name: 'Save Draft' })).toBeDisabled()
+
+    const tuneSection = getSection('Research & Tune')
+    fireEvent.click(within(tuneSection).getByRole('button', { name: 'Clear' }))
+    fireEvent.click(within(tuneSection).getByRole('button', { name: 'Select All' }))
+    expect(within(tuneSection).getByRole('button', { name: 'Run Research & Tune' })).toBeDisabled()
+  })
+
+  it('shows and deletes failed graph runs from the failed-runs tab', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+
+    openSection('Graphs')
+    const graphWorkspace = await screen.findByRole('heading', { name: 'Graph Workspace', level: 3 }).then(() => getSection('Graph Workspace'))
+    fireEvent.change(within(graphWorkspace).getByLabelText('Graph Display Name'), { target: { value: 'Failed Graph' } })
+    fireEvent.change(within(graphWorkspace).getByLabelText('Graph ID'), { target: { value: 'failed-graph' } })
+    fireEvent.change(within(graphWorkspace).getByLabelText('Graph Collection'), { target: { value: 'default' } })
+    fireEvent.click(within(graphWorkspace).getByRole('button', { name: 'Save Draft' }))
+    expect(await screen.findByRole('button', { name: /^Failed Graph\b/ })).toBeInTheDocument()
+    fireEvent.click(within(graphWorkspace).getByRole('button', { name: 'Build' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => requestPath(input) === '/v1/admin/graphs/failed-graph/build')).toBe(true))
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Failed Runs' }))
+    expect(await screen.findByText('build failed during indexing.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Failed Run' }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Delete failed run?' })).getByRole('button', { name: 'Delete Failed Run' }))
+    await waitFor(() => expect(screen.queryByText('build failed during indexing.')).not.toBeInTheDocument())
+    expect(fetchMock.mock.calls.some(([input, init]) => (
+      requestPath(input) === '/v1/admin/graphs/failed-graph/runs/failed-graph-build-failed'
+      && requestMethod(input, init) === 'DELETE'
+    ))).toBe(true)
   })
 
   it('remembers sub-tabs and collapsible panels within the browser session', async () => {

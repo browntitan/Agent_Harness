@@ -16,7 +16,11 @@ from agentic_chatbot_next.rag.hints import (
     prefers_bounded_synthesis,
 )
 from agentic_chatbot_next.rag.adaptive import CorpusRetrievalAdapter, run_retrieval_controller
-from agentic_chatbot_next.rag.citations import build_citations
+from agentic_chatbot_next.rag.citations import (
+    build_citations,
+    citation_display_label,
+    replace_inline_citation_ids,
+)
 from agentic_chatbot_next.rag.source_links import make_document_source_url_resolver
 from agentic_chatbot_next.rag.collection_selection import (
     apply_selection_to_session,
@@ -56,6 +60,10 @@ from agentic_chatbot_next.rag.retrieval_scope import (
     resolve_kb_collection_id,
 )
 from agentic_chatbot_next.rag.synthesis import build_extractive_grounded_answer, generate_grounded_answer
+from agentic_chatbot_next.rag.tabular import (
+    plan_tabular_evidence_tasks,
+    tabular_evidence_results_to_documents,
+)
 from agentic_chatbot_next.runtime.deep_rag import (
     deep_rag_controller_hints,
     deep_rag_search_mode,
@@ -474,6 +482,106 @@ def _record_stage_timing(retrieval_run: Any, stage: str, elapsed_ms: float) -> N
         ][:5]
     except Exception:
         pass
+
+
+def _augment_with_tabular_evidence(
+    *,
+    settings: Any,
+    query: str,
+    selected_docs: List[Any],
+    retrieval_run: Any,
+    runtime_bridge: RagRuntimeBridge | None,
+    progress_emitter: Any | None = None,
+) -> tuple[List[Any], List[str]]:
+    if runtime_bridge is None or not hasattr(runtime_bridge, "run_tabular_evidence_tasks"):
+        return selected_docs, []
+
+    max_tasks = int(getattr(settings, "rag_tabular_handoff_max_tasks", 2) or 2)
+    planning_docs = _merge_unique_documents(selected_docs, list(getattr(retrieval_run, "candidate_docs", []) or []))
+    tasks = plan_tabular_evidence_tasks(query, planning_docs, max_tasks=max_tasks)
+    if not tasks:
+        return selected_docs, []
+
+    if progress_emitter is not None and hasattr(progress_emitter, "emit_progress"):
+        progress_emitter.emit_progress(
+            "phase_start",
+            label="Analyzing spreadsheet evidence",
+            detail=f"{len(tasks)} tabular source(s)",
+            agent="rag_worker",
+            waiting_on="data_analyst",
+            docs=[
+                {
+                    "doc_id": task.doc_id,
+                    "title": task.title,
+                    "source_path": task.source_path,
+                    "source_type": "tabular",
+                }
+                for task in tasks
+            ],
+            counts={"tasks": len(tasks)},
+        )
+
+    started = time.perf_counter()
+    handoff_record: Dict[str, Any] = {
+        "attempted": True,
+        "task_count": len(tasks),
+        "tasks": [task.to_dict() for task in tasks],
+    }
+    warnings: List[str] = []
+    try:
+        batch = runtime_bridge.run_tabular_evidence_tasks(tasks)
+    except Exception as exc:
+        _record_stage_timing(retrieval_run, "tabular_handoff", (time.perf_counter() - started) * 1000.0)
+        handoff_record.update({"status": "failed", "error": str(exc)})
+        retrieval_run.retrieval_verification = {
+            **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+            "tabular_handoff": handoff_record,
+        }
+        return selected_docs, ["TABULAR_HANDOFF_FAILED"]
+
+    batch_results = list(getattr(batch, "results", []) or [])
+    batch_warnings = [str(item) for item in (getattr(batch, "warnings", []) or []) if str(item)]
+    tabular_docs = tabular_evidence_results_to_documents(batch_results, tasks)
+    _record_stage_timing(retrieval_run, "tabular_handoff", (time.perf_counter() - started) * 1000.0)
+    if tabular_docs:
+        selected_docs = _merge_unique_documents(tabular_docs, selected_docs)
+        candidate_counts = dict(getattr(retrieval_run, "candidate_counts", {}) or {})
+        candidate_counts["tabular_evidence_docs"] = len(tabular_docs)
+        retrieval_run.candidate_counts = candidate_counts
+        strategies = list(getattr(retrieval_run, "strategies_used", []) or [])
+        if "tabular_analyst" not in strategies:
+            strategies.append("tabular_analyst")
+        retrieval_run.strategies_used = strategies
+        sources_used = list(getattr(retrieval_run, "sources_used", []) or [])
+        for task in tasks:
+            if task.title and task.title not in sources_used:
+                sources_used.append(task.title)
+        retrieval_run.sources_used = sources_used
+        handoff_record.update(
+            {
+                "status": "ok",
+                "result_count": len(batch_results),
+                "synthetic_doc_count": len(tabular_docs),
+                "warnings": list(batch_warnings[:8]),
+            }
+        )
+    else:
+        handoff_record.update(
+            {
+                "status": "no_structured_evidence",
+                "result_count": len(batch_results),
+                "warnings": list(batch_warnings[:8]),
+            }
+        )
+        warnings.append("TABULAR_HANDOFF_NO_STRUCTURED_EVIDENCE")
+
+    if batch_warnings:
+        warnings.append("TABULAR_HANDOFF_WARNINGS")
+    retrieval_run.retrieval_verification = {
+        **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+        "tabular_handoff": handoff_record,
+    }
+    return selected_docs, list(dict.fromkeys(warnings))
 
 
 def _budget_requires_extractive_fallback(retrieval_run: Any, settings: Any) -> bool:
@@ -923,6 +1031,14 @@ def run_rag_contract(
         graded=list(retrieval_run.graded),
         resolution=requested_doc_resolution,
     )
+    selected_docs, tabular_warnings = _augment_with_tabular_evidence(
+        settings=settings,
+        query=retrieval_query,
+        selected_docs=selected_docs,
+        retrieval_run=retrieval_run,
+        runtime_bridge=runtime_bridge,
+        progress_emitter=progress_emitter,
+    )
 
     if not selected_docs:
         if scope_decision.mode in {"kb_only", "both"} and kb_status is not None and not kb_status.ready:
@@ -1061,6 +1177,15 @@ def run_rag_contract(
         answer_payload,
         resolution=requested_doc_resolution,
     )
+    if tabular_warnings:
+        existing_warnings = [str(item) for item in (answer_payload.get("warnings") or []) if str(item)]
+        for warning in tabular_warnings:
+            if warning not in existing_warnings:
+                existing_warnings.append(warning)
+        answer_payload = {
+            **answer_payload,
+            "warnings": existing_warnings,
+        }
     citation_started = time.perf_counter()
     citations = build_citations(
         selected_docs,
@@ -1245,7 +1370,14 @@ def render_rag_contract(contract: RagContract | Dict[str, Any]) -> str:
     warnings = raw.get("warnings", [])
     followups = raw.get("followups", [])
 
-    lines = [str(answer).strip()]
+    lines = [
+        replace_inline_citation_ids(
+            str(answer).strip(),
+            citations,
+            used_citation_ids=list(used),
+            link_renderer=_markdown_link,
+        )
+    ]
     if citations:
         lines.append("\nCitations:")
         for citation in citations:
@@ -1253,7 +1385,6 @@ def render_rag_contract(contract: RagContract | Dict[str, Any]) -> str:
             citation_id = item.get("citation_id", "")
             if used and citation_id not in used:
                 continue
-            title = str(item.get("title") or "")
             location = str(item.get("location") or "").strip()
             collection_id = str(item.get("collection_id") or "").strip()
             source_type = str(item.get("source_type") or "").strip().lower()
@@ -1264,8 +1395,8 @@ def render_rag_contract(contract: RagContract | Dict[str, Any]) -> str:
                 collection_label = "KB Collection" if source_type == "kb" else "Collection"
                 details.append(f"{collection_label}: {collection_id}")
             suffix = f" ({'; '.join(details)})" if details else ""
-            rendered_title = _markdown_link(title, str(item.get("url") or ""))
-            lines.append(f"- [{citation_id}] {rendered_title}{suffix}")
+            rendered_title = _markdown_link(citation_display_label(item), str(item.get("url") or ""))
+            lines.append(f"- {rendered_title}{suffix}")
     if warnings:
         lines.append("\nWarnings: " + ", ".join(str(item) for item in warnings))
     if followups:

@@ -16,6 +16,7 @@ from agentic_chatbot_next.rag.inventory import (
     classify_inventory_query,
     inventory_query_requests_grounded_analysis,
 )
+from agentic_chatbot_next.rag.citations import citation_display_label, replace_inline_citation_ids
 from agentic_chatbot_next.runtime.tool_parallelism import (
     PolicyAwareToolNode,
     count_current_turn_ai_messages,
@@ -525,6 +526,16 @@ def _graph_search_has_grounded_evidence(tool_results: List[Dict[str, Any]]) -> b
     return False
 
 
+def _graph_search_requires_source_read(tool_results: List[Dict[str, Any]]) -> bool:
+    for result in tool_results:
+        if _tool_result_name(result) != "search_graph_index":
+            continue
+        payload = _payload_from_tool_result(result)
+        if bool(payload.get("requires_source_read")):
+            return True
+    return False
+
+
 def _graph_source_candidate_doc_ids(tool_results: List[Dict[str, Any]], *, limit: int = 8) -> List[str]:
     doc_ids: List[str] = []
     for result in tool_results:
@@ -599,7 +610,7 @@ def _graph_rag_recovery_context(tool_results: List[Dict[str, Any]]) -> str:
     candidate_summaries = _graph_source_candidate_summaries(tool_results, limit=8)
     candidate_text = "; ".join(candidate_summaries) if candidate_summaries else ", ".join(doc_ids)
     return (
-        "Graph search returned source candidates only, not answerable evidence. "
+        "Graph search returned source candidates or graph leads that require source-text confirmation. "
         "Use grounded retrieval over these candidate doc ids before answering: "
         + ", ".join(doc_ids)
         + ". Start with the original user question. If the initial retrieval is weak, reason about query rewrites "
@@ -737,34 +748,42 @@ def _append_missing_graph_citations(final_text: str, tool_results: List[Dict[str
     citations = _graph_citations_from_tool_results(tool_results)
     if not citations:
         return str(final_text or "")
-    text = str(final_text or "").strip()
-    if re.search(r"(?im)^#{0,6}\s*citations\s*:", text) or re.search(r"(?im)^citations\s*$", text):
-        return text
+    raw_text = str(final_text or "").strip()
     used_ids = [
         str(citation.get("citation_id") or "").strip()
         for citation in citations
         if str(citation.get("citation_id") or "").strip()
-        and str(citation.get("citation_id") or "").strip() in text
+        and str(citation.get("citation_id") or "").strip() in raw_text
     ]
     if not used_ids:
         used_ids = [str(citation.get("citation_id") or "").strip() for citation in citations[:8]]
     used = set(used_ids)
+    text = replace_inline_citation_ids(
+        raw_text,
+        citations,
+        used_citation_ids=used_ids,
+        link_renderer=_markdown_link,
+    )
+    if re.search(r"(?im)^#{0,6}\s*citations\s*:", text) or re.search(r"(?im)^citations\s*$", text):
+        return text
     lines = ["Citations:"]
     for citation in citations:
         citation_id = str(citation.get("citation_id") or "").strip()
         if not citation_id or citation_id not in used:
             continue
-        title = str(citation.get("title") or citation.get("doc_id") or citation_id)
-        rendered_title = _markdown_link(title, str(citation.get("url") or ""))
+        rendered_title = _markdown_link(citation_display_label(citation), str(citation.get("url") or ""))
         details = []
-        doc_id = str(citation.get("doc_id") or "").strip()
         source_path = str(citation.get("source_path") or "").strip()
-        if doc_id:
-            details.append(f"doc_id: {doc_id}")
+        location = str(citation.get("location") or "").strip()
+        collection_id = str(citation.get("collection_id") or "").strip()
+        if location:
+            details.append(location)
+        if collection_id:
+            details.append(f"Collection: {collection_id}")
         if source_path:
             details.append(f"source: {Path(source_path).name or source_path}")
         suffix = f" ({'; '.join(details)})" if details else ""
-        lines.append(f"- [{citation_id}] {rendered_title}{suffix}")
+        lines.append(f"- {rendered_title}{suffix}")
     if len(lines) == 1:
         return text
     return f"{text}\n\n" + "\n".join(lines)
@@ -896,7 +915,7 @@ def _synthesize_tool_results(
         "You are recovering a final answer after a tool-using agent run.\n"
         "Use the tool results to answer the user's request clearly and concisely.\n"
         "Preserve citations and uncertainty, and do not dump raw JSON.\n"
-        "When tool results include search_graph_index JSON, only treat results as graph evidence when they include non-catalog chunks, relationships, or excerpts. If evidence_status is source_candidates_only, those are source candidates only; do not synthesize causal claims from them.\n"
+        "When tool results include search_graph_index JSON, only treat results as graph evidence when they include non-catalog chunks, relationships, or excerpts. If evidence_status is source_candidates_only or requires_source_read is true, those are source candidates or graph leads only; do not synthesize causal claims from them unless a rag_agent_tool result provides cited source-text support.\n"
         "Do not invent Cypher queries, schema labels, relationship names, or how-to steps unless the user explicitly asks for query syntax.\n"
         f"Recovery reason: {recovery_reason}."
     )
@@ -1846,7 +1865,14 @@ def run_general_agent(
         ]
         return final_text, updated_messages, metadata
     collected_tool_results = _collect_tool_results(updated_messages)
-    if graph_grounded_request and _has_graph_search_attempt(collected_tool_results) and not _graph_search_has_grounded_evidence(collected_tool_results):
+    if (
+        graph_grounded_request
+        and _has_graph_search_attempt(collected_tool_results)
+        and (
+            not _graph_search_has_grounded_evidence(collected_tool_results)
+            or _graph_search_requires_source_read(collected_tool_results)
+        )
+    ):
         rag_rendered = _render_latest_rag_tool_result(collected_tool_results)
         if rag_rendered:
             rag_rendered, verifier_recovery = _apply_final_evidence_verifier(
@@ -2078,7 +2104,14 @@ def _run_plan_execute_fallback(
             "recovery": ["graph_search_missing"],
         }
 
-    if graph_grounded_request and _has_graph_search_attempt(tool_results) and not _graph_search_has_grounded_evidence(tool_results):
+    if (
+        graph_grounded_request
+        and _has_graph_search_attempt(tool_results)
+        and (
+            not _graph_search_has_grounded_evidence(tool_results)
+            or _graph_search_requires_source_read(tool_results)
+        )
+    ):
         rag_rendered = _render_latest_rag_tool_result(tool_results)
         if rag_rendered:
             rag_rendered, verifier_recovery = _apply_final_evidence_verifier(
@@ -2188,8 +2221,8 @@ def _run_plan_execute_fallback(
     synth_system = (
         "You are a helpful assistant. Use the TOOL_RESULTS to answer the USER_REQUEST.\n"
         "If TOOL_RESULTS include a rag_agent_tool JSON output, use its 'answer' and include citations.\n"
-        "If TOOL_RESULTS include search_graph_index JSON output, use its `results` as graph evidence only when they include non-catalog chunks, relationship paths, or excerpts. Catalog-only results are source candidates, not evidence.\n"
-        "If graph search results are empty, errored, or source_candidates_only without a rag_agent_tool answer, say the graph evidence was insufficient instead of inventing relationships or causes.\n"
+        "If TOOL_RESULTS include search_graph_index JSON output, use its `results` as graph evidence only when they include non-catalog chunks, relationship paths, or excerpts and requires_source_read is not true. Catalog-only results and requires_source_read=true results are source candidates or graph leads, not final evidence.\n"
+        "If graph search results are empty, errored, source_candidates_only, or requires_source_read without a rag_agent_tool answer, say the graph evidence was insufficient instead of inventing relationships or causes.\n"
         "Do not invent Cypher queries, schema labels, relationship names, or how-to query syntax unless the user explicitly requested query syntax.\n"
         "Do not dump raw JSON; write a user-facing response."
     )

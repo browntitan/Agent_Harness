@@ -334,6 +334,7 @@ class BudgetedTurn:
     ledger: ContextLedger
     compact_boundary: CompactBoundary | None = None
     restore_snapshot: RestoreSnapshot = field(default_factory=RestoreSnapshot)
+    sections: List[ContextSection] = field(default_factory=list)
 
 
 def _dedupe_strings(items: Iterable[str], limit: int | None = None) -> List[str]:
@@ -419,7 +420,7 @@ class ContextBudgetManager:
             for section in sections:
                 tokens = self.estimate_text(section.render())
                 ledger.add_section(section.name, tokens, tokens, clipped=False)
-            return BudgetedTurn(system_prompt=prompt, history_messages=original_history, ledger=ledger)
+            return BudgetedTurn(system_prompt=prompt, history_messages=original_history, ledger=ledger, sections=list(sections))
 
         self._emit(
             "context_budget_estimated",
@@ -519,6 +520,7 @@ class ContextBudgetManager:
             ledger=ledger,
             compact_boundary=boundary,
             restore_snapshot=restore,
+            sections=final_sections,
         )
 
     def manual_compact_session(

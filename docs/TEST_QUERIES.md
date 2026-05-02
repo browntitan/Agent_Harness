@@ -340,6 +340,57 @@ Run these three test types separately:
 - long-form deep research:
   use one of the long-output prompt shapes in section `7.2` with `metadata.long_output`
 
+### 7.6 RAG Researcher Autonomy Checks
+
+Run these with `metadata.requested_agent="rag_researcher"` when you want to test the
+autonomous RAG researcher loop directly. Expected tool shape: query planning, inventory or
+metadata narrowing, exploratory chunk/section search, evidence grading/pruning, evidence-plan
+validation, controller-hint building, then final `rag_agent_tool` synthesis.
+
+Easy:
+
+- `Search the defense-rag-v2 knowledge base and answer with citations: Which supplier is named in the Asterion subtier statement of work?`
+  Expected answer: `North Coast Systems LLC.`
+  Expected source: `asterion_subtier_sow_rev_b.docx`.
+
+- `Search the defense-rag-v2 knowledge base and answer with citations: What endurance distance does the Iron Vale ground test plan require?`
+  Expected answer: `120 km.`
+  Expected source: `iron_vale_ground_test_plan_final.pdf`.
+
+- `Search the default collection and answer with citations: What did AAP v1.4 add or improve?`
+  Expected answer: improved tool-calling reliability, guidance to avoid complex tool argument schemas,
+  and an agentic RAG template with relevance grading and query rewrite.
+  Expected source: `05_release_notes.md`.
+
+Medium:
+
+- `Use rag_researcher. Which Asterion documents should be treated as authoritative for updated dates, rather than the early draft planning note? Cite each source.`
+  Expected answer: authoritative updated sources are `asterion_ecp_04_rev_c.docx`,
+  `asterion_monthly_status_review_final.pdf`, and `asterion_budget_schedule_tracker.xlsx`;
+  `asterion_issue_digest_draft.txt` is earlier draft/planning evidence.
+
+- `Use rag_researcher. Did the Harbor Scribe pilot date move only because of cybersecurity? Answer with citations and mention any other contributing factors.`
+  Expected answer: no; network segmentation mattered, but training readiness, scanner/label usability,
+  and user-confidence concerns also contributed.
+
+- `Use rag_researcher. Search the default collection and explain how tools, skills, and RAG cooperate in this runtime. Identify the relevant docs first, then synthesize.`
+  Expected behavior: source discovery plus final cited synthesis from the tool, skill, and RAG docs.
+
+Hard:
+
+- `Use rag_researcher. Explain why Asterion CDR moved and identify the documents that show both the emerging problem and the final approved answer.`
+  Expected answer: draft issue evidence shows thermal-margin/EMI/supplier-yield concerns;
+  ECP-04 approved the TI-88/LAS-2B/harness-reroute package; workbook/status review show
+  the final approved CDR moved to `26 Sep 2028` by `+43 days`.
+
+- `Use rag_researcher. Differentiate Halcyon Foundry from Halcyon Microdevices and explain which one had manufacturing void issues versus procurement scoring.`
+  Expected answer: Halcyon Foundry is the Trident Echo supplier with cabinet-housing void issues/CAR-22;
+  Halcyon Microdevices is the Ember Reach offeror represented in procurement scoring.
+
+- `Use rag_researcher. Search only the default collection. Identify all documents that describe routing, requested-agent overrides, fallback behavior, and RAG execution hints, then produce a cited map of where each behavior lives.`
+  Expected behavior: multi-document discovery, structure-first reads where helpful, and final
+  citation-safe synthesis instead of raw chunk-id claims.
+
 ## 8. Additional API And Long-Form Checks
 
 These are still useful smoke tests even though they are not part of the default-collection chat matrix.

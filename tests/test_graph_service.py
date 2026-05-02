@@ -16,12 +16,13 @@ import pytest
 import yaml
 
 from agentic_chatbot_next.graph.artifacts import load_artifact_bundle
-from agentic_chatbot_next.graph.backend import GraphOperationResult, MicrosoftGraphRagBackend
+from agentic_chatbot_next.graph.backend import GraphOperationResult, GraphQueryHit, MicrosoftGraphRagBackend
 from agentic_chatbot_next.graph.community_report_recovery import (
     analyze_community_report_inputs,
     generate_fallback_community_reports,
 )
-from agentic_chatbot_next.graph.prompt_tuning import GraphPromptTuningService
+import agentic_chatbot_next.graph.prompt_tuning as prompt_tuning_module
+from agentic_chatbot_next.graph.prompt_tuning import COMMON_GRAPHRAG_PROMPT_TARGETS, GraphPromptTuningService
 from agentic_chatbot_next.graph.service import GraphService
 from agentic_chatbot_next.persistence.postgres.graphs import (
     GraphIndexRecord,
@@ -176,6 +177,44 @@ class _FakeGraphIndexRunStore:
         rows = [replace(item) for item in self.records.get(graph_id, []) if item.tenant_id == tenant_id]
         rows.sort(key=lambda item: str(item.started_at or ""), reverse=True)
         return rows[:limit]
+
+    def list_runs_by_status(
+        self,
+        *,
+        tenant_id: str = "local-dev",
+        status: str = "",
+        graph_id: str = "",
+        limit: int = 100,
+    ):
+        rows = [
+            replace(item)
+            for runs in self.records.values()
+            for item in runs
+            if item.tenant_id == tenant_id
+            and (not status or item.status == status)
+            and (not graph_id or item.graph_id == graph_id)
+        ]
+        rows.sort(key=lambda item: str(item.started_at or ""), reverse=True)
+        return rows[:limit]
+
+    def delete_run(self, run_id: str, *, tenant_id: str = "local-dev", graph_id: str = "", statuses=None) -> int:
+        allowed = set(statuses or [])
+        deleted = 0
+        for key, runs in list(self.records.items()):
+            kept = []
+            for run in runs:
+                matches = (
+                    run.tenant_id == tenant_id
+                    and run.run_id == run_id
+                    and (not graph_id or run.graph_id == graph_id)
+                    and (not allowed or run.status in allowed)
+                )
+                if matches:
+                    deleted += 1
+                else:
+                    kept.append(run)
+            self.records[key] = kept
+        return deleted
 
 
 class _FakeGraphQueryCacheStore:
@@ -618,7 +657,8 @@ def test_graph_service_catalog_fallback_returns_doc_candidates_without_live_grap
     assert payload["results"][0]["citation_ids"] == ["DOC-1#graph"]
     assert payload["citations"][0]["title"] == "Release Readiness"
     assert payload["citations"][0]["catalog_only"] is True
-    assert payload["citations"][0]["url"].startswith("/v1/documents/DOC-1/source?")
+    assert "/v1/documents/DOC-1/source?" in payload["citations"][0]["url"]
+    assert "disposition=inline" in payload["citations"][0]["url"]
 
 
 def test_graph_service_normalizes_graph_method_alias_and_rejects_non_graph_methods(tmp_path: Path):
@@ -712,6 +752,151 @@ def test_graph_service_does_not_inject_hidden_corpus_specific_query_variants(tmp
     assert backend.queries == [question]
 
 
+def test_graph_service_auto_plans_rewrites_reranks_and_requires_source_read_for_hard_queries(tmp_path: Path):
+    service = _make_service(tmp_path)
+    service.stores.graph_store = None
+    service.index_corpus(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+    record = service.stores.graph_index_store.records["release_graph"]
+    service.stores.graph_index_store.records["release_graph"] = replace(
+        record,
+        query_ready=True,
+        supported_query_methods=["local", "global", "drift"],
+        graph_context_summary={"entity_samples": ["release", "change", "risk"]},
+    )
+
+    class _PlanningBackend(_FakeBackend):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def query_index(self, graph_id: str, root_path: Path, *, query: str, method: str, limit: int, doc_ids=None):
+            del root_path, limit, doc_ids
+            self.calls.append((method, query))
+            if method != "global":
+                return []
+            return [
+                GraphQueryHit(
+                    graph_id=graph_id,
+                    backend="graphrag_artifacts",
+                    query_method=method,
+                    doc_id="DOC-1",
+                    chunk_ids=["chunk-final"],
+                    score=0.42,
+                    title="Release Change Approval",
+                    source_path="/tmp/release.md",
+                    source_type="kb",
+                    relationship_path=["Approved change", "Cost increase", "Residual risk"],
+                    summary=(
+                        "The approved change directly supports one cost increase, while a separate "
+                        "concern remains tracked as a residual risk pending source-text confirmation."
+                    ),
+                )
+            ]
+
+    backend = _PlanningBackend()
+    service._backend_for = lambda backend_name: backend
+    question = (
+        "Which release cost increase is directly attributable to the approved change, "
+        "and which concern remained a separate residual risk?"
+    )
+
+    payload = service.query_index("release_graph", query=question, methods=[], limit=3)
+
+    assert payload["search_plan"]["planner"] == "heuristic"
+    assert payload["methods"] == ["global", "local"]
+    assert len(payload["expanded_queries"]) >= 2
+    assert {method for method, _query in backend.calls} == {"global", "local"}
+    assert payload["rerank"]["status"] == "disabled"
+    assert payload["evidence_status"] == "grounded_graph_evidence"
+    assert payload["requires_source_read"] is True
+    assert payload["source_read_plan"]["required"] is True
+    assert payload["source_read_plan"]["preferred_doc_ids"] == ["DOC-1"]
+    assert set(payload["source_read_plan"]["missing_claim_slots"]) >= {
+        "exact_amount_or_cost_component",
+        "causal_support",
+        "distinction_or_residual_risk",
+    }
+
+
+def test_graph_service_does_not_force_source_read_for_plain_relationship_queries(tmp_path: Path):
+    service = _make_service(tmp_path)
+    service.stores.graph_store = None
+    service.index_corpus(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+    record = service.stores.graph_index_store.records["release_graph"]
+    service.stores.graph_index_store.records["release_graph"] = replace(
+        record,
+        query_ready=True,
+        supported_query_methods=["local", "global"],
+    )
+
+    class _RelationshipBackend(_FakeBackend):
+        def query_index(self, graph_id: str, root_path: Path, *, query: str, method: str, limit: int, doc_ids=None):
+            del root_path, query, limit, doc_ids
+            if method != "local":
+                return []
+            return [
+                GraphQueryHit(
+                    graph_id=graph_id,
+                    backend="graphrag_artifacts",
+                    query_method=method,
+                    doc_id="DOC-1",
+                    chunk_ids=["chunk-relationship"],
+                    score=0.71,
+                    title="Release Dependency Map",
+                    relationship_path=["Release", "depends on", "Notification API"],
+                    summary=(
+                        "The graph relationship links the release to the Notification API dependency "
+                        "and identifies it as the service dependency to review for readiness."
+                    ),
+                )
+            ]
+
+    service._backend_for = lambda backend_name: _RelationshipBackend()
+
+    payload = service.query_index(
+        "release_graph",
+        query="Which services does the release depend on?",
+        methods=[],
+        limit=3,
+    )
+
+    assert payload["evidence_status"] == "grounded_graph_evidence"
+    assert payload["requires_source_read"] is False
+    assert "source_read_plan" not in payload
+
+
+def test_graph_service_query_across_graphs_propagates_child_source_read_plan(tmp_path: Path):
+    service = _make_service(tmp_path)
+    service.stores.graph_store = None
+    service.index_corpus(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+
+    payload = service.query_across_graphs(
+        "Which release cost increase was approved and which risk remains?",
+        collection_id="default",
+        limit=5,
+        top_k_graphs=2,
+    )
+
+    assert payload["evidence_status"] == "source_candidates_only"
+    assert payload["requires_source_read"] is True
+    assert payload["source_read_plan"]["required"] is True
+    assert payload["source_read_plan"]["preferred_doc_ids"] == ["DOC-1"]
+
+
 def test_graph_service_enforces_private_visibility_across_list_inspect_and_query(tmp_path: Path):
     owner = _make_service(tmp_path, user_id="owner")
     created = owner.create_admin_graph(
@@ -767,6 +952,68 @@ def test_graph_prompt_tuning_generates_durable_drafts_without_mutating_graph_pro
 
     graph_record = stores.graph_index_store.records["release_risk"]
     assert graph_record.prompt_overrides_json == {}
+    assert [run.operation for run in stores.graph_index_run_store.records["release_risk"]].count("research_tune") == 1
+
+
+def test_graph_prompt_tuning_loads_current_graphrag_prompt_baselines(tmp_path: Path):
+    graph_service, tuning_service, stores = _make_tuning_services(tmp_path)
+    graph_service.create_admin_graph(
+        graph_id="release-risk",
+        display_name="Release Risk",
+        collection_id="default",
+        source_doc_ids=["DOC-1", "DOC-2"],
+    )
+    target_prompt_files = [
+        "summarize_descriptions.txt",
+        "community_report_text.txt",
+        "community_report_graph.txt",
+        "global_search_map_system_prompt.txt",
+    ]
+
+    payload = tuning_service.start_tuning_run(
+        "release_risk",
+        guidance="Keep query prompts grounded in source-provided facts.",
+        target_prompt_files=target_prompt_files,
+    )
+
+    assert payload["status"] == "completed"
+    assert set(target_prompt_files).issubset(set(payload["prompt_drafts"]))
+    assert not any("No baseline prompt was available" in warning for warning in payload["warnings"])
+    assert all(payload["prompt_drafts"][filename]["baseline_source"] for filename in target_prompt_files)
+    assert [run.operation for run in stores.graph_index_run_store.records["release_risk"]].count("research_tune") == 1
+
+
+def test_graph_prompt_tuning_generates_all_common_targets_from_local_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    graph_service, tuning_service, stores = _make_tuning_services(tmp_path)
+    graph_service.create_admin_graph(
+        graph_id="release-risk",
+        display_name="Release Risk",
+        collection_id="default",
+        source_doc_ids=["DOC-1", "DOC-2"],
+    )
+
+    def _missing_module(*args, **kwargs):
+        del args, kwargs
+        raise ModuleNotFoundError("graphrag prompt module hidden in test")
+
+    monkeypatch.setattr(prompt_tuning_module.importlib, "import_module", _missing_module)
+
+    payload = tuning_service.start_tuning_run(
+        "release_risk",
+        guidance="Use local fallback baselines when GraphRAG prompt constants are unavailable.",
+        target_prompt_files=COMMON_GRAPHRAG_PROMPT_TARGETS,
+    )
+
+    assert payload["status"] == "completed"
+    assert set(COMMON_GRAPHRAG_PROMPT_TARGETS) == set(payload["prompt_drafts"])
+    assert not any("No baseline prompt was available" in warning for warning in payload["warnings"])
+    assert {
+        draft["baseline_source"]
+        for draft in payload["prompt_drafts"].values()
+    } == {"agentic_chatbot_local_fallback"}
     assert [run.operation for run in stores.graph_index_run_store.records["release_risk"]].count("research_tune") == 1
 
 
@@ -1552,6 +1799,71 @@ def test_graph_service_cancel_and_delete_graph(tmp_path: Path, monkeypatch: pyte
     assert terminated == [run_id]
     assert deleted["deleted"] is True
     assert service.inspect_index("release_graph")["error"].startswith("Graph")
+
+
+def test_graph_service_lists_and_deletes_failed_runs_only(tmp_path: Path):
+    service = _make_service(tmp_path)
+    service.create_admin_graph(
+        graph_id="release-graph",
+        display_name="Release Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-1"],
+    )
+    service.create_admin_graph(
+        graph_id="ops-graph",
+        display_name="Ops Graph",
+        collection_id="default",
+        source_doc_ids=["DOC-2"],
+    )
+    failed_run_id = service._run_result(
+        graph_id="release_graph",
+        operation="build",
+        status="failed",
+        detail="Build failed.",
+        run_id="failed-run-1",
+    )
+    ready_run_id = service._run_result(
+        graph_id="release_graph",
+        operation="validate",
+        status="ready",
+        detail="Validation passed.",
+        run_id="ready-run-1",
+    )
+    running_run_id = service._run_result(
+        graph_id="ops_graph",
+        operation="build",
+        status="running",
+        detail="Build running.",
+        run_id="running-run-1",
+    )
+    second_failed_run_id = service._run_result(
+        graph_id="ops_graph",
+        operation="refresh",
+        status="failed",
+        detail="Refresh failed.",
+        run_id="failed-run-2",
+    )
+
+    failed_runs = service.list_graph_runs_by_status(status="failed")
+    assert {item["run_id"] for item in failed_runs} == {failed_run_id, second_failed_run_id}
+
+    blocked_active = service.delete_admin_graph_run("ops_graph", run_id=running_run_id)
+    blocked_ready = service.delete_admin_graph_run("release_graph", run_id=ready_run_id)
+    deleted = service.delete_admin_graph_run("release_graph", run_id=failed_run_id)
+    cleanup = service.cleanup_admin_graph_runs(status="failed")
+
+    assert "Active graph runs" in blocked_active["error"]
+    assert "Only failed graph runs" in blocked_ready["error"]
+    assert deleted["deleted"] is True
+    assert cleanup["deleted_count"] == 1
+    remaining_run_ids = {
+        item["run_id"]
+        for item in service.list_graph_runs_by_status(status="", limit=20)
+    }
+    assert failed_run_id not in remaining_run_ids
+    assert second_failed_run_id not in remaining_run_ids
+    assert ready_run_id in remaining_run_ids
+    assert running_run_id in remaining_run_ids
 
 
 def test_graph_service_terminates_superseded_background_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

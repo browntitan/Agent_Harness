@@ -43,7 +43,7 @@
           <a:lstStyle/>
           <a:p>
             <a:r>
-              <a:t>System has 12 agents. Key tool count updates from the latest audit: general has 33 tools (including MCP wildcard for dynamic tool discovery), coordinator has 11 tools (spawn_worker, message_worker, team mailbox tools, etc.), data_analyst has 20 tools (analyst + team mailbox + invoke_agent), graph_manager has 12 tools, utility has 13 tools, verifier has 13 tools (RAG + graph). basic, rag_worker, planner, and finalizer have 0 tools. memory_maintainer has 3. Coordinator now has 9 allowed workers including graph_manager.</a:t>
+              <a:t>System has 13 agents. Key tool count updates from the latest audit: general has 34 tools (including MCP wildcard for dynamic tool discovery), coordinator has 11 tools (spawn_worker, message_worker, team mailbox tools, etc.), data_analyst has 20 tools (analyst + team mailbox + invoke_agent), graph_manager has 12 tools, utility has 13 tools, verifier has 13 tools (RAG + graph), research_coordinator and rag_researcher are specialized agents for multi-step retrieval research. basic, rag_worker, planner, and finalizer have 0 tools. memory_maintainer has 3. Coordinator now has 9 allowed workers including graph_manager.</a:t>
             </a:r>
           </a:p>
         </p:txBody>

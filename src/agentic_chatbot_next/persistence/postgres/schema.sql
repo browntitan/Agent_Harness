@@ -664,6 +664,7 @@ CREATE TABLE IF NOT EXISTS skills (
     tenant_id     TEXT NOT NULL DEFAULT 'local-dev',
     owner_user_id TEXT DEFAULT '',
     graph_id      TEXT DEFAULT '',
+    collection_id TEXT DEFAULT '',
     name          TEXT NOT NULL,
     agent_scope   TEXT NOT NULL,
     tool_tags     TEXT[] DEFAULT '{}'::TEXT[],
@@ -692,6 +693,7 @@ ALTER TABLE skills ADD COLUMN IF NOT EXISTS coverage_goal TEXT DEFAULT '';
 ALTER TABLE skills ADD COLUMN IF NOT EXISTS result_mode TEXT DEFAULT '';
 ALTER TABLE skills ADD COLUMN IF NOT EXISTS owner_user_id TEXT DEFAULT '';
 ALTER TABLE skills ADD COLUMN IF NOT EXISTS graph_id TEXT DEFAULT '';
+ALTER TABLE skills ADD COLUMN IF NOT EXISTS collection_id TEXT DEFAULT '';
 ALTER TABLE skills ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'global';
 ALTER TABLE skills ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 ALTER TABLE skills ADD COLUMN IF NOT EXISTS version_parent TEXT DEFAULT '';
@@ -714,6 +716,9 @@ CREATE INDEX IF NOT EXISTS skills_version_parent_idx
 
 CREATE INDEX IF NOT EXISTS skills_graph_idx
     ON skills(tenant_id, graph_id, agent_scope, status);
+
+CREATE INDEX IF NOT EXISTS skills_collection_idx
+    ON skills(tenant_id, collection_id, agent_scope, status);
 
 CREATE INDEX IF NOT EXISTS skills_kind_idx
     ON skills(tenant_id, kind, status);
