@@ -1073,7 +1073,7 @@
                 <a:ea typeface="Arial" pitchFamily="34" charset="-122"/>
                 <a:cs typeface="Arial" pitchFamily="34" charset="-120"/>
               </a:rPr>
-              <a:t>Coordinator NEVER does work itself. It plans, delegates, and quality-checks. Workers run on separate threads with their own QueryLoop instances. Durable jobs survive server restarts.</a:t>
+              <a:t>Coordinator NEVER does work itself. It plans, delegates, and quality-checks. Each worker gets its own LangGraph ReAct agent on a separate thread with scoped session state.</a:t>
             </a:r>
             <a:endParaRPr lang="en-US" sz="1000" dirty="0"/>
           </a:p>

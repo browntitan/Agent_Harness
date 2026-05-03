@@ -50,7 +50,7 @@ def test_ollama_reranker_residency_defaults_are_documented_in_runtime_envs() -> 
     env_example = (repo_root / ".env.example").read_text(encoding="utf-8")
     podman_env = (repo_root / "podman_startup" / "env.podman.example").read_text(encoding="utf-8")
     reranker_model = "rjmalagon/mxbai-rerank-large-v2:1.5b-fp16"
-    bootstrap_models = f"nemotron-cascade-2:30b,{reranker_model},nomic-embed-text:latest"
+    bootstrap_models = f"gpt-oss:20b,{reranker_model},nomic-embed-text:latest"
 
     assert "OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-3}" in compose
     assert f"OLLAMA_BOOTSTRAP_MODELS: ${{OLLAMA_BOOTSTRAP_MODELS:-{bootstrap_models}}}" in compose

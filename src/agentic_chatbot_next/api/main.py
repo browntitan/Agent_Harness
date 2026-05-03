@@ -1435,6 +1435,8 @@ def _stream_with_progress(
             "rag_retrieval_summary",
             "retrieval_mode",
             "tool_calls_used",
+            "graph_execution",
+            "context_compaction",
         ],
     )
     if metadata:
@@ -3733,6 +3735,8 @@ def chat_completions(
             "rag_retrieval_summary",
             "retrieval_mode",
             "tool_calls_used",
+            "graph_execution",
+            "context_compaction",
         ],
     )
     payload = _build_openai_completion_payload(

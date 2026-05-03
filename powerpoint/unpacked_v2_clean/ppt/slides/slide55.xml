@@ -1144,7 +1144,7 @@
                 <a:ea typeface="Arial" pitchFamily="34" charset="-122"/>
                 <a:cs typeface="Arial" pitchFamily="34" charset="-120"/>
               </a:rPr>
-              <a:t>Verifier checks: Did we cover all liability sections? Are citations accurate? Missing coverage triggers revision loop back to planner (max 4 rounds). Artifacts: doc_digest, research_notebook.</a:t>
+              <a:t>Each worker runs its own LangGraph ReAct agent with scoped session state. Verifier checks coverage and citation accuracy; revision loops back to planner (max 4 rounds).</a:t>
             </a:r>
             <a:endParaRPr lang="en-US" sz="1000" dirty="0"/>
           </a:p>

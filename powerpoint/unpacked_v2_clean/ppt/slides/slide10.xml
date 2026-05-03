@@ -208,7 +208,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>57 tools in 9 groups, registered with the harness. Each agent gets a curated subset via its allowed_tools whitelist.</a:t>
+              <a:t>57 tools in 9 groups, registered with the harness. Tools bound to LLMs via LangChain bind_tools(). Each agent gets a curated subset via its allowed_tools whitelist.</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -1172,7 +1172,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>Retrieval-Augmented Generation grounds answers in your actual documents with citations.</a:t>
+              <a:t>Retrieval-Augmented Generation grounds answers in your actual documents with citations. Built on LangChain Document abstractions.</a:t>
             </a:r>
           </a:p>
         </p:txBody>

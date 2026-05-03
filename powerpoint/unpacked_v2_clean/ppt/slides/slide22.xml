@@ -1178,7 +1178,7 @@
                 <a:ea typeface="Arial" pitchFamily="34" charset="-122"/>
                 <a:cs typeface="Arial" pitchFamily="34" charset="-120"/>
               </a:rPr>
-              <a:t>RAG worker doesn't use ReAct. It has its own pipeline guaranteeing structured, citable output. New: evidence_only mode returns raw evidence without synthesis.</a:t>
+              <a:t>RAG mode bypasses LangGraph ReAct — uses its own pipeline with LangChain Document objects for retrieval and grading. Guarantees structured, citable output.</a:t>
             </a:r>
             <a:endParaRPr lang="en-US" sz="1000" dirty="0"/>
           </a:p>

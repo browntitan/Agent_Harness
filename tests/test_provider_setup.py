@@ -151,7 +151,7 @@ def test_build_chat_model_omits_ollama_num_predict_when_no_cap_is_configured(mon
 
     settings = SimpleNamespace(
         ollama_base_url="http://localhost:11434",
-        ollama_chat_model="nemotron-cascade-2:30b",
+        ollama_chat_model="gpt-oss:20b",
         ollama_temperature=0.2,
     )
 

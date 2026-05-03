@@ -408,31 +408,31 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>graph/ module with 10 files</a:t>
+              <a:t>create_react_agent() prebuilt graph</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>graph_manager agent</a:t>
+              <a:t>PolicyAwareToolNode extends ToolNode</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>8 dedicated tools</a:t>
+              <a:t>Think&#x2192;Act&#x2192;Observe loop orchestration</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Phased corpus indexing</a:t>
+              <a:t>Message state management across steps</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Community report recovery</a:t>
+              <a:t>Recursion &amp; step limiting</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Structured search + planning</a:t>
+              <a:t>Tool call routing &amp; parallel waves</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Prompt tuning per graph</a:t>
+              <a:t>general_agent.py + tool_parallelism.py</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -588,7 +588,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>Model Context Protocol</a:t>
+              <a:t>Message &amp; LLM Abstractions</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -666,31 +666,31 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>mcp/ service + client modules</a:t>
+              <a:t>AIMessage, HumanMessage, ToolMessage</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Dynamic tool registration</a:t>
+              <a:t>RuntimeMessage.to_langchain() bridge</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>8 API endpoints for connections</a:t>
+              <a:t>ChatOpenAI / AzureChatOpenAI providers</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Security-scoped tool access</a:t>
+              <a:t>ChatOllama for local inference</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Connection test + refresh</a:t>
+              <a:t>bind_tools() for function calling</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Per-tool enable/disable</a:t>
+              <a:t>RunnableConfig for execution context</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>External server integration</a:t>
+              <a:t>providers/llm_factory.py + contracts/</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -812,7 +812,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>WORKER SYSTEM</a:t>
+              <a:t>LANGCHAIN ECOSYSTEM</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -846,7 +846,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>Multi-Agent Coordination</a:t>
+              <a:t>RAG, Embeddings &amp; Observability</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -924,31 +924,31 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>14 orchestration tools</a:t>
+              <a:t>Document class for RAG pipeline</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>spawn_worker / message_worker</a:t>
+              <a:t>OpenAI/Azure/Ollama embeddings</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Team mailbox channels</a:t>
+              <a:t>langchain-neo4j for graph queries</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Parent question/approval flow</a:t>
+              <a:t>Text splitters for chunking</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Worker request/response cycle</a:t>
+              <a:t>Langfuse callback integration</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Job listing and control</a:t>
+              <a:t>BaseCallbackHandler for tracing</a:t>
             </a:r>
             <a:br/>
             <a:r>
-              <a:t>Cross-agent artifact handoff</a:t>
+              <a:t>rag/ + observability/callbacks.py</a:t>
             </a:r>
           </a:p>
         </p:txBody>

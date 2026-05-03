@@ -2,7 +2,7 @@
 set -eu
 
 OLLAMA_HOST="${OLLAMA_HOST:-http://ollama:11434}"
-OLLAMA_BOOTSTRAP_MODELS="${OLLAMA_BOOTSTRAP_MODELS:-nemotron-cascade-2:30b,nomic-embed-text:latest}"
+OLLAMA_BOOTSTRAP_MODELS="${OLLAMA_BOOTSTRAP_MODELS:-gpt-oss:20b,rjmalagon/mxbai-rerank-large-v2:1.5b-fp16,nomic-embed-text:latest}"
 OLLAMA_BOOTSTRAP_TIMEOUT_SECONDS="${OLLAMA_BOOTSTRAP_TIMEOUT_SECONDS:-300}"
 export OLLAMA_HOST
 

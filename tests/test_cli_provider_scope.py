@@ -135,8 +135,8 @@ def _doctor_settings():
         tiktoken_enabled=False,
         tiktoken_cache_dir=None,
         ollama_base_url="http://ollama:11434",
-        ollama_chat_model="nemotron-cascade-2:30b",
-        ollama_judge_model="nemotron-cascade-2:30b",
+        ollama_chat_model="gpt-oss:20b",
+        ollama_judge_model="gpt-oss:20b",
         ollama_embed_model="nomic-embed-text:latest",
         sandbox_docker_image="agentic-chatbot-sandbox:py312",
     )
@@ -153,7 +153,7 @@ def test_doctor_fails_when_selected_ollama_model_is_missing(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "nemotron-cascade-2:30b"}]},
+            payload={"models": [{"name": "gpt-oss:20b"}]},
         ),
     )
 
@@ -174,7 +174,7 @@ def test_doctor_passes_when_selected_ollama_models_exist(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
 
@@ -200,7 +200,7 @@ def test_doctor_fails_when_sandbox_image_is_not_ready(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
 
@@ -214,7 +214,7 @@ def test_doctor_fails_when_sandbox_image_is_not_ready(monkeypatch):
 def test_benchmark_ollama_throughput_uses_default_model_from_settings(tmp_path: Path, monkeypatch):
     settings = SimpleNamespace(
         ollama_base_url="http://localhost:11434",
-        ollama_chat_model="nemotron-cascade-2:30b",
+        ollama_chat_model="gpt-oss:20b",
     )
     captured: dict[str, object] = {}
 
@@ -222,7 +222,7 @@ def test_benchmark_ollama_throughput_uses_default_model_from_settings(tmp_path: 
 
     class _FakeReport:
         def to_dict(self):
-            return {"models": [{"model": "nemotron-cascade-2:30b"}]}
+            return {"models": [{"model": "gpt-oss:20b"}]}
 
     def fake_run_ollama_throughput_benchmark(**kwargs):
         captured.update(kwargs)
@@ -234,9 +234,9 @@ def test_benchmark_ollama_throughput_uses_default_model_from_settings(tmp_path: 
     result = runner.invoke(cli.app, ["benchmark-ollama-throughput", "--output", str(output_path)])
 
     assert result.exit_code == 0
-    assert captured["models"] == ["nemotron-cascade-2:30b"]
+    assert captured["models"] == ["gpt-oss:20b"]
     assert captured["base_url"] == "http://localhost:11434"
-    assert json.loads(output_path.read_text(encoding="utf-8")) == {"models": [{"model": "nemotron-cascade-2:30b"}]}
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {"models": [{"model": "gpt-oss:20b"}]}
 
 
 def test_build_sandbox_image_command_reports_success(monkeypatch):
@@ -268,7 +268,7 @@ def test_doctor_passes_when_selected_ollama_models_use_latest_alias(monkeypatch)
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text"}]},
+            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text"}]},
         ),
     )
 
@@ -353,7 +353,7 @@ def test_doctor_fails_when_skill_chunks_dimension_is_misaligned(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
     monkeypatch.setitem(
@@ -388,7 +388,7 @@ def test_doctor_warns_when_configured_kb_sources_are_not_indexed(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
     monkeypatch.setitem(

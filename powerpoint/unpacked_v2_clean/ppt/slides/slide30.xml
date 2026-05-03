@@ -520,7 +520,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>Chat + judge + embeddings. Dims: 768 (Nomic) / 1536 (Ada-002). Timeouts: 120s HTTP, 20s connect.</a:t>
+              <a:t>LangChain ChatOpenAI / AzureChatOpenAI / ChatOllama + embeddings. Dims: 768 (Nomic) / 1536 (Ada-002). Timeouts: 120s HTTP, 20s connect.</a:t>
             </a:r>
           </a:p>
         </p:txBody>

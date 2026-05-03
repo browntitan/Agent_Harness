@@ -329,6 +329,9 @@ class Settings:
     context_compact_recent_messages: int  # env: CONTEXT_COMPACT_RECENT_MESSAGES (default: 12)
     context_restore_recent_files: int  # env: CONTEXT_RESTORE_RECENT_FILES (default: 10)
     context_restore_recent_skills: int  # env: CONTEXT_RESTORE_RECENT_SKILLS (default: 6)
+    context_smart_compaction_enabled: bool  # env: CONTEXT_SMART_COMPACTION_ENABLED (default: True)
+    context_smart_compaction_llm_enabled: bool  # env: CONTEXT_SMART_COMPACTION_LLM_ENABLED (default: True)
+    context_smart_compaction_target_tokens: int  # env: CONTEXT_SMART_COMPACTION_TARGET_TOKENS (default: 4000)
     agent_definitions_json: str         # env: AGENT_DEFINITIONS_JSON (deprecated / ignored by live runtime)
 
     # --- Control panel ---
@@ -562,6 +565,11 @@ def runtime_settings_diagnostics(settings: Settings) -> dict[str, object]:
         "context_autocompact_threshold": float(
             getattr(settings, "context_autocompact_threshold", 0.0) or 0.0
         ),
+        "context_smart_compaction_enabled": bool(getattr(settings, "context_smart_compaction_enabled", True)),
+        "context_smart_compaction_llm_enabled": bool(getattr(settings, "context_smart_compaction_llm_enabled", True)),
+        "context_smart_compaction_target_tokens": int(
+            getattr(settings, "context_smart_compaction_target_tokens", 0) or 0
+        ),
         "docling_enabled": bool(getattr(settings, "docling_enabled", False)),
         "ocr_enabled": bool(getattr(settings, "ocr_enabled", False)),
         "retrieval_decomposition_enabled": bool(
@@ -651,7 +659,7 @@ def load_settings(
 
     # Ollama
     ollama_base_url = str(_getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
-    ollama_chat_model = str(_getenv("OLLAMA_CHAT_MODEL", "nemotron-cascade-2:30b"))
+    ollama_chat_model = str(_getenv("OLLAMA_CHAT_MODEL", "gpt-oss:20b"))
     ollama_embed_model = str(_getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text:latest"))
     ollama_judge_model = str(_getenv("OLLAMA_JUDGE_MODEL", ollama_chat_model))
     ollama_temperature = _as_float("OLLAMA_TEMPERATURE", 0.2)
@@ -1078,6 +1086,9 @@ def load_settings(
     context_compact_recent_messages = max(2, _as_int("CONTEXT_COMPACT_RECENT_MESSAGES", 12))
     context_restore_recent_files = max(0, _as_int("CONTEXT_RESTORE_RECENT_FILES", 10))
     context_restore_recent_skills = max(0, _as_int("CONTEXT_RESTORE_RECENT_SKILLS", 6))
+    context_smart_compaction_enabled = _as_bool("CONTEXT_SMART_COMPACTION_ENABLED", True)
+    context_smart_compaction_llm_enabled = _as_bool("CONTEXT_SMART_COMPACTION_LLM_ENABLED", True)
+    context_smart_compaction_target_tokens = max(512, _as_int("CONTEXT_SMART_COMPACTION_TARGET_TOKENS", 4000))
     agent_definitions_json = str(_getenv("AGENT_DEFINITIONS_JSON", ""))
 
     # Control panel
@@ -1427,6 +1438,9 @@ def load_settings(
         context_compact_recent_messages=context_compact_recent_messages,
         context_restore_recent_files=context_restore_recent_files,
         context_restore_recent_skills=context_restore_recent_skills,
+        context_smart_compaction_enabled=context_smart_compaction_enabled,
+        context_smart_compaction_llm_enabled=context_smart_compaction_llm_enabled,
+        context_smart_compaction_target_tokens=context_smart_compaction_target_tokens,
         agent_definitions_json=agent_definitions_json,
         control_panel_enabled=control_panel_enabled,
         control_panel_admin_token=control_panel_admin_token,

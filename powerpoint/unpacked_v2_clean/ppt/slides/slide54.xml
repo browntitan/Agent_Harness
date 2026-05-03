@@ -1144,7 +1144,7 @@
                 <a:ea typeface="Arial" pitchFamily="34" charset="-122"/>
                 <a:cs typeface="Arial" pitchFamily="34" charset="-120"/>
               </a:rPr>
-              <a:t>Reflection rounds (up to 4) refine queries adaptively. Graph entities seed follow-up retrieval. Evidence assembled with deduplication and cross-source linking.</a:t>
+              <a:t>rag_researcher runs a LangGraph ReAct agent with 17 tools. Reflection rounds (up to 4) refine queries. Graph entities via langchain-neo4j seed follow-up retrieval.</a:t>
             </a:r>
             <a:endParaRPr lang="en-US" sz="1000" dirty="0"/>
           </a:p>

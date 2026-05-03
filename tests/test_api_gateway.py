@@ -509,8 +509,8 @@ def _make_settings(tmp_path: Path):
         team_mailbox_max_channels_per_session=8,
         team_mailbox_max_open_messages_per_channel=50,
         team_mailbox_claim_limit=8,
-        agent_chat_model_overrides={"general": "nemotron-cascade-2:30b"},
-        agent_judge_model_overrides={"general": "nemotron-cascade-2:30b"},
+        agent_chat_model_overrides={"general": "gpt-oss:20b"},
+        agent_judge_model_overrides={"general": "gpt-oss:20b"},
     )
 
 

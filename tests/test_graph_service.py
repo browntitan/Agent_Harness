@@ -362,10 +362,10 @@ def _make_settings(tmp_path: Path):
         graphrag_llm_provider="openai",
         graphrag_base_url="http://localhost:11434/v1",
         graphrag_api_key="ollama",
-        graphrag_chat_model="nemotron-cascade-2:30b",
-        graphrag_index_chat_model="nemotron-cascade-2:30b",
+        graphrag_chat_model="gpt-oss:20b",
+        graphrag_index_chat_model="gpt-oss:20b",
         graphrag_community_report_mode="text",
-        graphrag_community_report_chat_model="nemotron-cascade-2:30b",
+        graphrag_community_report_chat_model="gpt-oss:20b",
         graphrag_embed_model="nomic-embed-text:latest",
         graphrag_concurrency=1,
         graphrag_request_timeout_seconds=7200,
@@ -537,9 +537,9 @@ def test_graph_service_renders_local_ollama_graphrag_settings(tmp_path: Path):
     payload = yaml.safe_load(Path(settings_path).read_text(encoding="utf-8"))
 
     assert payload["concurrent_requests"] == 1
-    assert payload["completion_models"]["default_completion_model"]["model"] == "nemotron-cascade-2:30b"
-    assert payload["completion_models"]["index_completion_model"]["model"] == "nemotron-cascade-2:30b"
-    assert payload["completion_models"]["community_report_completion_model"]["model"] == "nemotron-cascade-2:30b"
+    assert payload["completion_models"]["default_completion_model"]["model"] == "gpt-oss:20b"
+    assert payload["completion_models"]["index_completion_model"]["model"] == "gpt-oss:20b"
+    assert payload["completion_models"]["community_report_completion_model"]["model"] == "gpt-oss:20b"
     assert payload["completion_models"]["default_completion_model"]["call_args"]["temperature"] == 0
     assert payload["completion_models"]["index_completion_model"]["call_args"]["timeout"] == 900
     assert payload["completion_models"]["community_report_completion_model"]["call_args"]["timeout"] == 300
@@ -1505,8 +1505,8 @@ def test_graph_service_validate_admin_graph_includes_extract_graph_preflight(
             200,
                 json={
                     "data": [
-                        {"id": "nemotron-cascade-2:30b"},
-                        {"id": "nemotron-cascade-2:30b"},
+                        {"id": "gpt-oss:20b"},
+                        {"id": "gpt-oss:20b"},
                         {"id": "nomic-embed-text:latest"},
                     ]
                 },
@@ -1514,7 +1514,7 @@ def test_graph_service_validate_admin_graph_includes_extract_graph_preflight(
 
     def _fake_post(url: str, **kwargs):
         assert url.endswith("/chat/completions")
-        assert kwargs["json"]["model"] == "nemotron-cascade-2:30b"
+        assert kwargs["json"]["model"] == "gpt-oss:20b"
         return httpx.Response(
             200,
             json={
@@ -1537,7 +1537,7 @@ def test_graph_service_validate_admin_graph_includes_extract_graph_preflight(
     assert payload["profile"]["vector_size"] == 768
     assert payload["profile"]["chunk_size"] == 800
     assert payload["profile"]["chunk_overlap"] == 80
-    assert payload["profile"]["index_chat_model"] == "nemotron-cascade-2:30b"
+    assert payload["profile"]["index_chat_model"] == "gpt-oss:20b"
     assert payload["profile"]["index_timeout_seconds"] == 900
     assert payload["extraction_preflight"]["status"] == "ready"
     assert payload["extraction_preflight"]["ok"] is True
@@ -1598,7 +1598,7 @@ def test_graph_service_validate_admin_graph_accepts_complete_only_preflight_as_w
         assert url.endswith("/models")
         return httpx.Response(
             200,
-            json={"data": [{"id": "nemotron-cascade-2:30b"}, {"id": "nemotron-cascade-2:30b"}, {"id": "nomic-embed-text:latest"}]},
+            json={"data": [{"id": "gpt-oss:20b"}, {"id": "gpt-oss:20b"}, {"id": "nomic-embed-text:latest"}]},
         )
 
     def _fake_post(url: str, **kwargs):
@@ -1618,7 +1618,7 @@ def test_graph_service_validate_admin_graph_accepts_complete_only_preflight_as_w
     assert payload["extraction_preflight"]["ok"] is True
     assert payload["extraction_preflight"]["status"] == "warning"
     assert payload["profile"]["community_report_mode"] == "text"
-    assert payload["profile"]["community_report_chat_model"] == "nemotron-cascade-2:30b"
+    assert payload["profile"]["community_report_chat_model"] == "gpt-oss:20b"
     assert payload["profile"]["community_report_timeout_seconds"] == 300
 
 

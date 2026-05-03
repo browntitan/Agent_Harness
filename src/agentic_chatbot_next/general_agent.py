@@ -23,6 +23,7 @@ from agentic_chatbot_next.runtime.tool_parallelism import (
     count_current_turn_tool_messages,
 )
 from agentic_chatbot_next.runtime.context_budget import build_microcompact_hook
+from agentic_chatbot_next.runtime.context_compaction import ContextCompactionService
 from agentic_chatbot_next.utils.json_utils import extract_json
 
 logger = logging.getLogger(__name__)
@@ -1156,6 +1157,40 @@ def _apply_final_evidence_verifier(
     return _unsupported_claims_rejection_text(unsupported), ["unsupported_causal_claims_rejected"]
 
 
+def _compact_tool_results_for_synthesis(
+    *,
+    user_text: str,
+    tool_results: List[Dict[str, Any]],
+    chat_llm: Any | None = None,
+    context_budget_manager: Any | None = None,
+) -> tuple[str, Dict[str, Any]]:
+    settings = getattr(context_budget_manager, "settings", None)
+    estimator = getattr(context_budget_manager, "estimate_text", None)
+    target_tokens = max(
+        512,
+        int(
+            getattr(settings, "context_smart_compaction_target_tokens", None)
+            or getattr(getattr(context_budget_manager, "config", None), "smart_compaction_target_tokens", None)
+            or 4000
+        ),
+    )
+    smart_enabled = bool(getattr(settings, "context_smart_compaction_enabled", True))
+    llm_enabled = bool(getattr(settings, "context_smart_compaction_llm_enabled", False))
+    if not smart_enabled:
+        return json.dumps(tool_results, ensure_ascii=False), {}
+    compactor = ContextCompactionService(
+        settings,
+        estimate_tokens=estimator if callable(estimator) else None,
+    )
+    return compactor.compact_tool_results_for_prompt(
+        query=user_text,
+        tool_results=tool_results,
+        target_tokens=target_tokens,
+        llm=chat_llm,
+        enable_llm=llm_enabled,
+    )
+
+
 def _synthesize_tool_results(
     chat_llm: Any,
     *,
@@ -1164,7 +1199,8 @@ def _synthesize_tool_results(
     callbacks: List[Any],
     system_prompt: str,
     recovery_reason: str,
-) -> str:
+    context_budget_manager: Any | None = None,
+) -> tuple[str, Dict[str, Any]]:
     synth_system = (
         "You are recovering a final answer after a tool-using agent run.\n"
         "Use the tool results to answer the user's request clearly, with enough detail to satisfy the request.\n"
@@ -1175,12 +1211,18 @@ def _synthesize_tool_results(
     )
     if system_prompt.strip():
         synth_system += "\n\nRole Instructions:\n" + system_prompt.strip()
-    synth_user = f"USER_REQUEST: {user_text}\n\nTOOL_RESULTS: {json.dumps(tool_results, ensure_ascii=False)}"
+    compacted_tool_results, compaction_metadata = _compact_tool_results_for_synthesis(
+        user_text=user_text,
+        tool_results=tool_results,
+        chat_llm=chat_llm,
+        context_budget_manager=context_budget_manager,
+    )
+    synth_user = f"USER_REQUEST: {user_text}\n\nTOOL_RESULTS: {compacted_tool_results}"
     response = chat_llm.invoke(
         [SystemMessage(content=synth_system), HumanMessage(content=synth_user)],
         config={"callbacks": callbacks},
     )
-    return _response_text(response)
+    return _response_text(response), compaction_metadata
 
 
 def _finalize_messages(
@@ -1190,8 +1232,10 @@ def _finalize_messages(
     user_text: str,
     callbacks: List[Any],
     system_prompt: str,
-) -> tuple[str, List[str]]:
+    context_budget_manager: Any | None = None,
+) -> tuple[str, List[str], Dict[str, Any]]:
     recovery: List[str] = []
+    compaction_metadata: Dict[str, Any] = {}
     final_message = None
     final_text = ""
     for message in reversed(messages):
@@ -1202,7 +1246,7 @@ def _finalize_messages(
         if final_text:
             break
     if final_text and final_message is not None and not _is_output_truncated(final_message):
-        return final_text, recovery
+        return final_text, recovery, compaction_metadata
     if final_message is not None and _is_output_truncated(final_message):
         recovery.append("output_truncated")
     else:
@@ -1210,32 +1254,38 @@ def _finalize_messages(
     rag_text = _render_rag_tool_fallback(messages)
     if rag_text:
         recovery.append("render_rag_tool_fallback")
-        return rag_text, recovery
+        return rag_text, recovery, compaction_metadata
     tool_results = _collect_tool_results(messages)
     analyst_text = _render_data_analyst_tool_results(tool_results)
     if analyst_text:
         recovery.append("render_data_analyst_tool_fallback")
-        return analyst_text, recovery
+        return analyst_text, recovery, compaction_metadata
     requirements_text = _render_requirements_tool_results(tool_results)
     if requirements_text:
         recovery.append("render_requirements_tool_fallback")
-        return requirements_text, recovery
+        return requirements_text, recovery, compaction_metadata
     if tool_results:
         recovery.append("tool_result_synthesis")
-        synthesized = _synthesize_tool_results(
+        synthesized, compaction_metadata = _synthesize_tool_results(
             chat_llm,
             user_text=user_text,
             tool_results=tool_results,
             callbacks=callbacks,
             system_prompt=system_prompt,
             recovery_reason=",".join(recovery),
-        ).strip()
+            context_budget_manager=context_budget_manager,
+        )
+        synthesized = synthesized.strip()
         if synthesized:
-            return synthesized, recovery
+            return synthesized, recovery, compaction_metadata
     if final_text:
         recovery.append("truncated_output_notice")
-        return f"{final_text}\n\nNote: the previous response may have been truncated.".strip(), recovery
-    return "I couldn't produce a complete final answer from the tool run. Please try again with a narrower request.", recovery
+        return f"{final_text}\n\nNote: the previous response may have been truncated.".strip(), recovery, compaction_metadata
+    return (
+        "I couldn't produce a complete final answer from the tool run. Please try again with a narrower request.",
+        recovery,
+        compaction_metadata,
+    )
 
 
 def _invoke_tool_with_trace(
@@ -2128,12 +2178,13 @@ def run_general_agent(
 
     tool_calls_used = count_current_turn_tool_messages(updated_messages)
     steps = count_current_turn_ai_messages(updated_messages)
-    final_text, recovery = _finalize_messages(
+    final_text, recovery, compaction_metadata = _finalize_messages(
         chat_llm,
         messages=updated_messages,
         user_text=user_text,
         callbacks=callbacks,
         system_prompt=effective_prompt,
+        context_budget_manager=context_budget_manager,
     )
     if (
         graph_grounded_request
@@ -2177,6 +2228,7 @@ def run_general_agent(
                     "steps": steps,
                     "tool_calls": tool_calls_used,
                     "recovery": ["graph_catalog_used_rag_tool", *verifier_recovery, *recovery],
+                    "context_compaction": compaction_metadata,
                 },
                 graph_grounded_request=graph_grounded_request,
                 user_text=user_text,
@@ -2203,6 +2255,7 @@ def run_general_agent(
                     "steps": steps,
                     "tool_calls": recovered_tool_calls,
                     "recovery": [*recovered_recovery, *verifier_recovery, *recovery],
+                    "context_compaction": compaction_metadata,
                 },
                 graph_grounded_request=graph_grounded_request,
                 user_text=user_text,
@@ -2215,6 +2268,7 @@ def run_general_agent(
                 "steps": steps,
                 "tool_calls": recovered_tool_calls,
                 "recovery": ["graph_catalog_only", *recovered_recovery, *recovery],
+                "context_compaction": compaction_metadata,
             },
             graph_grounded_request=graph_grounded_request,
             user_text=user_text,
@@ -2233,7 +2287,12 @@ def run_general_agent(
     if recovery:
         updated_messages = list(updated_messages) + [AIMessage(content=final_text)]
     return str(final_text), updated_messages, _with_graph_execution_metadata(
-        {"steps": steps, "tool_calls": tool_calls_used, "recovery": recovery},
+        {
+            "steps": steps,
+            "tool_calls": tool_calls_used,
+            "recovery": recovery,
+            "context_compaction": compaction_metadata,
+        },
         graph_grounded_request=graph_grounded_request,
         user_text=user_text,
         tool_results=collected_tool_results,
@@ -2578,7 +2637,13 @@ def _run_plan_execute_fallback(
         "Do not invent Cypher queries, schema labels, relationship names, or how-to query syntax unless the user explicitly requested query syntax.\n"
         "Do not dump raw JSON; write a user-facing response."
     )
-    synth_user = f"USER_REQUEST: {user_text}\n\nTOOL_RESULTS: {tool_results}"
+    compacted_tool_results, compaction_metadata = _compact_tool_results_for_synthesis(
+        user_text=user_text,
+        tool_results=tool_results,
+        chat_llm=chat_llm,
+        context_budget_manager=context_budget_manager,
+    )
+    synth_user = f"USER_REQUEST: {user_text}\n\nTOOL_RESULTS: {compacted_tool_results}"
     synth_response = chat_llm.invoke(
         [SystemMessage(content=synth_system), HumanMessage(content=synth_user)],
         config={"callbacks": callbacks},
@@ -2587,28 +2652,35 @@ def _run_plan_execute_fallback(
     recovery: List[str] = []
     if _is_output_truncated(synth_response):
         recovery.append("output_truncated")
-        repaired = _synthesize_tool_results(
+        repaired, repair_compaction_metadata = _synthesize_tool_results(
             chat_llm,
             user_text=user_text,
             tool_results=tool_results,
             callbacks=callbacks,
             system_prompt=system_prompt,
             recovery_reason="output_truncated",
-        ).strip()
+            context_budget_manager=context_budget_manager,
+        )
+        if repair_compaction_metadata:
+            compaction_metadata = repair_compaction_metadata
+        repaired = repaired.strip()
         if repaired:
             final_text = repaired
             recovery.append("tool_result_synthesis")
     if not str(final_text).strip():
         recovery.append("no_final_answer")
-        fallback_text, fallback_recovery = _finalize_messages(
+        fallback_text, fallback_recovery, fallback_compaction_metadata = _finalize_messages(
             chat_llm,
             messages=messages,
             user_text=user_text,
             callbacks=callbacks,
             system_prompt=system_prompt,
+            context_budget_manager=context_budget_manager,
         )
         final_text = fallback_text
         recovery.extend(fallback_recovery)
+        if fallback_compaction_metadata:
+            compaction_metadata = fallback_compaction_metadata
     final_text = _append_missing_graph_citations(str(final_text), tool_results)
     final_text, verifier_recovery = _apply_final_evidence_verifier(
         final_text,
@@ -2618,7 +2690,12 @@ def _run_plan_execute_fallback(
     recovery.extend(verifier_recovery)
     messages.append(AIMessage(content=str(final_text)))
     return str(final_text), messages, _with_graph_execution_metadata(
-        {"fallback": "plan_execute", "tool_calls": tool_calls, "recovery": recovery},
+        {
+            "fallback": "plan_execute",
+            "tool_calls": tool_calls,
+            "recovery": recovery,
+            "context_compaction": compaction_metadata,
+        },
         graph_grounded_request=graph_grounded_request,
         user_text=user_text,
         tool_results=tool_results,

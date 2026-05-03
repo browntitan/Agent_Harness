@@ -26,8 +26,8 @@ x-app-env: &app-env
   JUDGE_PROVIDER: ${JUDGE_PROVIDER:-ollama}
   PG_DSN: postgresql://${RAG_DB_USER:-raguser}:${RAG_DB_PASSWORD:-ragpass}@rag-postgres:5432/${RAG_DB_NAME:-ragdb}
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-  OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-nemotron-cascade-2:30b}
-  OLLAMA_JUDGE_MODEL: ${OLLAMA_JUDGE_MODEL:-nemotron-cascade-2:30b}
+  OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-gpt-oss:20b}
+  OLLAMA_JUDGE_MODEL: ${OLLAMA_JUDGE_MODEL:-gpt-oss:20b}
   OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text:latest}
   RERANK_ENABLED: ${RERANK_ENABLED:-true}
   RERANK_PROVIDER: ${RERANK_PROVIDER:-ollama}
@@ -59,10 +59,10 @@ x-app-env: &app-env
   GRAPHRAG_LLM_PROVIDER: ${GRAPHRAG_LLM_PROVIDER:-openai}
   GRAPHRAG_BASE_URL: ${GRAPHRAG_BASE_URL:-http://host.docker.internal:11434/v1}
   GRAPHRAG_API_KEY: ${GRAPHRAG_API_KEY:-ollama}
-  GRAPHRAG_CHAT_MODEL: ${GRAPHRAG_CHAT_MODEL:-nemotron-cascade-2:30b}
-  GRAPHRAG_INDEX_CHAT_MODEL: ${GRAPHRAG_INDEX_CHAT_MODEL:-nemotron-cascade-2:30b}
+  GRAPHRAG_CHAT_MODEL: ${GRAPHRAG_CHAT_MODEL:-gpt-oss:20b}
+  GRAPHRAG_INDEX_CHAT_MODEL: ${GRAPHRAG_INDEX_CHAT_MODEL:-gpt-oss:20b}
   GRAPHRAG_COMMUNITY_REPORT_MODE: ${GRAPHRAG_COMMUNITY_REPORT_MODE:-text}
-  GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL: ${GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL:-nemotron-cascade-2:30b}
+  GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL: ${GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL:-gpt-oss:20b}
   GRAPHRAG_EMBED_MODEL: ${GRAPHRAG_EMBED_MODEL:-nomic-embed-text:latest}
   GRAPHRAG_CONCURRENCY: ${GRAPHRAG_CONCURRENCY:-1}
   GRAPHRAG_REQUEST_TIMEOUT_SECONDS: ${GRAPHRAG_REQUEST_TIMEOUT_SECONDS:-240}
@@ -171,7 +171,7 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_BOOTSTRAP_MODELS: ${OLLAMA_BOOTSTRAP_MODELS:-nemotron-cascade-2:30b,rjmalagon/mxbai-rerank-large-v2:1.5b-fp16,nomic-embed-text:latest}
+      OLLAMA_BOOTSTRAP_MODELS: ${OLLAMA_BOOTSTRAP_MODELS:-gpt-oss:20b,rjmalagon/mxbai-rerank-large-v2:1.5b-fp16,nomic-embed-text:latest}
     entrypoint: >
       /bin/sh -c "
       set -eu;

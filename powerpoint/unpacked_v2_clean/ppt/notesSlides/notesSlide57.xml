@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Slide Image Placeholder 1"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldImg"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="3" name="Notes Placeholder 2"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="body" idx="1"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US" dirty="0"/>
+              <a:t>This slide breaks down how LangChain and LangGraph are woven into the system. We use 8 LangChain packages declared in requirements.txt: langchain, langchain-core, langchain-community, langchain-openai, langchain-ollama, langchain-text-splitters, langchain-neo4j, and langgraph. Together they touch 72 Python files across the codebase, but the usage pattern is deliberate -- we use LangChain where it adds value and build custom where it does not. Starting with the left column -- LangGraph. This is the most architecturally significant integration because LangGraph IS our ReAct execution engine. In general_agent.py at line 2033, build_react_agent_graph() calls langgraph.prebuilt.create_react_agent() to construct a StateGraph that orchestrates the think-act-observe loop. Every agent request that enters _run_react() in QueryLoop ends up executing through this LangGraph graph. The graph manages message state across steps, routes between the LLM and tool execution nodes, and enforces recursion limits. The key extension point is PolicyAwareToolNode in runtime/tool_parallelism.py, which extends LangGraph's built-in ToolNode class. Our extension adds three capabilities the built-in node lacks: configurable max_parallel_tool_calls that batches tool execution into waves rather than running all tools at once, context budget enforcement that prevents tools from consuming too many tokens, and observability events emitted per-wave for the progress tracker. When run_general_agent() calls graph.invoke(), it passes LangChain callbacks for Langfuse tracing and a recursion_limit from the agent's max_steps config. The middle column covers LangChain Core -- the message and provider abstractions. Every message flowing through the system uses LangChain's message types: AIMessage for model outputs, HumanMessage for user inputs, ToolMessage for tool results, and SystemMessage for prompts. Our internal RuntimeMessage class in contracts/messages.py has a to_langchain() method that bridges our persistence format to LangChain's format -- this is called in query_loop.py before every LLM invocation. For LLM providers, llm_factory.py wraps three LangChain chat model classes: ChatOpenAI for OpenAI API, AzureChatOpenAI for Azure deployments, and ChatOllama for local inference via Ollama. All three use LangChain's bind_tools() method to attach tool schemas for function calling. RunnableConfig from langchain_core.runnables carries execution context like callbacks and executor configuration through the graph. The right column covers the LangChain ecosystem packages. The RAG pipeline uses LangChain's Document class as the universal document abstraction -- every document loader, parser adapter, and retriever returns List[Document]. For embeddings, we support OllamaEmbeddings and AzureOpenAIEmbeddings from their respective LangChain packages. langchain-neo4j provides Neo4jGraph for our GraphRAG integration, wrapping raw Neo4j driver calls in a cleaner API. For text splitting, we use RecursiveCharacterTextSplitter as a fallback in the clause splitter when clause-aware splitting produces oversized chunks. For observability, our callbacks.py creates Langfuse callback handlers that implement LangChain's BaseCallbackHandler interface, enabling automatic tracing of every LLM call, tool execution, and graph step. The architectural takeaway is that LangGraph handles WHERE execution happens -- the loop structure, state management, and tool routing -- while LangChain handles WHAT gets executed -- the LLM calls, message formats, and document abstractions. Our custom code handles WHY -- the routing decisions, session management, agent selection, and business logic that sit above both frameworks.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="4" name="Slide Number Placeholder 3"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldNum" sz="quarter" idx="10"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:fld id="{F7021451-1387-4CA6-816F-3879F97B5CBC}" type="slidenum">
+              <a:rPr lang="en-US"/>
+              <a:t>22</a:t>
+            </a:fld>
+            <a:endParaRPr lang="en-US"/>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

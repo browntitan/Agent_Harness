@@ -58,3 +58,21 @@ replace(
   '//',
   '/'
 )
+
+replace(
+  concat(
+    items('For_each_source_library')?['blobPrefix'],
+    '/',
+    replace(
+      coalesce(
+        items('For_each_file')?['{Path}'],
+        items('For_each_file')?['{FullPath}'],
+        items('For_each_file')?['FileRef']
+      ),
+      concat('/sites/NG00003148/', items('For_each_source_library')?['libraryDisplayName'], '/'),
+      ''
+    )
+  ),
+  '//',
+  '/'
+)

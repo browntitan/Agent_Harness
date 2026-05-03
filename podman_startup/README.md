@@ -184,7 +184,7 @@ The startup order is:
 The default models pulled into Ollama are:
 
 ```text
-nemotron-cascade-2:30b
+gpt-oss:20b
 nomic-embed-text:latest
 ```
 

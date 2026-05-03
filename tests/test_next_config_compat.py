@@ -59,9 +59,9 @@ def test_deprecated_use_paddle_ocr_still_controls_ocr(monkeypatch, tmp_path):
 
 def test_agent_model_override_envs_are_parsed_and_normalized(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("AGENT_GENERAL_CHAT_MODEL", "nemotron-cascade-2:30b")
-    monkeypatch.setenv("AGENT_DATA_ANALYST_CHAT_MODEL", "nemotron-cascade-2:30b")
-    monkeypatch.setenv("AGENT_MEMORY_MAINTAINER_JUDGE_MODEL", "nemotron-cascade-2:30b")
+    monkeypatch.setenv("AGENT_GENERAL_CHAT_MODEL", "gpt-oss:20b")
+    monkeypatch.setenv("AGENT_DATA_ANALYST_CHAT_MODEL", "gpt-oss:20b")
+    monkeypatch.setenv("AGENT_MEMORY_MAINTAINER_JUDGE_MODEL", "gpt-oss:20b")
 
     settings = load_settings(
         env_overrides={
@@ -72,9 +72,9 @@ def test_agent_model_override_envs_are_parsed_and_normalized(monkeypatch, tmp_pa
         }
     )
 
-    assert settings.agent_chat_model_overrides["general"] == "nemotron-cascade-2:30b"
-    assert settings.agent_chat_model_overrides["data_analyst"] == "nemotron-cascade-2:30b"
-    assert settings.agent_judge_model_overrides["memory_maintainer"] == "nemotron-cascade-2:30b"
+    assert settings.agent_chat_model_overrides["general"] == "gpt-oss:20b"
+    assert settings.agent_chat_model_overrides["data_analyst"] == "gpt-oss:20b"
+    assert settings.agent_judge_model_overrides["memory_maintainer"] == "gpt-oss:20b"
 
 
 def test_output_token_envs_are_optional_and_agent_scoped(monkeypatch, tmp_path):

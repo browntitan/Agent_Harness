@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from agentic_chatbot_next.contracts.messages import RuntimeMessage, utc_now_iso
 from agentic_chatbot_next.observability.events import RuntimeEvent
+from agentic_chatbot_next.runtime.context_compaction import ContextCompactionService
 from agentic_chatbot_next.utils.json_utils import extract_json, make_json_compatible
 
 
@@ -100,6 +101,9 @@ class ContextBudgetConfig:
     compact_recent_messages: int = 12
     restore_recent_files: int = 10
     restore_recent_skills: int = 6
+    smart_compaction_enabled: bool = True
+    smart_compaction_llm_enabled: bool = True
+    smart_compaction_target_tokens: int = 4000
 
     @classmethod
     def from_settings(cls, settings: Any | None) -> "ContextBudgetConfig":
@@ -134,6 +138,12 @@ class ContextBudgetConfig:
             restore_recent_skills=max(
                 0,
                 _safe_int(getattr(settings, "context_restore_recent_skills", None), 6),
+            ),
+            smart_compaction_enabled=bool(getattr(settings, "context_smart_compaction_enabled", True)),
+            smart_compaction_llm_enabled=bool(getattr(settings, "context_smart_compaction_llm_enabled", True)),
+            smart_compaction_target_tokens=max(
+                512,
+                _safe_int(getattr(settings, "context_smart_compaction_target_tokens", None), 4000),
             ),
         )
 
@@ -732,6 +742,20 @@ class ContextBudgetManager:
         original = str(content or "")
         original_tokens = self.estimate_text(original)
         parsed = extract_json(original)
+        if self.config.smart_compaction_enabled and self._should_smart_compact(tool_name, parsed):
+            compactor = ContextCompactionService(self.settings, estimate_tokens=self.estimate_text)
+            compacted = compactor.compact_tool_content(
+                query="",
+                tool_name=tool_name,
+                content=original,
+                target_tokens=min(limit, self.config.smart_compaction_target_tokens),
+                full_result_ref=full_result_ref,
+                enable_llm=False,
+            )
+            return json.dumps(
+                compacted.to_budgeted_payload(budget_tokens=limit, microcompact=microcompact),
+                ensure_ascii=False,
+            )
         preview = self._tool_preview(original, parsed, max_chars=max(160, limit * 3))
         payload: dict[str, Any] = {
             "object": "budgeted_tool_result",
@@ -751,6 +775,18 @@ class ContextBudgetManager:
         if key_fields:
             payload["key_fields"] = key_fields
         return json.dumps(make_json_compatible(payload), ensure_ascii=False)
+
+    def _should_smart_compact(self, tool_name: str, parsed: Any) -> bool:
+        name = str(tool_name or "")
+        if name in {"search_graph_index", "rag_agent_tool"}:
+            return True
+        if isinstance(parsed, list):
+            return True
+        if not isinstance(parsed, dict):
+            return False
+        if any(key in parsed for key in ("answer", "citations", "results", "rows", "records", "data", "evidence")):
+            return True
+        return False
 
     def _new_ledger(self) -> ContextLedger:
         return ContextLedger(

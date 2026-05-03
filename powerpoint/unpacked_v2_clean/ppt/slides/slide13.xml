@@ -684,7 +684,7 @@
                 <a:ea typeface="Arial" pitchFamily="34" charset="-122"/>
                 <a:cs typeface="Arial" pitchFamily="34" charset="-120"/>
               </a:rPr>
-              <a:t>Mode dispatcher. Runs LLM calls in the correct mode.</a:t>
+              <a:t>Mode dispatcher. ReAct mode powered by LangGraph. Runs LLM calls in the correct mode.</a:t>
             </a:r>
             <a:endParaRPr lang="en-US" sz="1000" dirty="0"/>
           </a:p>
