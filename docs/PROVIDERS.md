@@ -32,11 +32,14 @@ Used by:
   - `general`
   - `utility`
   - `data_analyst`
+  - `graph_manager`
+  - `rag_researcher`
 - the bounded `DataAnalystNlpRunner` used by `run_nlp_column_task`
 - `run_rag_contract()` for the `rag_worker` path and upload-summary kickoff
 - planner worker model calls
 - finalizer worker model calls
 - verifier worker model calls
+- `research_coordinator` indirectly through its planner, finalizer, verifier, and worker calls
 
 The dedicated `memory_maintainer` mode does not currently use chat or judge providers. It
 runs local heuristic extraction.
@@ -58,6 +61,24 @@ Used by:
 
 - KB ingest and retrieval
 - skill-pack indexing and retrieval
+
+### Reranking
+
+Reranking is a retrieval-adjacent provider surface, currently defaulting to the Ollama adapter
+rather than the chat/judge/embedding roles.
+
+Defaults:
+
+- `RERANK_ENABLED=true`
+- `RERANK_PROVIDER=ollama`
+- `RERANK_MODEL=rjmalagon/mxbai-rerank-large-v2:1.5b-fp16`
+- `RERANK_TOP_N=12`
+- `RERANK_TIMEOUT_SECONDS=30`
+- `RERANK_FALLBACK_TO_HEURISTICS=true`
+
+The reranker is used for graph candidate ordering and RAG chunk/candidate ordering. If the
+reranker fails, the runtime falls back to deterministic heuristic order when fallback is
+enabled.
 
 ## Optional graph backend
 
@@ -383,7 +404,19 @@ The provider layer now feeds the live next runtime directly. Important nearby se
 - `MEMORY_CONTEXT_TOKEN_BUDGET`
 - `ROUTER_PATTERNS_PATH`
 - `ENABLE_COORDINATOR_MODE`
+- `MAX_REVISION_ROUNDS`
 - `RUNTIME_EVENTS_ENABLED`
+- `FRONTEND_EVENTS_ENABLED`
+- `FRONTEND_EVENTS_SHOW_STATUS`
+- `FRONTEND_EVENTS_SHOW_AGENTS`
+- `FRONTEND_EVENTS_SHOW_TOOLS`
+- `FRONTEND_EVENTS_SHOW_PARALLEL_GROUPS`
+- `FRONTEND_EVENTS_SHOW_GUIDANCE`
+- `FRONTEND_EVENTS_SHOW_SKILLS`
+- `FRONTEND_EVENTS_SHOW_CONTEXT`
+- `FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT`
+- `FRONTEND_EVENTS_DETAIL_LEVEL`
+- `FRONTEND_EVENTS_PREVIEW_CHARS`
 - `MAX_PARALLEL_TOOL_CALLS`
 - `DEFERRED_TOOL_DISCOVERY_ENABLED`
 - `DEFERRED_TOOL_DISCOVERY_TOP_K`
@@ -405,6 +438,21 @@ The provider layer now feeds the live next runtime directly. Important nearby se
 - `WORKER_SCHEDULER_TENANT_BUDGET_TOKENS_PER_MINUTE`
 - `WORKER_SCHEDULER_TENANT_BUDGET_BURST_TOKENS`
 - `CONTEXT_BUDGET_ENABLED`
+- `CONTEXT_WINDOW_TOKENS`
+- `CONTEXT_TARGET_RATIO`
+- `CONTEXT_AUTOCOMPACT_THRESHOLD`
+- `CONTEXT_TOOL_RESULT_MAX_TOKENS`
+- `CONTEXT_TOOL_RESULTS_TOTAL_TOKENS`
+- `CONTEXT_MICROCOMPACT_TARGET_TOKENS`
+- `CONTEXT_COMPACT_RECENT_MESSAGES`
+- `CONTEXT_RESTORE_RECENT_FILES`
+- `CONTEXT_RESTORE_RECENT_SKILLS`
+- `RERANK_ENABLED`
+- `RERANK_PROVIDER`
+- `RERANK_MODEL`
+- `RERANK_TOP_N`
+- `RERANK_TIMEOUT_SECONDS`
+- `RERANK_FALLBACK_TO_HEURISTICS`
 - `LLM_CIRCUIT_BREAKER_ENABLED`
 - `LLM_CIRCUIT_BREAKER_WINDOW_SIZE`
 - `LLM_CIRCUIT_BREAKER_MIN_SAMPLES`
@@ -416,7 +464,6 @@ The provider layer now feeds the live next runtime directly. Important nearby se
 
 - `hybrid`: deterministic/config-driven routing first, then LLM escalation below the confidence threshold
 - `llm_only`: LLM router is primary for normal text turns, with deterministic fast paths still preserved for attachments and `force_agent`, plus deterministic fallback on LLM failure
-- `MAX_REVISION_ROUNDS`
 - `DATA_ANALYST_NLP_CHAT_MODEL`
 - `DATA_ANALYST_NLP_BATCH_SIZE`
 - `DATA_ANALYST_NLP_TEMPERATURE`
@@ -425,6 +472,21 @@ Most of those settings do not change provider construction, but they do affect
 how the runtime uses the configured models. The main exception is
 `DATA_ANALYST_NLP_CHAT_MODEL`, which can trigger a dedicated bounded-NLP chat
 override bundle for `run_nlp_column_task`.
+
+`MAX_REVISION_ROUNDS` defaults to `8` in `load_settings()` and `.env.example`. Coordinator
+execution then applies lower effective caps by workflow type, such as small inventory or
+digest runs, so the configured value is an upper bound rather than a promise of eight
+revision loops every time.
+
+Context budgeting is off by default with `CONTEXT_BUDGET_ENABLED=false`; when enabled, the
+current defaults are a `32768` token window, `0.72` target ratio, `0.85` autocompact
+threshold, `2000` per-tool-result tokens, `8000` total tool-result tokens, `2400`
+microcompact target tokens, `12` recent messages retained, `10` recent files restored, and
+`6` recent skills restored.
+
+Frontend transparency events are on by default and use `FRONTEND_EVENTS_DETAIL_LEVEL=safe_preview`
+with `FRONTEND_EVENTS_PREVIEW_CHARS=480`, while memory-context previews remain disabled unless
+`FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT=true`.
 
 `LLM_ROUTER_ENABLED=false` keeps the runtime on deterministic/config-driven routing only.
 When `LLM_ROUTER_ENABLED=true`, `LLM_ROUTER_MODE` selects between the `hybrid` and `llm_only`

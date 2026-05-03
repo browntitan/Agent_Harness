@@ -14,7 +14,8 @@ internal runtime contracts.
 - `GET /health/ready`
 - `GET /v1/admin/runtime/diagnostics`
 - `GET/POST/PATCH/PUT/DELETE /v1/admin/...` control-panel routes for overview, operations,
-  access, capabilities, architecture, config, agents, prompts, graphs, uploads, and collections
+  access, capabilities, architecture, config, agents, prompts, graphs, sources, uploads, and
+  collections
 - `GET /v1/models`
 - `GET /v1/agents`
 - `POST /v1/chat/completions`
@@ -114,6 +115,8 @@ the only trusted retrieval and citation source.
 - `metadata.openwebui_thin_mode`
 - `metadata.document_source_policy` with `agent_repository_only`
 - `metadata.uploaded_doc_ids` using internal repository document ids
+- `metadata.deep_rag`
+- `metadata.requested_agent`
 - top-level `userEmail`
 
 ## Per-user authorization
@@ -211,7 +214,9 @@ If `CONNECTOR_SECRET_API_KEY` is unset, it falls back to
 `POST /v1/chat/completions` also accepts an optional `metadata.requested_agent` field.
 
 Use it when you explicitly want to start the AGENT path in a particular routable role for
-operator control, notebook walkthroughs, or acceptance coverage.
+operator control, notebook walkthroughs, or acceptance coverage. One manual non-routable role,
+`rag_researcher`, is also accepted because its agent definition sets
+`manual_override_allowed=true`.
 
 Current behavior:
 
@@ -219,14 +224,17 @@ Current behavior:
 - `force_agent=true` still only forces the AGENT route; it does not choose the initial agent
 - when `metadata.requested_agent` is present and valid, the runtime uses it instead of the
   normal router-policy-selected starting agent
+- `research_coordinator` is the routable broad-research start for deep indexed-corpus work
+- `rag_researcher` is manual/delegated only; it is valid here but not selected by normal routing
 - the trace metadata keeps both `requested_agent_override` and
   `requested_agent_override_applied`
 
 Validation rules:
 
-- values are validated against the current routable non-`basic` registry surface
-- current common values are `general`, `rag_worker`, `data_analyst`, `coordinator`, and
-  `graph_manager`
+- values are validated against the current routable non-`basic` registry surface plus
+  non-routable roles that explicitly allow manual override
+- current common values are `general`, `rag_worker`, `data_analyst`, `coordinator`,
+  `research_coordinator`, `graph_manager`, and `rag_researcher`
 - `memory_maintainer` is filtered out when `MEMORY_ENABLED=false`
 - invalid values return `400` with the allowed value list
 
@@ -320,6 +328,8 @@ The live streaming path now creates a `LiveProgressSink` and feeds it from:
 - kernel/runtime lifecycle events
 - LangChain tool callbacks
 - adaptive RAG controller phase updates
+- safe frontend context/transparency events from `runtime/frontend_events.py`, including
+  `agent_context_loaded` translated to `context_trace`
 
 The gateway keeps the SSE event name as `progress` and expands the JSON payload shape.
 Common fields now include:
@@ -352,9 +362,15 @@ Current progress event families include:
 - `handoff_prepared`, `handoff_consumed`
 - `summary`
 - `tool_call`, `tool_result`, `tool_error`
+- `context_trace`
 
 Router-derived progress and persisted route metadata may also include
 `requested_agent_override` and `requested_agent_override_applied`.
+
+Context/transparency payloads are gated by the `FRONTEND_EVENTS_*` settings. The default
+detail level is `safe_preview`, which sends clipped previews and metadata rather than raw
+prompt or chain-of-thought content. The OpenWebUI pipe may surface these as
+`agentic_audit_item` metadata.
 
 In Open WebUI or another compatible client, that stream can power an inline reasoning/task
 summary panel rather than a separate sidecar debugger view.

@@ -15,7 +15,7 @@ markdown-defined `AgentDefinition(mode="react")` that stays on the guided
 | Prompt file | `data/skills/data_analyst_agent.md` |
 | Runtime mode | `react` |
 | Execution strategy | `plan_execute` |
-| Tools | `20` declared in `data/agents/data_analyst.md` |
+| Tools | `21` declared in `data/agents/data_analyst.md` |
 | Sandbox | Docker container with bind-mounted workspace at `/workspace` |
 | Primary file source | indexed KB documents plus persistent session workspace |
 | NLP path | bounded provider-backed column task |
@@ -26,30 +26,32 @@ markdown-defined `AgentDefinition(mode="react")` that stays on the guided
 The live data analyst runtime agent receives:
 
 1. `load_dataset`
-2. `inspect_columns`
-3. `execute_code`
-4. `run_nlp_column_task`
-5. `return_file`
-6. `calculator`
-7. `scratchpad_write`
-8. `scratchpad_read`
-9. `scratchpad_list`
-10. `workspace_write`
-11. `workspace_read`
-12. `workspace_list`
-13. `search_skills`
-14. `request_parent_question`
-15. `request_parent_approval`
-16. `invoke_agent`
-17. `post_team_message`
-18. `list_team_messages`
-19. `claim_team_messages`
-20. `respond_team_message`
+2. `profile_dataset`
+3. `inspect_columns`
+4. `execute_code`
+5. `run_nlp_column_task`
+6. `return_file`
+7. `calculator`
+8. `scratchpad_write`
+9. `scratchpad_read`
+10. `scratchpad_list`
+11. `workspace_write`
+12. `workspace_read`
+13. `workspace_list`
+14. `search_skills`
+15. `request_parent_question`
+16. `request_parent_approval`
+17. `invoke_agent`
+18. `post_team_message`
+19. `list_team_messages`
+20. `claim_team_messages`
+21. `respond_team_message`
 
 ## Public interfaces
 
 ```text
 load_dataset(doc_id="", sheet_name="")
+profile_dataset(doc_id="", sheet_name="", sample_rows=5)
 inspect_columns(doc_id="", columns="", sheet_name="")
 execute_code(code, doc_ids="")
 run_nlp_column_task(doc_id="", sheet_name="", column="", task="", classification_rules="", allowed_labels_csv="", batch_size=5, output_mode="", target_filename="", label_column="", score_column="")
@@ -73,6 +75,10 @@ respond_team_message(channel_id="", message_id="", response="", decision="", res
   loads CSV, `.xls`, or `.xlsx` files from the KB or the session workspace.
   For Excel inputs it returns the selected `sheet_name` and the workbook
   `sheet_names`.
+- `profile_dataset(doc_id="", sheet_name="", sample_rows=5)`
+  profiles CSV or Excel inputs, including all workbook sheets when no sheet is specified.
+  It returns sheet names, shapes, columns, sample rows, source refs, warnings, and
+  `operations: ["profile_dataset"]`.
 - `inspect_columns(doc_id="", columns="", sheet_name="")`
   returns per-column statistics and `_meta` with `doc_id`, `sheet_name`, and
   `sheet_names`.
@@ -104,12 +110,14 @@ The current runtime reaches this agent in two ways:
 
 - directly, when the router suggests `data_analyst`
 - indirectly, when `coordinator` delegates a tabular-analysis task
+- indirectly, when the RAG bridge creates a tabular evidence task for spreadsheet or CSV
+  evidence and invokes `data_analyst` as a bounded worker
 
 ## Operating workflow
 
 The live prompt and tool surface steer the analyst into a plan-first workflow:
 
-1. inspect the dataset first
+1. profile the dataset first with `profile_dataset`
 2. decide whether the task is sandbox code, bounded NLP, or both
 3. write derived outputs into the session workspace
 4. verify the result
@@ -118,6 +126,18 @@ The live prompt and tool surface steer the analyst into a plan-first workflow:
 
 That behavior comes from the prompt plus `execution_strategy: plan_execute` in
 the agent metadata, not from a custom graph wrapper.
+
+## RAG tabular evidence handoff
+
+The RAG controller can ask the runtime bridge for tabular evidence when retrieved evidence
+points at a CSV or spreadsheet and the question asks for lookup, profiling, filtering,
+aggregation, comparison, or similar row/column reasoning.
+
+That handoff is still a worker job in the same session, not a new public endpoint. The
+worker prompt requires `profile_dataset` first, then permits `inspect_columns` or
+`execute_code` only if needed. The worker must return structured JSON with `summary`,
+`findings`, `source_refs`, `operations`, `warnings`, and `confidence`; the RAG path converts
+that result into citation-eligible tabular evidence for final synthesis.
 
 ## Workspace and file model
 
@@ -233,6 +253,7 @@ analyst role still keeps tabular work isolated through:
 
 - a narrower tool surface
 - a persistent workspace
+- a dataset-profile step that works across all workbook sheets
 - explicit code-execution boundaries
 - a bounded NLP helper for row-level text tasks
 - explicit file publication through `return_file`

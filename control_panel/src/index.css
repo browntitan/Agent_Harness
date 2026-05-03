@@ -976,6 +976,34 @@ button.stage-chip {
   max-width: 64ch;
 }
 
+.assignment-panel {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+}
+
+.assignment-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.assignment-panel-head p {
+  margin-top: 4px;
+  color: var(--mist-soft);
+  max-width: 64ch;
+}
+
+.skill-assignment-list {
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .inline-action-pair {
   display: flex;
   flex-wrap: wrap;
@@ -1094,7 +1122,9 @@ button.stage-chip {
 }
 
 .summary-row strong {
+  min-width: 0;
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .inline-alert {
@@ -2020,6 +2050,14 @@ button.stage-chip {
 
 .skill-editor-pane textarea {
   min-height: clamp(420px, 54vh, 760px);
+}
+
+.skill-editor-pane .skill-builder-input textarea {
+  min-height: 120px;
+}
+
+.skill-editor-pane .skill-workflow-textarea {
+  min-height: clamp(260px, 34vh, 520px);
 }
 
 .skill-preview-pane .preview-card,

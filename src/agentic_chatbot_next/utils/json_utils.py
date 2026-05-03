@@ -87,6 +87,20 @@ def make_json_compatible(value: Any) -> Any:
         return str(value)
     if is_dataclass(value) and not isinstance(value, type):
         return make_json_compatible(asdict(value))
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return make_json_compatible(model_dump(mode="json"))
+        except TypeError:
+            return make_json_compatible(model_dump())
+        except Exception:
+            pass
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return make_json_compatible(to_dict())
+        except Exception:
+            pass
     if isinstance(value, Mapping):
         normalized: Dict[Any, Any] = {}
         for key, item in value.items():

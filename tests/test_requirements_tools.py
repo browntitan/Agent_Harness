@@ -13,11 +13,15 @@ from agentic_chatbot_next.rag.requirements import (
     REQUIREMENT_EXTRACTOR_VERSION,
     STRICT_SHALL_MODE,
 )
-from agentic_chatbot_next.rag.requirements_service import RequirementExtractionService, infer_requirement_mode
+from agentic_chatbot_next.rag.requirements_service import RequirementExtractionService, infer_all_documents, infer_requirement_mode
 from agentic_chatbot_next.runtime.context import RuntimePaths
 from agentic_chatbot_next.runtime.kernel import RuntimeKernel
 from agentic_chatbot_next.sandbox.workspace import SessionWorkspace
 from agentic_chatbot_next.tools.requirements import make_requirement_tools
+
+
+def test_infer_all_documents_allows_qualified_document_group() -> None:
+    assert infer_all_documents("Export all strict shall statements from the default KB legal and control documents as a CSV.")
 
 
 class FakeRequirementStore:

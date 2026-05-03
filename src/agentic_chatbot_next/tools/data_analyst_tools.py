@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
 
+from agentic_chatbot_next.authz import access_summary_allows, access_summary_authz_enabled
 from agentic_chatbot_next.config import Settings
 from agentic_chatbot_next.providers import ProviderBundle
 from agentic_chatbot_next.rag.stores import KnowledgeStores
@@ -81,6 +82,42 @@ def make_data_analyst_tools(
                 return key[len("dataset_") :]
         return ""
 
+    def _upload_manifests() -> List[Dict[str, Any]]:
+        metadata_raw = getattr(session, "metadata", {}) or {}
+        metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
+        manifests: List[Dict[str, Any]] = []
+        for key in ("last_upload_manifest", "upload_manifest"):
+            value = metadata.get(key)
+            if isinstance(value, dict):
+                manifests.append(dict(value))
+        return manifests
+
+    def _manifest_workspace_names() -> List[str]:
+        names: List[str] = []
+        for manifest in _upload_manifests():
+            for key in ("workspace_copies", "filenames"):
+                for value in list(manifest.get(key) or []):
+                    clean = Path(str(value or "")).name
+                    if clean and clean not in names:
+                        names.append(clean)
+        return names
+
+    def _resolve_manifest_workspace_path(dataset_ref: str) -> tuple[Path | None, str]:
+        workspace = getattr(session, "workspace", None)
+        if workspace is None:
+            return None, dataset_ref
+        requested = Path(str(dataset_ref or "")).name
+        requested_lower = requested.casefold()
+        for name in _manifest_workspace_names():
+            if requested and name.casefold() != requested_lower:
+                continue
+            try:
+                if workspace.exists(name):
+                    return workspace.root / name, name
+            except Exception:
+                continue
+        return None, dataset_ref
+
     def _slugify(value: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
         return re.sub(r"_+", "_", normalized).strip("_") or "analysis"
@@ -121,6 +158,18 @@ def make_data_analyst_tools(
     def _resolve_dataset_path(dataset_ref: str) -> tuple[Path | None, str]:
         doc = stores.doc_store.get_document(dataset_ref, tenant_id=session.tenant_id)
         if doc is not None:
+            metadata_raw = getattr(session, "metadata", {}) or {}
+            metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
+            access_summary = metadata.get("access_summary")
+            collection_id = str(getattr(doc, "collection_id", "") or "").strip()
+            if access_summary_authz_enabled(access_summary) and collection_id and not access_summary_allows(
+                access_summary,
+                "collection",
+                collection_id,
+                action="use",
+                implicit_resource_id=str(dict(access_summary or {}).get("session_upload_collection_id") or ""),
+            ):
+                raise PermissionError(f"Access denied for dataset collection '{collection_id}'.")
             source_path = getattr(doc, "source_path", None) or getattr(doc, "file_path", None)
             if not source_path:
                 source_uri = getattr(doc, "source_uri", "") or ""
@@ -130,6 +179,10 @@ def make_data_analyst_tools(
                 candidate = Path(str(source_path))
                 if candidate.exists():
                     return candidate, dataset_ref
+
+        manifest_path, manifest_ref = _resolve_manifest_workspace_path(dataset_ref)
+        if manifest_path is not None:
+            return manifest_path, manifest_ref
 
         workspace = getattr(session, "workspace", None)
         if workspace is not None:
@@ -368,6 +421,13 @@ def make_data_analyst_tools(
                 counts[label] = counts.get(label, 0) + 1
         return counts
 
+    def _fallback_nlp_row(task: str, item_id: str) -> Dict[str, Any]:
+        if task in {"sentiment", "categorize"}:
+            return {"item_id": item_id, "label": "unknown", "score": 0.0, "fallback": "missing_model_result"}
+        if task == "keywords":
+            return {"item_id": item_id, "keywords": [], "fallback": "missing_model_result"}
+        return {"item_id": item_id, "summary": "", "fallback": "missing_model_result"}
+
     def _normalize_nlp_task_name(task_name: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", "_", str(task_name or "sentiment").strip().lower()).strip("_")
         return _NLP_TASK_ALIASES.get(normalized, normalized)
@@ -530,6 +590,81 @@ def make_data_analyst_tools(
             return json.dumps({"status": "error", "error": str(exc), "warnings": [str(exc)], "confidence": 0.0})
 
     @tool
+    def profile_workbook_status(doc_id: str = "", sheet_name: str = "") -> str:
+        """Profile workbook sheets, headers, named tables, and status-oriented columns."""
+        try:
+            from agentic_chatbot_next.rag.status_workbooks import profile_workbook
+
+            loaded = _load_dataset_handle(doc_id, sheet_name=sheet_name)
+            if loaded.ext not in {".xlsx", ".xls"}:
+                return json.dumps({"status": "error", "error": "Status workbook profiling supports .xlsx and .xls files."})
+            profile = profile_workbook(loaded.path).to_dict()
+            if str(sheet_name or "").strip():
+                profile["sheets"] = [
+                    sheet
+                    for sheet in list(profile.get("sheets") or [])
+                    if str(sheet.get("sheet_name") or "") == str(sheet_name or "").strip()
+                ]
+            profile.update(
+                {
+                    "status": "ok",
+                    "doc_id": loaded.resolved_ref,
+                    "operations": ["profile_workbook_status"],
+                    "warnings": list(profile.get("warnings") or []),
+                    "confidence": 0.9,
+                }
+            )
+            return json.dumps(profile, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning("profile_workbook_status failed for doc_id=%s: %s", doc_id, exc)
+            return json.dumps({"status": "error", "error": str(exc), "warnings": [str(exc)], "confidence": 0.0})
+
+    @tool
+    def extract_workbook_status(
+        doc_id: str = "",
+        domains_csv: str = "",
+        sheet_name: str = "",
+        status_filter: str = "",
+    ) -> str:
+        """Extract cited status records from workbook risks, issues, actions, schedules, budgets, CDRLs, requirements, tests, and milestones."""
+        try:
+            from agentic_chatbot_next.rag.status_workbooks import extract_status_records
+
+            loaded = _load_dataset_handle(doc_id, sheet_name=sheet_name)
+            if loaded.ext not in {".xlsx", ".xls"}:
+                return json.dumps({"status": "error", "error": "Status workbook extraction supports .xlsx and .xls files."})
+            domains = [part.strip() for part in str(domains_csv or "").split(",") if part.strip()]
+            records = extract_status_records(
+                loaded.path,
+                domains=domains,
+                sheet_name=sheet_name,
+                status_filter=status_filter,
+                doc_id=loaded.resolved_ref,
+                title=loaded.path.name,
+                source_path=str(loaded.path),
+                max_records=100,
+            )
+            source_refs = [record.source_ref.to_dict() for record in records]
+            warnings = ["HUMAN_REVIEW_REQUIRED_BEFORE_EXTERNAL_SHARING"]
+            payload = {
+                "status": "ok",
+                "doc_id": loaded.resolved_ref,
+                "title": loaded.path.name,
+                "domains": domains,
+                "record_count": len(records),
+                "records": [record.to_dict() for record in records],
+                "findings": [{"summary": record.summary, **record.to_dict()} for record in records[:20]],
+                "source_refs": source_refs[:50],
+                "operations": ["profile_workbook_status", "extract_workbook_status"],
+                "warnings": warnings,
+                "confidence": max((float(record.confidence or 0.0) for record in records), default=0.0),
+            }
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning("extract_workbook_status failed for doc_id=%s: %s", doc_id, exc)
+            return json.dumps({"status": "error", "error": str(exc), "warnings": [str(exc)], "confidence": 0.0})
+
+    @tool
     def inspect_columns(doc_id: str = "", columns: str = "", sheet_name: str = "") -> str:
         """Get detailed statistics for specific columns in a loaded dataset."""
         try:
@@ -647,7 +782,19 @@ def make_data_analyst_tools(
                 }
             )
         except SandboxUnavailableError as exc:
-            return json.dumps({"error": f"Docker sandbox is not available: {exc}", "success": False, "stdout": "", "stderr": ""})
+            return json.dumps(
+                {
+                    "error": f"Docker sandbox is not available: {exc}",
+                    "success": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "capability_status": {
+                        "analyst_sandbox_ready": False,
+                        "prerequisite": "docker_sandbox",
+                    },
+                    "warnings": ["ANALYST_SANDBOX_UNAVAILABLE"],
+                }
+            )
         except Exception as exc:
             logger.warning("execute_code unexpected error: %s", exc)
             return json.dumps({"error": str(exc), "success": False, "stdout": "", "stderr": ""})
@@ -721,10 +868,14 @@ def make_data_analyst_tools(
                 items=non_empty_items,
                 batch_size=effective_batch_size,
             )
-            if not nlp_result.rows:
-                return json.dumps({"error": "NLP task did not produce any successful rows.", "failed_batches": nlp_result.failed_batches})
 
             dedup_rows = {row["item_id"]: row for row in nlp_result.rows}
+            fallback_unique_rows = 0
+            for item in non_empty_items:
+                item_id = str(item.get("item_id") or "")
+                if item_id and item_id not in dedup_rows:
+                    dedup_rows[item_id] = _fallback_nlp_row(clean_task, item_id)
+                    fallback_unique_rows += 1
             expanded_rows: List[Dict[str, Any]] = []
             for item in non_empty_items:
                 result = dedup_rows.get(item["item_id"])
@@ -738,13 +889,30 @@ def make_data_analyst_tools(
                     }
                     expanded_rows.append(expanded)
 
-            summary_counts = _summarize_label_results(clean_task, nlp_result.rows)
+            summary_counts = _summarize_label_results(clean_task, expanded_rows)
             derived_columns, label_name, score_name = _default_nlp_output_columns(
                 clean_task,
                 label_column=label_column,
                 score_column=score_column,
             )
             written_file = ""
+            source_row_count = int(len(df))
+            accounted_rows = len(expanded_rows) + blank_rows
+            row_accounting_valid = accounted_rows == source_row_count
+            warnings: List[str] = []
+            unknown_unique_rows = fallback_unique_rows if clean_task in {"sentiment", "categorize"} else 0
+            incomplete_unique_rows = fallback_unique_rows if clean_task not in {"sentiment", "categorize"} else 0
+            if unknown_unique_rows:
+                warnings.append(f"Filled {unknown_unique_rows} unique text input(s) with unknown because model output was missing or invalid.")
+            if incomplete_unique_rows:
+                warnings.append(
+                    f"Model output was missing or invalid for {incomplete_unique_rows} unique text input(s); "
+                    f"{clean_task} outputs for those rows are incomplete."
+                )
+            if not row_accounting_valid:
+                warnings.append(
+                    f"Row accounting mismatch: processed_rows + blank_rows = {accounted_rows}, source_rows = {source_row_count}."
+                )
             payload: Dict[str, Any] = {
                 "task": clean_task,
                 "doc_id": loaded.resolved_ref,
@@ -752,14 +920,22 @@ def make_data_analyst_tools(
                 "column": column,
                 "output_mode": clean_output_mode,
                 "batch_size": effective_batch_size,
+                "source_row_count": source_row_count,
                 "blank_rows": blank_rows,
                 "unique_text_inputs": len(non_empty_items),
+                "fallback_unique_text_inputs": fallback_unique_rows,
+                "unknown_unique_text_inputs": unknown_unique_rows,
+                "incomplete_unique_text_inputs": incomplete_unique_rows,
                 "processed_rows": len(expanded_rows),
+                "accounted_rows": accounted_rows,
+                "row_accounting_valid": row_accounting_valid,
+                "partial_failure": bool(incomplete_unique_rows or nlp_result.failed_batches),
                 "failed_batches": nlp_result.failed_batches,
                 "model_name": nlp_result.model_name,
                 "result_counts": summary_counts,
                 "derived_columns": list(derived_columns),
                 "preview_columns": ["row_index", column, *derived_columns],
+                "warnings": warnings,
             }
 
             if clean_output_mode == "append_columns":
@@ -781,9 +957,16 @@ def make_data_analyst_tools(
                     task_slug=_slugify(clean_task),
                 )
                 session.scratchpad["last_output_file"] = written_file
+                output_row_count = int(len(df))
+                if output_row_count != source_row_count:
+                    warnings.append(
+                        f"Output row count mismatch: wrote {output_row_count} row(s), expected {source_row_count}."
+                    )
                 payload.update(
                     {
                         "written_file": written_file,
+                        "artifact_row_count": output_row_count,
+                        "artifact_row_count_valid": output_row_count == source_row_count,
                         "label_column": label_name,
                         "score_column": score_name,
                         "next_action": f"Call return_file with filename='{written_file}' to publish the file to the user.",
@@ -894,6 +1077,8 @@ def make_data_analyst_tools(
     tools: List[Any] = [
         load_dataset,
         profile_dataset,
+        profile_workbook_status,
+        extract_workbook_status,
         inspect_columns,
         execute_code,
         run_nlp_column_task,

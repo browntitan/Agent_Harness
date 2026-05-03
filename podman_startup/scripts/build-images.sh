@@ -34,6 +34,10 @@ BUILD_ARGS=(
   --build-arg "NO_PROXY=$BUILD_NO_PROXY"
 )
 
+if [[ "${PODMAN_BUILD_NO_CACHE:-}" == "1" || "${PODMAN_BUILD_NO_CACHE:-}" == "true" ]]; then
+  BUILD_ARGS+=(--no-cache)
+fi
+
 ensure_onnx_runtime_tarball() {
   mkdir -p "$VENDOR_DIR"
 

@@ -39,6 +39,13 @@ The next runtime currently uses these agent modes:
 - `coordinator`
 - `memory_maintainer`
 
+Two current role distinctions matter:
+
+- `research_coordinator` uses the existing `coordinator` mode but is the preferred manager for
+  deep corpus research and long-running document campaigns
+- `rag_researcher` uses `react` mode for exploratory RAG research and is manual/delegated
+  rather than routable
+
 ## Execution ownership
 
 The runtime splits execution responsibilities across three layers:
@@ -93,9 +100,12 @@ Long-form writing nuance:
 - utility tools
 - memory tools when `MEMORY_ENABLED=true`
 - RAG gateway
-- graph gateway inspection/search tools
+- graph gateway inventory tools
 - `search_skills`
 - orchestration tools for delegation and job control
+- may delegate to `coordinator`, `rag_worker`, `data_analyst`, `utility`,
+  `graph_manager`, or `memory_maintainer`; deep corpus research normally routes to
+  `research_coordinator` before `general` needs to choose that path itself
 
 ### `coordinator`
 
@@ -105,6 +115,16 @@ Long-form writing nuance:
 - owner of durable document-research campaigns
 - may launch delegated specialists including `graph_manager`
 - bounded finalizer/verifier revision rounds controlled by `MAX_REVISION_ROUNDS`
+
+### `research_coordinator`
+
+- manager role for long-running deep research over indexed corpora
+- uses the same kernel-owned coordinator mode as `coordinator`
+- selected by router/deep-RAG policy for repository-scale, corpus-wide, or multi-hop document
+  research
+- can launch `planner`, `rag_worker`, `rag_researcher`, `general`, `graph_manager`,
+  `finalizer`, and `verifier`
+- has no analyst sandbox or terminal/code-execution tools by default
 
 ### `utility`
 
@@ -117,7 +137,7 @@ Long-form writing nuance:
 
 ### `data_analyst`
 
-- dataset loading
+- dataset loading and multi-sheet profiling through `profile_dataset`
 - column inspection
 - bounded LLM-backed column NLP
 - Docker sandbox execution through the prebuilt offline analyst image
@@ -137,6 +157,16 @@ Long-form writing nuance:
 - does not own durable worker spawning
 - may enqueue one bounded async peer follow-up to `data_analyst`, `utility`, or `general`
   when the direct RAG path decides a specialist continuation is more useful than answering now
+
+### `rag_researcher`
+
+- ReAct-style RAG research specialist for exploratory source selection before final synthesis
+- not a normal router start; available through manual `metadata.requested_agent` override or
+  coordinator delegation
+- uses indexed-doc tools, deferred `rag_workbench` tools, graph source-planning/search tools,
+  `search_skills`, and final `rag_agent_tool` synthesis
+- plans query facets, inspects chunks/sections/structure, grades and prunes evidence, validates
+  the evidence plan, then packages `controller_hints_json` for the final RAG contract call
 
 ### `graph_manager`
 
@@ -220,8 +250,11 @@ machinery, but the jobs return evidence payloads instead of user-facing synthesi
 
 For large corpus-mining requests, the intended split is:
 
-- `coordinator` owns the user-visible campaign
+- `research_coordinator` owns the broad user-visible research campaign when router/deep-RAG
+  policy identifies corpus-scale work
+- `coordinator` remains the generic manager for delegated multi-step work
 - `planner` decomposes the campaign into `rag_worker` tasks plus skill/hint seeds
+- `rag_researcher` can handle exploratory source selection and evidence-plan preparation
 - `rag_worker` performs bounded retrieval work
 - `finalizer` and `verifier` handle merged synthesis and overclaim checks
 

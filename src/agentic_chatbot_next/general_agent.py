@@ -36,6 +36,11 @@ _GRAPH_EVIDENCE_RE = re.compile(
     r"|\b(?:vendors?|suppliers?|risks?|approvals?|dependencies|program\s+outcomes?)\b.*\b(?:relationships?|connected|graph)\b",
     re.IGNORECASE,
 )
+_GRAPH_METADATA_INTENT_RE = re.compile(
+    r"\b(?:relationships?|entities|entity|multi[-\s]?hop|connected|dependencies|network|evidence|"
+    r"vendors?|suppliers?|risks?|approvals?|causes?|causal|outcomes?|source[-\s]?resolve|cross[-\s]?document)\b",
+    re.IGNORECASE,
+)
 _CAUSAL_SENTENCE_RE = re.compile(
     r"\b("
     r"because(?:\s+of)?|caused\s+by|due\s+to|driven\s+by|drove|drives|"
@@ -120,6 +125,14 @@ class DataAnalystTargetCandidate:
     column: str
     exact_column: bool
     filename_score: int
+
+
+@dataclass(frozen=True)
+class GraphIdResolution:
+    graph_id: str = ""
+    status: str = "missing"
+    source: str = ""
+    candidates: Tuple[str, ...] = ()
 
 
 def _content_text(message: Any) -> str:
@@ -438,31 +451,132 @@ def _extract_named_graph_id_from_text(text: str) -> str:
     return ""
 
 
-def _is_grounded_graph_request(user_text: str, tool_map: Dict[str, Any]) -> bool:
-    if "search_graph_index" not in tool_map:
-        return False
-    inventory_type = classify_inventory_query(user_text)
-    if inventory_type in {INVENTORY_QUERY_GRAPH_INDEXES, INVENTORY_QUERY_GRAPH_FILE} and not inventory_query_requests_grounded_analysis(
-        user_text,
-        query_type=inventory_type,
-    ):
-        return False
-    return bool(_GRAPH_EVIDENCE_RE.search(str(user_text or "")))
+def _graph_ids_from_context(tool_context: Any | None) -> List[str]:
+    values: List[str] = []
+
+    def _collect_from_mapping(raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        route_context = raw.get("route_context") if isinstance(raw.get("route_context"), dict) else {}
+        for source in (raw, route_context):
+            for key in (
+                "graph_id",
+                "active_graph_id",
+                "selected_graph_id",
+                "active_graph_ids",
+                "selected_graph_ids",
+                "graph_ids",
+                "planned_graph_ids",
+            ):
+                value = source.get(key)
+                if isinstance(value, str):
+                    clean = value.strip()
+                    if clean:
+                        values.append(clean)
+                elif isinstance(value, list):
+                    values.extend(str(item).strip() for item in value if str(item).strip())
+
+    _collect_from_mapping(dict(getattr(tool_context, "metadata", {}) or {}) if tool_context is not None else {})
+    session = getattr(tool_context, "session", None) if tool_context is not None else None
+    _collect_from_mapping(dict(getattr(session, "metadata", {}) or {}) if session is not None else {})
+    return list(dict.fromkeys(item for item in values if item))
 
 
-def _payload_from_tool_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    payload = _tool_result_payload(result)
-    if payload:
-        return payload
-    output = str(result.get("output") or "")
-    parsed = extract_json(output)
-    return parsed if isinstance(parsed, dict) else {}
+def _graph_context_sources(tool_context: Any | None) -> List[Dict[str, Any]]:
+    sources: List[Dict[str, Any]] = []
+
+    def _append(raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        sources.append(raw)
+        route_context = raw.get("route_context") if isinstance(raw.get("route_context"), dict) else {}
+        if route_context:
+            sources.append(route_context)
+
+    _append(dict(getattr(tool_context, "metadata", {}) or {}) if tool_context is not None else {})
+    session = getattr(tool_context, "session", None) if tool_context is not None else None
+    _append(dict(getattr(session, "metadata", {}) or {}) if session is not None else {})
+    return sources
 
 
-def _graph_id_from_tool_results(user_text: str, tool_results: List[Dict[str, Any]]) -> str:
+def _graph_values_for_key(sources: List[Dict[str, Any]], key: str) -> List[str]:
+    values: List[str] = []
+    for source in sources:
+        value = source.get(key)
+        if isinstance(value, str):
+            clean = value.strip()
+            if clean:
+                values.append(clean)
+        elif isinstance(value, list):
+            values.extend(str(item).strip() for item in value if str(item).strip())
+    return list(dict.fromkeys(values))
+
+
+def _context_graph_id_resolution(tool_context: Any | None) -> GraphIdResolution:
+    sources = _graph_context_sources(tool_context)
+    all_candidates = tuple(_graph_ids_from_context(tool_context))
+    selected_graph_ids = _graph_values_for_key(sources, "selected_graph_id")
+    if selected_graph_ids:
+        return GraphIdResolution(
+            graph_id=selected_graph_ids[0],
+            status="resolved:selected_graph_id",
+            source="selected_graph_id",
+            candidates=all_candidates,
+        )
+
+    selected_values = _graph_values_for_key(sources, "selected_graph_ids")
+    if len(selected_values) == 1:
+        return GraphIdResolution(
+            graph_id=selected_values[0],
+            status="resolved:selected_graph_ids",
+            source="selected_graph_ids",
+            candidates=all_candidates,
+        )
+    if len(selected_values) > 1:
+        return GraphIdResolution(status="ambiguous:selected_graph_ids", source="selected_graph_ids", candidates=tuple(selected_values))
+
+    for key in ("graph_id", "active_graph_id"):
+        values = _graph_values_for_key(sources, key)
+        if values:
+            return GraphIdResolution(graph_id=values[0], status=f"resolved:{key}", source=key, candidates=all_candidates)
+
+    fallback_values = list(
+        dict.fromkeys(
+            _graph_values_for_key(sources, "active_graph_ids")
+            + _graph_values_for_key(sources, "planned_graph_ids")
+            + _graph_values_for_key(sources, "graph_ids")
+        )
+    )
+    if len(fallback_values) == 1:
+        return GraphIdResolution(
+            graph_id=fallback_values[0],
+            status="resolved:single_context_graph",
+            source="single_context_graph",
+            candidates=all_candidates,
+        )
+    if len(fallback_values) > 1:
+        return GraphIdResolution(status="ambiguous:context_graphs", source="context_graphs", candidates=tuple(fallback_values))
+    if all_candidates:
+        return GraphIdResolution(status="ambiguous:context_graphs", source="context_graphs", candidates=all_candidates)
+    return GraphIdResolution()
+
+
+def _context_graph_id(tool_context: Any | None) -> str:
+    return _context_graph_id_resolution(tool_context).graph_id
+
+
+def _graph_id_resolution_for_request(
+    user_text: str,
+    tool_results: List[Dict[str, Any]],
+    *,
+    tool_context: Any | None = None,
+) -> GraphIdResolution:
     requested = _extract_named_graph_id_from_text(user_text)
     if requested:
-        return requested
+        return GraphIdResolution(graph_id=requested, status="resolved:text_graph_id", source="text_graph_id", candidates=(requested,))
+    context_resolution = _context_graph_id_resolution(tool_context)
+    if context_resolution.graph_id:
+        return context_resolution
     graph_ids: List[str] = []
     for result in tool_results:
         payload = _payload_from_tool_result(result)
@@ -478,8 +592,49 @@ def _graph_id_from_tool_results(user_text: str, tool_results: List[Dict[str, Any
             graph_id = str(graph.get("graph_id") or "").strip()
             if graph_id:
                 graph_ids.append(graph_id)
-    unique = list(dict.fromkeys(graph_ids))
-    return unique[0] if len(unique) == 1 else ""
+    unique = tuple(dict.fromkeys(graph_ids))
+    if len(unique) == 1:
+        return GraphIdResolution(graph_id=unique[0], status="resolved:tool_result", source="tool_result", candidates=unique)
+    if len(unique) > 1:
+        return GraphIdResolution(status="ambiguous:tool_results", source="tool_results", candidates=unique)
+    if context_resolution.status.startswith("ambiguous"):
+        return context_resolution
+    return GraphIdResolution()
+
+
+def _is_grounded_graph_request(user_text: str, tool_map: Dict[str, Any], *, tool_context: Any | None = None) -> bool:
+    if "search_graph_index" not in tool_map:
+        return False
+    inventory_type = classify_inventory_query(user_text)
+    if inventory_type in {INVENTORY_QUERY_GRAPH_INDEXES, INVENTORY_QUERY_GRAPH_FILE} and not inventory_query_requests_grounded_analysis(
+        user_text,
+        query_type=inventory_type,
+    ):
+        return False
+    text = str(user_text or "")
+    if _GRAPH_EVIDENCE_RE.search(text):
+        return True
+    if _extract_named_graph_id_from_text(text) and _GRAPH_METADATA_INTENT_RE.search(text):
+        return True
+    return bool(_graph_ids_from_context(tool_context) and _GRAPH_METADATA_INTENT_RE.search(text))
+
+
+def _payload_from_tool_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    payload = _tool_result_payload(result)
+    if payload:
+        return payload
+    output = str(result.get("output") or "")
+    parsed = extract_json(output)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _graph_id_from_tool_results(
+    user_text: str,
+    tool_results: List[Dict[str, Any]],
+    *,
+    tool_context: Any | None = None,
+) -> str:
+    return _graph_id_resolution_for_request(user_text, tool_results, tool_context=tool_context).graph_id
 
 
 def _has_graph_search_attempt(tool_results: List[Dict[str, Any]]) -> bool:
@@ -668,11 +823,16 @@ def _normalize_planned_graph_tool_args(
     *,
     user_text: str,
     tool_results: List[Dict[str, Any]],
+    tool_context: Any | None = None,
 ) -> Dict[str, Any]:
     if name not in {"inspect_graph_index", "search_graph_index"}:
         return args
     normalized = dict(args)
-    graph_id = str(normalized.get("graph_id") or "").strip() or _graph_id_from_tool_results(user_text, tool_results)
+    graph_id = str(normalized.get("graph_id") or "").strip() or _graph_id_from_tool_results(
+        user_text,
+        tool_results,
+        tool_context=tool_context,
+    )
     if graph_id:
         normalized["graph_id"] = graph_id
     if name == "inspect_graph_index":
@@ -682,9 +842,29 @@ def _normalize_planned_graph_tool_args(
     return normalized
 
 
-def _graph_evidence_missing_text(user_text: str, tool_results: List[Dict[str, Any]]) -> str:
-    graph_id = _graph_id_from_tool_results(user_text, tool_results)
+def _graph_evidence_missing_text(
+    user_text: str,
+    tool_results: List[Dict[str, Any]],
+    *,
+    tool_context: Any | None = None,
+) -> str:
+    graph_resolution = _graph_id_resolution_for_request(user_text, tool_results, tool_context=tool_context)
+    graph_id = graph_resolution.graph_id
     target = f"`{graph_id}`" if graph_id else "the requested graph"
+    if not graph_id and graph_resolution.status.startswith("ambiguous"):
+        candidate_text = ", ".join(f"`{item}`" for item in graph_resolution.candidates[:4])
+        suffix = " Please select one graph ID for grounded graph search."
+        if candidate_text:
+            return (
+                f"I found multiple candidate graphs ({candidate_text}), but no single graph was selected. "
+                "I do not have enough GraphRAG evidence to answer this relationship question without guessing."
+                f"{suffix}"
+            )
+        return (
+            "I found multiple candidate graphs, but no single graph was selected. "
+            "I do not have enough GraphRAG evidence to answer this relationship question without guessing."
+            f"{suffix}"
+        )
     if _graph_search_has_error(tool_results):
         return (
             f"I found {target}, but the graph search tool failed before returning relationship evidence. "
@@ -740,6 +920,80 @@ def _graph_citations_from_tool_results(tool_results: List[Dict[str, Any]]) -> Li
                     },
                 )
     return list(citations_by_id.values())
+
+
+def _graph_execution_metadata(
+    *,
+    user_text: str,
+    tool_results: List[Dict[str, Any]],
+    tool_context: Any | None = None,
+) -> Dict[str, Any]:
+    graph_results = [result for result in tool_results if _tool_result_name(result) == "search_graph_index"]
+    rag_results = [result for result in tool_results if _tool_result_name(result) == "rag_agent_tool"]
+    result_count = 0
+    cited_doc_ids: List[str] = []
+    requires_source_read = False
+    evidence_status = ""
+    for result in graph_results:
+        payload = _payload_from_tool_result(result)
+        result_count += len([item for item in (payload.get("results") or []) if isinstance(item, dict)])
+        requires_source_read = requires_source_read or bool(payload.get("requires_source_read"))
+        evidence_status = evidence_status or str(payload.get("evidence_status") or "")
+        for doc_id in _graph_source_candidate_doc_ids([result], limit=20):
+            if doc_id not in cited_doc_ids:
+                cited_doc_ids.append(doc_id)
+    for result in rag_results:
+        payload = _payload_from_tool_result(result)
+        for citation in payload.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            doc_id = str(citation.get("doc_id") or "").strip()
+            if doc_id and doc_id not in cited_doc_ids:
+                cited_doc_ids.append(doc_id)
+    graph_resolution = _graph_id_resolution_for_request(user_text, tool_results, tool_context=tool_context)
+    return {
+        "graph_id": graph_resolution.graph_id,
+        "graph_id_resolution_status": graph_resolution.status,
+        "graph_id_resolution_source": graph_resolution.source,
+        "graph_id_resolution_candidates": list(graph_resolution.candidates[:12]),
+        "graph_ids_from_context": _graph_ids_from_context(tool_context),
+        "graph_tool_attempted": bool(graph_results),
+        "graph_result_count": result_count,
+        "evidence_status": evidence_status,
+        "requires_source_read": requires_source_read,
+        "rag_recovery_attempted": bool(rag_results),
+        "rag_recovery_renderable": bool(_render_latest_rag_tool_result(tool_results)),
+        "source_resolution_status": (
+            "source_resolved"
+            if rag_results
+            else "graph_grounded"
+            if graph_results and _graph_search_has_grounded_evidence(tool_results) and not requires_source_read
+            else "source_resolution_required"
+            if graph_results and (requires_source_read or _graph_source_candidate_doc_ids(tool_results))
+            else "not_attempted"
+        ),
+        "cited_doc_ids": cited_doc_ids[:12],
+    }
+
+
+def _with_graph_execution_metadata(
+    metadata: Dict[str, Any],
+    *,
+    graph_grounded_request: bool,
+    user_text: str,
+    tool_results: List[Dict[str, Any]],
+    tool_context: Any | None = None,
+) -> Dict[str, Any]:
+    if not graph_grounded_request and not _has_graph_search_attempt(tool_results):
+        return metadata
+    return {
+        **dict(metadata or {}),
+        "graph_execution": _graph_execution_metadata(
+            user_text=user_text,
+            tool_results=tool_results,
+            tool_context=tool_context,
+        ),
+    }
 
 
 def _append_missing_graph_citations(final_text: str, tool_results: List[Dict[str, Any]]) -> str:
@@ -913,7 +1167,7 @@ def _synthesize_tool_results(
 ) -> str:
     synth_system = (
         "You are recovering a final answer after a tool-using agent run.\n"
-        "Use the tool results to answer the user's request clearly and concisely.\n"
+        "Use the tool results to answer the user's request clearly, with enough detail to satisfy the request.\n"
         "Preserve citations and uncertainty, and do not dump raw JSON.\n"
         "When tool results include search_graph_index JSON, only treat results as graph evidence when they include non-catalog chunks, relationships, or excerpts. If evidence_status is source_candidates_only or requires_source_read is true, those are source candidates or graph leads only; do not synthesize causal claims from them unless a rag_agent_tool result provides cited source-text support.\n"
         "Do not invent Cypher queries, schema labels, relationship names, or how-to steps unless the user explicitly asks for query syntax.\n"
@@ -1286,6 +1540,28 @@ def _sort_dataset_refs_for_request(user_text: str, dataset_refs: List[str]) -> L
     )
 
 
+def _requested_filename_from_text(user_text: str, filenames: List[str]) -> str:
+    normalized_text = str(user_text or "").casefold()
+    for filename in sorted([str(item) for item in filenames if str(item)], key=len, reverse=True):
+        if Path(filename).name.casefold() in normalized_text:
+            return Path(filename).name
+    for match in re.findall(r"\b[A-Za-z0-9_. -]+\.[A-Za-z0-9]{2,8}\b", str(user_text or "")):
+        candidate = Path(match.strip()).name
+        for filename in filenames:
+            if candidate.casefold() == Path(str(filename)).name.casefold():
+                return Path(str(filename)).name
+    return ""
+
+
+def _render_unsupported_uploaded_dataset(filename: str) -> str:
+    ext = Path(str(filename or "")).suffix.lower() or "this file type"
+    return (
+        f"The uploaded file `{filename}` is available in this session, but {ext} is not supported "
+        "by the dataset analysis tools. Use a CSV or Excel workbook for data analysis, or ask for "
+        "a document-style read/summarization path instead."
+    )
+
+
 def _data_analyst_target_candidates(
     user_text: str,
     dataset_payloads: Dict[str, Dict[str, Any]],
@@ -1461,14 +1737,30 @@ def _run_data_analyst_guided_fallback(
         call_index=tool_calls,
     )
     workspace_listing = extract_json(workspace_listing_text) or {}
+    workspace_files = [str(name) for name in (workspace_listing.get("files") or []) if str(name)]
     dataset_refs = _sort_dataset_refs_for_request(
         user_text,
         [
-            str(name)
-            for name in (workspace_listing.get("files") or [])
+            name
+            for name in workspace_files
             if str(name).lower().endswith((".csv", ".xlsx", ".xls"))
         ],
     )
+    if not dataset_refs and workspace_files:
+        requested_file = _requested_filename_from_text(user_text, workspace_files)
+        if requested_file:
+            final_text = _render_unsupported_uploaded_dataset(requested_file)
+            messages.append(AIMessage(content=final_text))
+            return final_text, messages, {
+                "fallback": "data_analyst_guided",
+                "guided_mode": fallback_mode,
+                "tool_calls": tool_calls,
+                "upload_resolution": {
+                    "requested_filename": requested_file,
+                    "status": "unsupported_type",
+                    "available_files": workspace_files[:20],
+                },
+            }
     dataset_payloads: Dict[str, Dict[str, Any]] = {}
 
     if fallback_mode == "code":
@@ -1775,7 +2067,7 @@ def run_general_agent(
     callbacks = callbacks or []
     effective_prompt = system_prompt or _DEFAULT_SYSTEM_PROMPT
     tool_map = {tool.name: tool for tool in tools}
-    graph_grounded_request = _is_grounded_graph_request(user_text, tool_map)
+    graph_grounded_request = _is_grounded_graph_request(user_text, tool_map, tool_context=tool_context)
     msgs = _ensure_system(messages, effective_prompt)
     if not _has_latest_user_message(msgs, user_text):
         msgs.append(HumanMessage(content=user_text))
@@ -1880,11 +2172,17 @@ def run_general_agent(
                 collected_tool_results,
                 user_text=user_text,
             )
-            return rag_rendered, updated_messages + [AIMessage(content=rag_rendered)], {
-                "steps": steps,
-                "tool_calls": tool_calls_used,
-                "recovery": ["graph_catalog_used_rag_tool", *verifier_recovery, *recovery],
-            }
+            return rag_rendered, updated_messages + [AIMessage(content=rag_rendered)], _with_graph_execution_metadata(
+                {
+                    "steps": steps,
+                    "tool_calls": tool_calls_used,
+                    "recovery": ["graph_catalog_used_rag_tool", *verifier_recovery, *recovery],
+                },
+                graph_grounded_request=graph_grounded_request,
+                user_text=user_text,
+                tool_results=collected_tool_results,
+                tool_context=tool_context,
+            )
         recovered, recovered_tool_calls, recovered_recovery = _run_graph_catalog_rag_recovery(
             tool_map,
             updated_messages,
@@ -1900,17 +2198,29 @@ def run_general_agent(
                 collected_tool_results,
                 user_text=user_text,
             )
-            return recovered, updated_messages + [AIMessage(content=recovered)], {
+            return recovered, updated_messages + [AIMessage(content=recovered)], _with_graph_execution_metadata(
+                {
+                    "steps": steps,
+                    "tool_calls": recovered_tool_calls,
+                    "recovery": [*recovered_recovery, *verifier_recovery, *recovery],
+                },
+                graph_grounded_request=graph_grounded_request,
+                user_text=user_text,
+                tool_results=collected_tool_results,
+                tool_context=tool_context,
+            )
+        final_text = _graph_evidence_missing_text(user_text, collected_tool_results, tool_context=tool_context)
+        return final_text, updated_messages + [AIMessage(content=final_text)], _with_graph_execution_metadata(
+            {
                 "steps": steps,
                 "tool_calls": recovered_tool_calls,
-                "recovery": [*recovered_recovery, *verifier_recovery, *recovery],
-            }
-        final_text = _graph_evidence_missing_text(user_text, collected_tool_results)
-        return final_text, updated_messages + [AIMessage(content=final_text)], {
-            "steps": steps,
-            "tool_calls": recovered_tool_calls,
-            "recovery": ["graph_catalog_only", *recovered_recovery, *recovery],
-        }
+                "recovery": ["graph_catalog_only", *recovered_recovery, *recovery],
+            },
+            graph_grounded_request=graph_grounded_request,
+            user_text=user_text,
+            tool_results=collected_tool_results,
+            tool_context=tool_context,
+        )
     final_text = _append_missing_graph_citations(final_text, collected_tool_results)
     verified_text, verifier_recovery = _apply_final_evidence_verifier(
         final_text,
@@ -1922,7 +2232,13 @@ def run_general_agent(
         recovery = [*verifier_recovery, *recovery]
     if recovery:
         updated_messages = list(updated_messages) + [AIMessage(content=final_text)]
-    return str(final_text), updated_messages, {"steps": steps, "tool_calls": tool_calls_used, "recovery": recovery}
+    return str(final_text), updated_messages, _with_graph_execution_metadata(
+        {"steps": steps, "tool_calls": tool_calls_used, "recovery": recovery},
+        graph_grounded_request=graph_grounded_request,
+        user_text=user_text,
+        tool_results=collected_tool_results,
+        tool_context=tool_context,
+    )
 
 
 def _run_plan_execute_fallback(
@@ -1940,7 +2256,7 @@ def _run_plan_execute_fallback(
     callbacks = callbacks or []
     tool_map = {tool.name: tool for tool in tools}
     analyst_intent = _classify_data_analyst_intent(user_text) if _data_analyst_fallback_enabled(tool_map) else None
-    graph_grounded_request = _is_grounded_graph_request(user_text, tool_map)
+    graph_grounded_request = _is_grounded_graph_request(user_text, tool_map, tool_context=tool_context)
     planner_system = (
         "You are a planning assistant. You cannot call tools directly.\n"
         "Produce a tool plan as JSON ONLY.\n"
@@ -1995,7 +2311,7 @@ def _run_plan_execute_fallback(
         plan = _extract_plan(_response_text(repair_response))
 
     if not isinstance(plan, list) and graph_grounded_request:
-        graph_id = _extract_named_graph_id_from_text(user_text)
+        graph_id = _extract_named_graph_id_from_text(user_text) or _context_graph_id(tool_context)
         if graph_id:
             plan = [
                 {
@@ -2007,15 +2323,21 @@ def _run_plan_execute_fallback(
 
     if not isinstance(plan, list):
         if graph_grounded_request:
-            final_text = _graph_evidence_missing_text(user_text, [])
+            final_text = _graph_evidence_missing_text(user_text, [], tool_context=tool_context)
             if not _has_latest_user_message(messages, user_text):
                 messages.append(HumanMessage(content=user_text))
             messages.append(AIMessage(content=final_text))
-            return str(final_text), messages, {
-                "fallback": "plan_execute",
-                "tool_calls": 0,
-                "recovery": ["graph_plan_missing"],
-            }
+            return str(final_text), messages, _with_graph_execution_metadata(
+                {
+                    "fallback": "plan_execute",
+                    "tool_calls": 0,
+                    "recovery": ["graph_plan_missing"],
+                },
+                graph_grounded_request=graph_grounded_request,
+                user_text=user_text,
+                tool_results=[],
+                tool_context=tool_context,
+            )
         if _data_analyst_fallback_enabled(tool_map):
             return _run_data_analyst_guided_fallback(
                 chat_llm=chat_llm,
@@ -2052,7 +2374,13 @@ def _run_plan_execute_fallback(
         if not isinstance(name, str) or name not in tool_map:
             tool_results.append({"tool": name, "error": "unknown tool"})
             continue
-        args = _normalize_planned_graph_tool_args(name, args, user_text=user_text, tool_results=tool_results)
+        args = _normalize_planned_graph_tool_args(
+            name,
+            args,
+            user_text=user_text,
+            tool_results=tool_results,
+            tool_context=tool_context,
+        )
         args = _normalize_planned_data_analyst_tool_args(name, args, analyst_intent, tool_results, user_text)
         try:
             output = tool_map[name].invoke(args, config={"callbacks": callbacks})
@@ -2074,7 +2402,7 @@ def _run_plan_execute_fallback(
         and "search_graph_index" in tool_map
         and tool_calls < max_tool_calls
     ):
-        graph_id = _graph_id_from_tool_results(user_text, tool_results)
+        graph_id = _graph_id_from_tool_results(user_text, tool_results, tool_context=tool_context)
         if graph_id:
             args = {"query": user_text, "graph_id": graph_id, "limit": 8}
             try:
@@ -2096,13 +2424,19 @@ def _run_plan_execute_fallback(
             messages.append(tool_message)
 
     if graph_grounded_request and not _has_graph_search_attempt(tool_results):
-        final_text = _graph_evidence_missing_text(user_text, tool_results)
+        final_text = _graph_evidence_missing_text(user_text, tool_results, tool_context=tool_context)
         messages.append(AIMessage(content=final_text))
-        return str(final_text), messages, {
-            "fallback": "plan_execute",
-            "tool_calls": tool_calls,
-            "recovery": ["graph_search_missing"],
-        }
+        return str(final_text), messages, _with_graph_execution_metadata(
+            {
+                "fallback": "plan_execute",
+                "tool_calls": tool_calls,
+                "recovery": ["graph_search_missing"],
+            },
+            graph_grounded_request=graph_grounded_request,
+            user_text=user_text,
+            tool_results=tool_results,
+            tool_context=tool_context,
+        )
 
     if (
         graph_grounded_request
@@ -2120,11 +2454,17 @@ def _run_plan_execute_fallback(
                 user_text=user_text,
             )
             messages.append(AIMessage(content=rag_rendered))
-            return str(rag_rendered), messages, {
-                "fallback": "plan_execute",
-                "tool_calls": tool_calls,
-                "recovery": ["graph_catalog_used_rag_tool", *verifier_recovery],
-            }
+            return str(rag_rendered), messages, _with_graph_execution_metadata(
+                {
+                    "fallback": "plan_execute",
+                    "tool_calls": tool_calls,
+                    "recovery": ["graph_catalog_used_rag_tool", *verifier_recovery],
+                },
+                graph_grounded_request=graph_grounded_request,
+                user_text=user_text,
+                tool_results=tool_results,
+                tool_context=tool_context,
+            )
         recovered, tool_calls, recovered_recovery = _run_graph_catalog_rag_recovery(
             tool_map,
             messages,
@@ -2141,18 +2481,30 @@ def _run_plan_execute_fallback(
                 user_text=user_text,
             )
             messages.append(AIMessage(content=recovered))
-            return str(recovered), messages, {
+            return str(recovered), messages, _with_graph_execution_metadata(
+                {
+                    "fallback": "plan_execute",
+                    "tool_calls": tool_calls,
+                    "recovery": [*recovered_recovery, *verifier_recovery],
+                },
+                graph_grounded_request=graph_grounded_request,
+                user_text=user_text,
+                tool_results=tool_results,
+                tool_context=tool_context,
+            )
+        final_text = _graph_evidence_missing_text(user_text, tool_results, tool_context=tool_context)
+        messages.append(AIMessage(content=final_text))
+        return str(final_text), messages, _with_graph_execution_metadata(
+            {
                 "fallback": "plan_execute",
                 "tool_calls": tool_calls,
-                "recovery": [*recovered_recovery, *verifier_recovery],
-            }
-        final_text = _graph_evidence_missing_text(user_text, tool_results)
-        messages.append(AIMessage(content=final_text))
-        return str(final_text), messages, {
-            "fallback": "plan_execute",
-            "tool_calls": tool_calls,
-            "recovery": ["graph_catalog_only", *recovered_recovery],
-        }
+                "recovery": ["graph_catalog_only", *recovered_recovery],
+            },
+            graph_grounded_request=graph_grounded_request,
+            user_text=user_text,
+            tool_results=tool_results,
+            tool_context=tool_context,
+        )
 
     if analyst_intent is not None:
         latest_nlp_payload = None
@@ -2265,4 +2617,10 @@ def _run_plan_execute_fallback(
     )
     recovery.extend(verifier_recovery)
     messages.append(AIMessage(content=str(final_text)))
-    return str(final_text), messages, {"fallback": "plan_execute", "tool_calls": tool_calls, "recovery": recovery}
+    return str(final_text), messages, _with_graph_execution_metadata(
+        {"fallback": "plan_execute", "tool_calls": tool_calls, "recovery": recovery},
+        graph_grounded_request=graph_grounded_request,
+        user_text=user_text,
+        tool_results=tool_results,
+        tool_context=tool_context,
+    )

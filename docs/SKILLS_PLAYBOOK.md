@@ -12,6 +12,7 @@ Examples:
 - `rag_agent.md`
 - `utility_agent.md`
 - `data_analyst_agent.md`
+- `rag_researcher_agent.md`
 - `planner_agent.md`
 - `finalizer_agent.md`
 - `supervisor_agent.md` for the live `coordinator`
@@ -160,6 +161,7 @@ Current runtime roles where retrieved skill context materially affects execution
 - `finalizer`
 - `verifier`
 - `rag_worker`
+- `rag_researcher`
 
 The exact scope is controlled by `AgentDefinition.skill_scope`.
 
@@ -167,20 +169,26 @@ Additional live nuance:
 
 - `rag_worker` now consumes skill-derived structured execution hints for the live direct
   contract path; prompt prose is secondary to those structured hints
+- `rag_researcher` consumes retrieved skill context as a normal `react` agent, then uses
+  workbench tools to turn exploratory findings into `controller_hints_json` and a final
+  `rag_agent_tool` call
 - `memory_maintainer` also declares `skill_scope`, but its dedicated mode bypasses
   prompt/model execution and does not consume the resolved skill block; the role is unavailable
   entirely when `MEMORY_ENABLED=false`
 - the normal BASIC route goes straight through `RuntimeKernel.process_basic_turn(...)`, so
   the `basic` registry role is not the main automatic skill-injection path
 
-`coordinator` is the main exception in the live runtime. It has role metadata in the
-registry, but its `coordinator` mode is orchestrated directly by the kernel rather than by
-the normal `QueryLoop` skill-context path.
+`coordinator` and `research_coordinator` are the main exceptions in the live runtime. They
+have role metadata in the registry, but their `coordinator` mode is orchestrated directly by
+the kernel rather than by the normal `QueryLoop` skill-context path.
 
 In practice, `planner` and `coordinator` now pre-assign likely RAG skill packs to workers
 through `skill_queries` plus structured RAG hint fields. That keeps `rag_worker`
 specialized while still allowing prompt-backed workers to call `search_skills` when they
 need an explicit lookup.
+
+For broad indexed-corpus research, the planner is typically operating under
+`research_coordinator`, while bounded lookups can still start directly in `rag_worker`.
 
 ## Runtime skill control plane
 
@@ -293,11 +301,16 @@ Key packs added for corpus-scale document research include:
 - `rag/clause_extraction`
 - `rag/collection_scoping`
 - `rag/comparison_campaign`
+- `rag/authority_and_version_resolution`
+- `rag/autonomous_query_planning`
 - `rag/corpus_discovery`
 - `rag/coverage_sufficiency_audit`
 - `rag/cross_document_inventory`
 - `rag/document_resolution`
+- `rag/document_structure_navigation`
 - `rag/empty_result_recovery`
+- `rag/entity_disambiguation_retrieval`
+- `rag/evidence_grading_and_pruning`
 - `rag/graph_drift_followup`
 - `rag/graph_freshness_and_staleness_check`
 - `rag/graph_global_community_discovery`
@@ -308,6 +321,7 @@ Key packs added for corpus-scale document research include:
 - `rag/multi_document_comparison`
 - `rag/negative_evidence_reporting`
 - `rag/process_flow_identification`
+- `rag/rag_researcher_finalization`
 - `rag/retrieval_strategy`
 - `rag/windowed_keyword_followup`
 - `general/document_research_delegation`

@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Sequence
@@ -30,12 +31,15 @@ from agentic_chatbot_next.rag.metadata_extractor import (
     normalize_metadata_profile,
     summarize_index_metadata,
 )
+from agentic_chatbot_next.rag.corpus_metadata import enrich_corpus_metadata
+from agentic_chatbot_next.rag.parser_adapters import ParsedDocumentBundle, load_documents_with_parsers
 from agentic_chatbot_next.rag.structure_detector import (
     PROCESS_FLOW_PATTERN,
     REQUIREMENT_PATTERN,
     StructureAnalysis,
     detect_structure,
 )
+from agentic_chatbot_next.rag.status_workbooks import profile_workbook
 from agentic_chatbot_next.rag.workbook_loader import load_workbook_documents
 from agentic_chatbot_next.persistence.postgres.chunks import ChunkRecord
 from agentic_chatbot_next.persistence.postgres.documents import DocumentRecord
@@ -141,6 +145,16 @@ class KBDocumentVersion:
     file_type: str = ""
     doc_structure_type: str = "general"
     active: bool = False
+    version_ordinal: int = 1
+    superseded_at: str = ""
+    parser_chain: tuple[str, ...] = ()
+    extraction_status: str = "success"
+    extraction_error: str = ""
+    metadata_confidence: float = 0.5
+    lifecycle_phase: str = ""
+    doc_type: str = ""
+    program_entities: tuple[str, ...] = ()
+    signal_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +169,16 @@ class KBDocumentVersion:
             "file_type": self.file_type,
             "doc_structure_type": self.doc_structure_type,
             "active": self.active,
+            "version_ordinal": self.version_ordinal,
+            "superseded_at": self.superseded_at,
+            "parser_chain": list(self.parser_chain),
+            "extraction_status": self.extraction_status,
+            "extraction_error": self.extraction_error,
+            "metadata_confidence": self.metadata_confidence,
+            "lifecycle_phase": self.lifecycle_phase,
+            "doc_type": self.doc_type,
+            "program_entities": list(self.program_entities),
+            "signal_summary": dict(self.signal_summary),
         }
 
 
@@ -173,14 +197,27 @@ class KBSourceHealthGroup:
     source_exists: bool = False
     content_drift: bool = False
     duplicate_doc_ids: tuple[str, ...] = ()
+    stale_version_doc_ids: tuple[str, ...] = ()
+    extraction_failure_doc_ids: tuple[str, ...] = ()
+    low_confidence_doc_ids: tuple[str, ...] = ()
+    missing_source_doc_ids: tuple[str, ...] = ()
+    parser_warnings: tuple[str, ...] = ()
     records: tuple[KBDocumentVersion, ...] = ()
 
     @property
     def status(self) -> str:
+        if self.extraction_failure_doc_ids:
+            return "extraction_failed"
+        if self.low_confidence_doc_ids:
+            return "low_confidence_metadata"
+        if self.missing_source_doc_ids:
+            return "missing_source"
         if self.duplicate_doc_ids:
             return "duplicate"
         if self.content_drift:
             return "content_drift"
+        if self.parser_warnings:
+            return "parser_warnings"
         return "healthy"
 
     def to_dict(self) -> dict[str, Any]:
@@ -198,6 +235,11 @@ class KBSourceHealthGroup:
             "source_exists": self.source_exists,
             "content_drift": self.content_drift,
             "duplicate_doc_ids": list(self.duplicate_doc_ids),
+            "stale_version_doc_ids": list(self.stale_version_doc_ids),
+            "extraction_failure_doc_ids": list(self.extraction_failure_doc_ids),
+            "low_confidence_doc_ids": list(self.low_confidence_doc_ids),
+            "missing_source_doc_ids": list(self.missing_source_doc_ids),
+            "parser_warnings": list(self.parser_warnings),
             "status": self.status,
             "records": [item.to_dict() for item in self.records],
         }
@@ -216,6 +258,15 @@ class KBCorpusHealthReport:
     drifted_groups: tuple[KBSourceHealthGroup, ...] = ()
     source_groups: tuple[KBSourceHealthGroup, ...] = ()
     sync_error: str = ""
+    stale_version_count: int = 0
+    extraction_failure_count: int = 0
+    low_confidence_metadata_count: int = 0
+    missing_source_doc_count: int = 0
+    parser_warning_count: int = 0
+    parser_counts: dict[str, int] = field(default_factory=dict)
+    doc_type_counts: dict[str, int] = field(default_factory=dict)
+    lifecycle_counts: dict[str, int] = field(default_factory=dict)
+    metadata_confidence_distribution: dict[str, int] = field(default_factory=dict)
 
     @property
     def ready(self) -> bool:
@@ -224,6 +275,9 @@ class KBCorpusHealthReport:
             and not self.missing_source_paths
             and not self.duplicate_groups
             and not self.drifted_groups
+            and self.extraction_failure_count == 0
+            and self.low_confidence_metadata_count == 0
+            and self.missing_source_doc_count == 0
         )
 
     @property
@@ -236,6 +290,12 @@ class KBCorpusHealthReport:
             if self.maintenance_policy == COLLECTION_MAINTENANCE_CONFIGURED_KB_SOURCES:
                 return "kb_duplicate_docs"
             return "collection_duplicate_docs"
+        if self.extraction_failure_count:
+            return "collection_extraction_failures"
+        if self.low_confidence_metadata_count:
+            return "collection_low_confidence_metadata"
+        if self.missing_source_doc_count:
+            return "collection_source_missing"
         if self.drifted_groups:
             if self.maintenance_policy == COLLECTION_MAINTENANCE_CONFIGURED_KB_SOURCES:
                 return "kb_content_drift"
@@ -268,6 +328,15 @@ class KBCorpusHealthReport:
             "missing_sources": list(self.missing_source_paths),
             "duplicate_group_count": len(self.duplicate_groups),
             "content_drift_count": len(self.drifted_groups),
+            "stale_version_count": self.stale_version_count,
+            "extraction_failure_count": self.extraction_failure_count,
+            "low_confidence_metadata_count": self.low_confidence_metadata_count,
+            "missing_source_doc_count": self.missing_source_doc_count,
+            "parser_warning_count": self.parser_warning_count,
+            "parser_counts": dict(self.parser_counts),
+            "doc_type_counts": dict(self.doc_type_counts),
+            "lifecycle_counts": dict(self.lifecycle_counts),
+            "metadata_confidence_distribution": dict(self.metadata_confidence_distribution),
             "duplicate_groups": [item.to_dict() for item in self.duplicate_groups],
             "drifted_groups": [item.to_dict() for item in self.drifted_groups],
             "source_groups": [item.to_dict() for item in self.source_groups],
@@ -657,9 +726,13 @@ def _parse_ingested_at(value: str) -> dt.datetime:
 def select_active_kb_record(records: Sequence[Any]) -> Any | None:
     if not records:
         return None
+    explicit_active = [record for record in records if _record_active(record)]
+    if explicit_active:
+        records = explicit_active
     return sorted(
         records,
         key=lambda item: (
+            _record_version_ordinal(item),
             _parse_ingested_at(str(getattr(item, "ingested_at", "") or "")),
             str(getattr(item, "doc_id", "") or ""),
         ),
@@ -667,7 +740,83 @@ def select_active_kb_record(records: Sequence[Any]) -> Any | None:
     )[0]
 
 
+def _record_active(record: Any) -> bool:
+    if isinstance(record, dict):
+        value = record.get("active", True)
+    else:
+        value = getattr(record, "active", True)
+    return bool(True if value is None else value)
+
+
+def _record_version_ordinal(record: Any) -> int:
+    if isinstance(record, dict):
+        value = record.get("version_ordinal", 1)
+    else:
+        value = getattr(record, "version_ordinal", 1)
+    try:
+        return max(1, int(value or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _record_metadata_confidence(record: Any) -> float:
+    value = record.get("metadata_confidence") if isinstance(record, dict) else getattr(record, "metadata_confidence", None)
+    if value is None:
+        source_metadata = record.get("source_metadata", {}) if isinstance(record, dict) else getattr(record, "source_metadata", {})
+        if isinstance(source_metadata, dict):
+            value = source_metadata.get("metadata_confidence")
+    try:
+        return max(0.0, min(1.0, float(value if value is not None else 0.5)))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _record_parser_chain(record: Any) -> list[str]:
+    provenance = record.get("parser_provenance", {}) if isinstance(record, dict) else getattr(record, "parser_provenance", {})
+    source_metadata = record.get("source_metadata", {}) if isinstance(record, dict) else getattr(record, "source_metadata", {})
+    if not isinstance(provenance, dict) and isinstance(source_metadata, dict):
+        provenance = source_metadata.get("parser_provenance", {})
+    if isinstance(provenance, dict):
+        chain = [str(item) for item in list(provenance.get("chain") or []) if str(item)]
+        if chain:
+            return chain
+    if isinstance(source_metadata, dict):
+        index_metadata = source_metadata.get("index_metadata")
+        if isinstance(index_metadata, dict):
+            return [str(item) for item in list(index_metadata.get("parser_chain") or []) if str(item)]
+    return []
+
+
+def _record_parser_warnings(records: Sequence[Any]) -> list[str]:
+    warnings: list[str] = []
+    for record in records:
+        source_metadata = record.get("source_metadata", {}) if isinstance(record, dict) else getattr(record, "source_metadata", {})
+        if not isinstance(source_metadata, dict):
+            continue
+        for warning in list(source_metadata.get("parser_warnings") or []):
+            text = str(warning or "").strip()
+            if text and text not in warnings:
+                warnings.append(text)
+    return warnings
+
+
+def _confidence_bucket(value: float) -> str:
+    if value >= 0.8:
+        return "high"
+    if value >= 0.55:
+        return "medium"
+    return "low"
+
+
 def _kb_document_version(record: Any, *, active: bool) -> KBDocumentVersion:
+    source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    provenance = getattr(record, "parser_provenance", {}) or source_metadata.get("parser_provenance")
+    parser_chain: list[str] = []
+    if isinstance(provenance, dict):
+        parser_chain = [str(item) for item in list(provenance.get("chain") or []) if str(item)]
+    if not parser_chain:
+        parser_chain = _record_parser_chain(record)
+    signal_summary = getattr(record, "signal_summary", {}) or source_metadata.get("signal_summary") or {}
     return KBDocumentVersion(
         doc_id=str(getattr(record, "doc_id", "") or ""),
         title=_record_title(record),
@@ -680,6 +829,16 @@ def _kb_document_version(record: Any, *, active: bool) -> KBDocumentVersion:
         file_type=str(getattr(record, "file_type", "") or ""),
         doc_structure_type=str(getattr(record, "doc_structure_type", "") or ""),
         active=active,
+        version_ordinal=_record_version_ordinal(record),
+        superseded_at=str(getattr(record, "superseded_at", "") or ""),
+        parser_chain=tuple(parser_chain),
+        extraction_status=str(getattr(record, "extraction_status", "") or source_metadata.get("extraction_status") or "success"),
+        extraction_error=str(getattr(record, "extraction_error", "") or source_metadata.get("extraction_error") or ""),
+        metadata_confidence=_record_metadata_confidence(record),
+        lifecycle_phase=str(getattr(record, "lifecycle_phase", "") or source_metadata.get("lifecycle_phase") or ""),
+        doc_type=str(getattr(record, "doc_type", "") or source_metadata.get("doc_type") or ""),
+        program_entities=tuple(str(item) for item in list(getattr(record, "program_entities", []) or source_metadata.get("program_entities") or []) if str(item)),
+        signal_summary=dict(signal_summary) if isinstance(signal_summary, dict) else {},
     )
 
 
@@ -710,6 +869,25 @@ def _record_source_path(record: Any) -> str:
         return str(Path(str(value)).resolve())
     except Exception:
         return str(value)
+
+
+def _record_has_source_reference(record: Any, *, configured_source_path: str = "") -> bool:
+    if configured_source_path and Path(configured_source_path).exists():
+        return True
+    source_path = str(record.get("source_path") if isinstance(record, dict) else getattr(record, "source_path", "") or "")
+    source_uri = str(record.get("source_uri") if isinstance(record, dict) else getattr(record, "source_uri", "") or "")
+    storage_backend = str(
+        record.get("source_storage_backend") if isinstance(record, dict) else getattr(record, "source_storage_backend", "")
+    ).strip().lower()
+    object_key = str(record.get("source_object_key") if isinstance(record, dict) else getattr(record, "source_object_key", "") or "")
+    object_bucket = str(record.get("source_object_bucket") if isinstance(record, dict) else getattr(record, "source_object_bucket", "") or "")
+    source_metadata = record.get("source_metadata", {}) if isinstance(record, dict) else getattr(record, "source_metadata", {})
+    blob_ref = source_metadata.get("blob_ref") if isinstance(source_metadata, dict) and isinstance(source_metadata.get("blob_ref"), dict) else {}
+    if storage_backend and storage_backend != "local":
+        return bool(source_uri or object_key or blob_ref.get("uri") or blob_ref.get("key"))
+    if "://" in source_path or "://" in source_uri:
+        return True
+    return bool(source_path and Path(source_path).exists())
 
 
 def _record_source_identity(record: Any) -> str:
@@ -830,12 +1008,12 @@ def build_collection_health_report(
         default="",
     )
     try:
-        records = list(
-            stores.doc_store.list_documents(
-                source_type=source_type_filter,
-                tenant_id=tenant_id,
-                collection_id=effective_collection_id,
-            )
+        records = _list_documents_for_ingest(
+            stores,
+            source_type=source_type_filter,
+            tenant_id=tenant_id,
+            collection_id=effective_collection_id,
+            active_only=False,
         )
     except Exception as exc:
         if not resolved_maintenance_policy:
@@ -881,10 +1059,11 @@ def build_collection_health_report(
     missing_source_paths: tuple[str, ...] = ()
     sync_error = ""
     configured_paths_by_title: dict[str, list[Path]] = {}
+    active_records = [record for record in records if _record_active(record)]
     if resolved_maintenance_policy == COLLECTION_MAINTENANCE_CONFIGURED_KB_SOURCES:
         coverage = build_kb_coverage_status(
             settings,
-            records,
+            active_records,
             tenant_id=tenant_id,
             collection_id=effective_collection_id,
         )
@@ -904,6 +1083,15 @@ def build_collection_health_report(
     source_groups: list[KBSourceHealthGroup] = []
     duplicate_groups: list[KBSourceHealthGroup] = []
     drifted_groups: list[KBSourceHealthGroup] = []
+    parser_counts: Counter[str] = Counter()
+    doc_type_counts: Counter[str] = Counter()
+    lifecycle_counts: Counter[str] = Counter()
+    confidence_distribution: Counter[str] = Counter()
+    stale_version_count = 0
+    extraction_failure_count = 0
+    low_confidence_metadata_count = 0
+    missing_source_doc_count = 0
+    parser_warning_count = 0
 
     for source_identity, group_records in sorted(grouped.items(), key=lambda item: item[0]):
         active = select_active_kb_record(group_records)
@@ -911,9 +1099,9 @@ def build_collection_health_report(
             continue
         configured_source_path = _configured_alias_path(_record_title(active), configured_paths_by_title)
         candidate_path = configured_source_path or _record_source_path(active)
-        source_exists = bool(candidate_path and Path(candidate_path).exists())
+        source_exists = _record_has_source_reference(active, configured_source_path=str(configured_source_path or ""))
         current_file_hash = ""
-        if source_exists:
+        if candidate_path and Path(candidate_path).exists():
             try:
                 current_file_hash = _file_hash(Path(candidate_path))
             except OSError:
@@ -926,13 +1114,51 @@ def build_collection_health_report(
         sorted_group = sorted(
             group_records,
             key=lambda item: (
+                _record_version_ordinal(item),
                 _parse_ingested_at(str(getattr(item, "ingested_at", "") or "")),
                 str(getattr(item, "doc_id", "") or ""),
             ),
             reverse=True,
         )
+        active_group_records = [record for record in sorted_group if _record_active(record)]
+        stale_records = [record for record in sorted_group if not _record_active(record)]
+        duplicate_doc_ids = tuple(
+            str(getattr(record, "doc_id", "") or "")
+            for record in active_group_records
+            if str(getattr(record, "doc_id", "") or "") and str(getattr(record, "doc_id", "") or "") != str(getattr(active, "doc_id", "") or "")
+        )
+        stale_doc_ids = tuple(str(getattr(record, "doc_id", "") or "") for record in stale_records if str(getattr(record, "doc_id", "") or ""))
+        extraction_failure_doc_ids = tuple(
+            str(getattr(record, "doc_id", "") or "")
+            for record in active_group_records
+            if str(getattr(record, "doc_id", "") or "")
+            and str(getattr(record, "extraction_status", "") or "success").lower() not in {"success", "completed", "ok"}
+        )
+        low_confidence_doc_ids = tuple(
+            str(getattr(record, "doc_id", "") or "")
+            for record in active_group_records
+            if str(getattr(record, "doc_id", "") or "") and _record_metadata_confidence(record) < 0.5
+        )
+        missing_source_doc_ids = tuple(
+            str(getattr(record, "doc_id", "") or "")
+            for record in active_group_records
+            if str(getattr(record, "doc_id", "") or "")
+            and not _record_has_source_reference(record, configured_source_path=str(configured_source_path or ""))
+        )
+        parser_warnings = tuple(_record_parser_warnings(active_group_records))
+        for record in active_group_records:
+            for parser_name in _record_parser_chain(record):
+                parser_counts[parser_name] += 1
+            doc_type_counts[str(getattr(record, "doc_type", "") or "unknown")] += 1
+            lifecycle_counts[str(getattr(record, "lifecycle_phase", "") or "unknown")] += 1
+            confidence_distribution[_confidence_bucket(_record_metadata_confidence(record))] += 1
+        stale_version_count += len(stale_doc_ids)
+        extraction_failure_count += len(extraction_failure_doc_ids)
+        low_confidence_metadata_count += len(low_confidence_doc_ids)
+        missing_source_doc_count += len(missing_source_doc_ids)
+        parser_warning_count += len(parser_warnings)
         versions = tuple(
-            _kb_document_version(record, active=str(getattr(record, "doc_id", "") or "") == str(getattr(active, "doc_id", "") or ""))
+            _kb_document_version(record, active=_record_active(record))
             for record in sorted_group
         )
         group = KBSourceHealthGroup(
@@ -948,11 +1174,12 @@ def build_collection_health_report(
             current_file_hash=current_file_hash,
             source_exists=source_exists,
             content_drift=content_drift,
-            duplicate_doc_ids=tuple(
-                str(getattr(record, "doc_id", "") or "")
-                for record in sorted_group[1:]
-                if str(getattr(record, "doc_id", "") or "")
-            ),
+            duplicate_doc_ids=duplicate_doc_ids,
+            stale_version_doc_ids=stale_doc_ids,
+            extraction_failure_doc_ids=extraction_failure_doc_ids,
+            low_confidence_doc_ids=low_confidence_doc_ids,
+            missing_source_doc_ids=missing_source_doc_ids,
+            parser_warnings=parser_warnings,
             records=versions,
         )
         source_groups.append(group)
@@ -967,12 +1194,21 @@ def build_collection_health_report(
         configured_source_paths=configured_source_paths,
         missing_source_paths=missing_source_paths,
         indexed_doc_count=len(records),
-        active_doc_count=len(source_groups),
+        active_doc_count=len(active_records),
         maintenance_policy=resolved_maintenance_policy or COLLECTION_MAINTENANCE_INDEXED_DOCUMENTS,
         duplicate_groups=tuple(duplicate_groups),
         drifted_groups=tuple(drifted_groups),
         source_groups=tuple(source_groups),
         sync_error=sync_error,
+        stale_version_count=stale_version_count,
+        extraction_failure_count=extraction_failure_count,
+        low_confidence_metadata_count=low_confidence_metadata_count,
+        missing_source_doc_count=missing_source_doc_count,
+        parser_warning_count=parser_warning_count,
+        parser_counts=dict(parser_counts),
+        doc_type_counts=dict(doc_type_counts),
+        lifecycle_counts=dict(lifecycle_counts),
+        metadata_confidence_distribution=dict(confidence_distribution),
     )
 
 
@@ -1035,8 +1271,6 @@ def repair_collection_documents(
         if not candidate_path or not Path(candidate_path).exists():
             unresolved_paths.append(candidate_path or group.title)
             continue
-        stores.doc_store.delete_document(group.active_doc_id, tenant_id=tenant_id)
-        deleted_doc_ids.append(group.active_doc_id)
         doc_ids = ingest_paths(
             settings,
             stores,
@@ -1170,82 +1404,17 @@ def _load_docx_with_python_docx(path: Path) -> List[Document]:
     return [Document(page_content=content, metadata={"parser": "python-docx"})]
 
 
+def _load_document_bundle(
+    path: Path,
+    settings: Settings,
+    *,
+    parser_strategy: str = "docling_primary",
+) -> ParsedDocumentBundle:
+    return load_documents_with_parsers(path, settings, parser_strategy=parser_strategy)
+
+
 def _load_documents(path: Path, settings: Settings) -> List[Document]:
-    suffix = path.suffix.lower()
-
-    if suffix in {".md", ".txt"}:
-        from langchain_community.document_loaders import TextLoader
-
-        return TextLoader(str(path), encoding="utf-8").load()
-
-    if suffix == ".pdf":
-        # Prefer the native PDF path for stability. Docling can trigger heavyweight
-        # remote/model bootstrap inside the app container, which is brittle for
-        # local interactive ingest and unnecessary for this corpus.
-        if settings.ocr_enabled:
-            return load_pdf_documents_with_ocr(
-                path,
-                min_page_chars=settings.ocr_min_page_chars,
-                language=settings.ocr_language,
-                use_gpu=settings.ocr_use_gpu,
-            )
-        from langchain_community.document_loaders import PyPDFLoader
-
-        return PyPDFLoader(str(path)).load()
-
-    if suffix == ".docx":
-        parser_errors: List[str] = []
-        try:
-            from langchain_community.document_loaders import Docx2txtLoader
-
-            docs = Docx2txtLoader(str(path)).load()
-            if docs:
-                return docs
-        except Exception as exc:
-            parser_errors.append(f"docx2txt: {exc}")
-        try:
-            docs = _load_docx_with_python_docx(path)
-            if docs:
-                return docs
-        except Exception as exc:
-            parser_errors.append(f"python-docx: {exc}")
-        if bool(getattr(settings, "docling_enabled", False)):
-            docling_docs = _load_documents_with_docling(path)
-            if docling_docs:
-                return docling_docs
-            parser_errors.append("docling: no extractable content")
-        detail = "; ".join(parser_errors) if parser_errors else "no parser returned extractable content"
-        raise RuntimeError(
-            f"DOCX extraction failed for {path.name}. Install docx2txt or enable DOCLING_ENABLED=true. "
-            f"Parser errors: {detail}"
-        )
-
-    if suffix in {".xlsx", ".xls"}:
-        try:
-            workbook_docs = load_workbook_documents(path)
-        except Exception:
-            workbook_docs = []
-        if workbook_docs:
-            return workbook_docs
-        if bool(getattr(settings, "docling_enabled", False)):
-            docling_docs = _load_documents_with_docling(path)
-            if docling_docs:
-                return docling_docs
-        return []
-
-    if suffix in IMAGE_SUFFIXES:
-        if settings.ocr_enabled:
-            return load_image_documents(
-                path,
-                language=settings.ocr_language,
-                use_gpu=settings.ocr_use_gpu,
-            )
-        logger.debug("OCR disabled; skipping image file %s.", path)
-        return []
-
-    from langchain_community.document_loaders import TextLoader
-
-    return TextLoader(str(path), encoding="utf-8", autodetect_encoding=True).load()
+    return _load_document_bundle(path, settings).documents
 
 
 def _chunk_size(settings: Settings) -> int:
@@ -1329,6 +1498,12 @@ def _build_chunk_records(
             if document_index_metadata is not None
             else {}
         )
+        status_metadata = metadata.get("status_workbook") if isinstance(metadata.get("status_workbook"), dict) else {}
+        status_domains = [str(item) for item in (metadata.get("status_domains") or []) if str(item)]
+        if status_metadata:
+            chunk_metadata["status_workbook"] = dict(status_metadata)
+        if status_domains:
+            chunk_metadata["status_domains"] = status_domains
         records.append(
             ChunkRecord(
                 chunk_id=chunk_id,
@@ -1361,6 +1536,7 @@ def _metadata_embedding_text(content: str, metadata: dict[str, Any]) -> str:
         ("type", metadata.get("document_type")),
         ("chunk", metadata.get("chunk_type")),
         ("tags", ", ".join(str(tag) for tag in list(metadata.get("tags") or [])[:6])),
+        ("status_domains", ", ".join(str(tag) for tag in list(metadata.get("status_domains") or [])[:8])),
         ("section", " > ".join(str(item) for item in list(metadata.get("section_path") or [])[:4])),
         ("clause", location.get("clause_number")),
         ("page", location.get("page_number")),
@@ -1373,6 +1549,20 @@ def _metadata_embedding_text(content: str, metadata: dict[str, Any]) -> str:
     if not parts:
         return content
     return f"[index metadata] {' | '.join(parts)}\n\n{content}"
+
+
+def _workbook_profile_metadata(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() not in {".xlsx", ".xls"}:
+        return {}
+    try:
+        return profile_workbook(path).to_dict()
+    except Exception as exc:
+        return {
+            "workbook_name": path.name,
+            "source_path": str(path),
+            "file_type": path.suffix.lstrip(".").lower(),
+            "warnings": [f"Workbook profile failed: {exc}"],
+        }
 
 
 def _document_record_from_value(record: Any) -> DocumentRecord:
@@ -1398,6 +1588,17 @@ def _document_record_from_value(record: Any) -> DocumentRecord:
         source_etag=str(getattr(record, "source_etag", "") or ""),
         source_size_bytes=int(getattr(record, "source_size_bytes", 0) or 0),
         source_content_type=str(getattr(record, "source_content_type", "") or ""),
+        active=bool(True if getattr(record, "active", True) is None else getattr(record, "active", True)),
+        version_ordinal=_record_version_ordinal(record),
+        superseded_at=str(getattr(record, "superseded_at", "") or ""),
+        parser_provenance=dict(getattr(record, "parser_provenance", {}) or {}),
+        extraction_status=str(getattr(record, "extraction_status", "") or "success"),
+        extraction_error=str(getattr(record, "extraction_error", "") or ""),
+        metadata_confidence=_record_metadata_confidence(record),
+        lifecycle_phase=str(getattr(record, "lifecycle_phase", "") or ""),
+        doc_type=str(getattr(record, "doc_type", "") or ""),
+        program_entities=[str(item) for item in list(getattr(record, "program_entities", []) or []) if str(item)],
+        signal_summary=dict(getattr(record, "signal_summary", {}) or {}),
     )
 
 
@@ -1513,16 +1714,82 @@ def _expand_ingest_paths(paths: Iterable[Path]) -> List[Path]:
     return resolved
 
 
-def _record_index_metadata_matches(record: Any, *, metadata_profile: str) -> bool:
+def _record_index_metadata_matches(record: Any, *, metadata_profile: str, metadata_enrichment: str = "") -> bool:
     profile = normalize_metadata_profile(metadata_profile)
+    enrichment = str(metadata_enrichment or "").strip().lower()
     source_metadata = dict(getattr(record, "source_metadata", {}) or {})
     index_metadata = source_metadata.get("index_metadata")
     if not isinstance(index_metadata, dict):
         return False
-    return (
+    matches = (
         str(index_metadata.get("extractor_version") or "") == INDEX_METADATA_VERSION
         and str(index_metadata.get("metadata_profile") or "") == profile
     )
+    if enrichment:
+        stored_enrichment = str(source_metadata.get("metadata_enrichment") or index_metadata.get("metadata_enrichment") or "").strip().lower()
+        matches = matches and stored_enrichment == enrichment
+    return matches
+
+
+def _list_documents_for_ingest(
+    stores: KnowledgeStores,
+    *,
+    source_type: str = "",
+    tenant_id: str,
+    collection_id: str,
+    active_only: bool = True,
+) -> list[Any]:
+    list_documents = getattr(getattr(stores, "doc_store", None), "list_documents", None)
+    if not callable(list_documents):
+        return []
+    try:
+        return list(
+            list_documents(
+                source_type=source_type,
+                tenant_id=tenant_id,
+                collection_id=collection_id,
+                active_only=active_only,
+            )
+        )
+    except TypeError:
+        return list(
+            list_documents(
+                source_type=source_type,
+                tenant_id=tenant_id,
+                collection_id=collection_id,
+            )
+        )
+
+
+def _supersede_prior_source_versions(
+    stores: KnowledgeStores,
+    records: list[Any],
+    *,
+    tenant_id: str,
+    collection_id: str,
+    source_type: str,
+    source_identity: str,
+    active_doc_id: str,
+    superseded_at: str,
+) -> None:
+    supersede = getattr(getattr(stores, "doc_store", None), "supersede_source_versions", None)
+    if callable(supersede):
+        supersede(
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+            source_type=source_type,
+            source_identity=source_identity,
+            active_doc_id=active_doc_id,
+            superseded_at=superseded_at,
+        )
+    for record in records:
+        if str(getattr(record, "doc_id", "") or "") == active_doc_id:
+            continue
+        try:
+            setattr(record, "active", False)
+            setattr(record, "superseded_at", superseded_at)
+        except Exception:
+            continue
 
 
 def preview_path_index_metadata(
@@ -1530,12 +1797,19 @@ def preview_path_index_metadata(
     path: Path,
     *,
     metadata_profile: str = "auto",
-    metadata_enrichment: str = "deterministic",
+    metadata_enrichment: str = "llm",
+    parser_strategy: str = "docling_primary",
+    providers: object | None = None,
     source_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return deterministic indexing metadata for a path without writing records."""
     resolved_path = Path(path).expanduser().resolve()
-    raw_docs = _load_documents(resolved_path, settings)
+    source_metadata = dict(source_metadata or {})
+    workbook_profile = _workbook_profile_metadata(resolved_path)
+    if workbook_profile:
+        source_metadata["workbook_profile"] = workbook_profile
+    bundle = _load_document_bundle(resolved_path, settings, parser_strategy=parser_strategy)
+    raw_docs = bundle.documents
     if not raw_docs:
         return {
             "path": str(resolved_path),
@@ -1543,7 +1817,10 @@ def preview_path_index_metadata(
             "metadata_summary": summarize_index_metadata([], metadata_profile=metadata_profile).to_dict(),
             "document_metadata": {},
             "chunk_count": 0,
-            "warnings": ["No extractable content was found."],
+            "parser_provenance": bundle.parser_provenance,
+            "extraction_status": bundle.extraction_status,
+            "extraction_error": bundle.extraction_error,
+            "warnings": ["No extractable content was found.", *bundle.warnings, *bundle.errors],
         }
     for doc in raw_docs:
         doc.metadata = {
@@ -1562,6 +1839,17 @@ def preview_path_index_metadata(
         metadata_enrichment=metadata_enrichment,
         source_metadata=source_metadata,
     )
+    corpus_metadata = enrich_corpus_metadata(
+        path=resolved_path,
+        raw_docs=raw_docs,
+        source_metadata={
+            **dict(source_metadata or {}),
+            **bundle.to_source_metadata(),
+        },
+        document_metadata=document_metadata.to_dict(),
+        providers=providers,
+        metadata_enrichment=metadata_enrichment,
+    )
     chunks = _split_with_structure(settings, raw_docs, structure)
     chunk_metadata = [
         build_chunk_index_metadata(
@@ -1576,6 +1864,10 @@ def preview_path_index_metadata(
         "path": str(resolved_path),
         "title": resolved_path.name,
         "document_metadata": document_metadata.to_dict(),
+        "corpus_metadata": corpus_metadata,
+        "parser_provenance": bundle.parser_provenance,
+        "extraction_status": bundle.extraction_status,
+        "extraction_error": bundle.extraction_error,
         "metadata_summary": summarize_index_metadata(
             [document_metadata],
             chunk_metadata,
@@ -1591,7 +1883,7 @@ def preview_path_index_metadata(
             }
             for index, chunk in enumerate(chunks[:20])
         ],
-        "warnings": list(document_metadata.warnings),
+        "warnings": [*list(document_metadata.warnings), *bundle.warnings, *list(corpus_metadata.get("warnings") or [])],
     }
 
 
@@ -1607,7 +1899,9 @@ def ingest_paths(
     source_identities: dict[str, str] | None = None,
     source_metadata_by_path: dict[str, dict[str, Any]] | None = None,
     metadata_profile: str = "auto",
-    metadata_enrichment: str = "deterministic",
+    metadata_enrichment: str = "llm",
+    parser_strategy: str = "docling_primary",
+    providers: object | None = None,
 ) -> List[str]:
     ingested_doc_ids: List[str] = []
     effective_collection_id = collection_id or getattr(settings, "default_collection_id", "default")
@@ -1623,17 +1917,13 @@ def ingest_paths(
                 else COLLECTION_MAINTENANCE_INDEXED_DOCUMENTS
             ),
         )
-    list_documents = getattr(stores.doc_store, "list_documents", None)
-    if callable(list_documents):
-        existing_records = list(
-            list_documents(
-                source_type=source_type,
-                tenant_id=tenant_id,
-                collection_id=effective_collection_id,
-            )
-        )
-    else:
-        existing_records = []
+    existing_records = _list_documents_for_ingest(
+        stores,
+        source_type=source_type,
+        tenant_id=tenant_id,
+        collection_id=effective_collection_id,
+        active_only=False,
+    )
     configured_paths_by_title = _configured_paths_by_title(settings) if source_type == "kb" else {}
     resolved_display_paths = _resolve_path_overrides(source_display_paths)
     resolved_source_identities = _resolve_path_overrides(source_identities)
@@ -1659,6 +1949,9 @@ def ingest_paths(
             "source_display_path": source_display_path,
             "source_identity": candidate_identity,
         }
+        workbook_profile = _workbook_profile_metadata(path)
+        if workbook_profile:
+            source_metadata["workbook_profile"] = workbook_profile
         blob_ref = source_metadata.get("blob_ref") if isinstance(source_metadata.get("blob_ref"), dict) else {}
         source_uri = str(source_metadata.get("source_uri") or blob_ref.get("uri") or "").strip()
         source_storage_backend = str(blob_ref.get("backend") or "").strip()
@@ -1678,20 +1971,12 @@ def ingest_paths(
             ) == candidate_identity
         ]
         active_existing = select_active_kb_record(same_source_records)
-        stale_existing = [
-            record
-            for record in same_source_records
-            if active_existing is None or str(getattr(record, "doc_id", "") or "") != str(getattr(active_existing, "doc_id", "") or "")
-        ]
-        for record in stale_existing:
-            stores.doc_store.delete_document(str(getattr(record, "doc_id", "") or ""), tenant_id=tenant_id)
-            existing_records = [
-                item
-                for item in existing_records
-                if str(getattr(item, "doc_id", "") or "") != str(getattr(record, "doc_id", "") or "")
-            ]
         if active_existing is not None and str(getattr(active_existing, "content_hash", "") or "") == file_hash:
-            if _record_index_metadata_matches(active_existing, metadata_profile=normalized_metadata_profile):
+            if _record_index_metadata_matches(
+                active_existing,
+                metadata_profile=normalized_metadata_profile,
+                metadata_enrichment=normalized_metadata_enrichment,
+            ):
                 _sync_requirement_inventory_for_document(
                     stores,
                     _document_record_from_value(active_existing),
@@ -1706,17 +1991,8 @@ def ingest_paths(
             collection_id=effective_collection_id,
         )
 
-        raw_docs = _load_documents(path, settings)
-        if not raw_docs:
-            logger.info("No content extracted from %s; skipping.", path)
-            continue
-        if active_existing is not None:
-            stores.doc_store.delete_document(str(getattr(active_existing, "doc_id", "") or ""), tenant_id=tenant_id)
-            existing_records = [
-                item
-                for item in existing_records
-                if str(getattr(item, "doc_id", "") or "") != str(getattr(active_existing, "doc_id", "") or "")
-            ]
+        bundle = _load_document_bundle(path, settings, parser_strategy=parser_strategy)
+        raw_docs = bundle.documents
 
         full_text = " ".join(doc.page_content for doc in raw_docs)
         structure = detect_structure(full_text)
@@ -1728,12 +2004,33 @@ def ingest_paths(
             metadata_enrichment=normalized_metadata_enrichment,
             source_metadata=source_metadata,
         )
+        corpus_metadata = enrich_corpus_metadata(
+            path=path,
+            raw_docs=raw_docs,
+            source_metadata={
+                **source_metadata,
+                **bundle.to_source_metadata(),
+            },
+            document_metadata=document_index_metadata.to_dict(),
+            providers=providers,
+            metadata_enrichment=normalized_metadata_enrichment,
+        )
+        signal_summary = dict(corpus_metadata.get("signal_summary") or {})
         source_metadata = {
             **source_metadata,
+            **bundle.to_source_metadata(),
             "metadata_profile": document_index_metadata.metadata_profile,
-            "metadata_enrichment": document_index_metadata.metadata_enrichment,
+            "metadata_enrichment": corpus_metadata.get("metadata_enrichment") or document_index_metadata.metadata_enrichment,
             "metadata_extractor_version": document_index_metadata.extractor_version,
             "index_metadata": document_index_metadata.to_dict(),
+            "parser_strategy": parser_strategy,
+            "parser_provenance": bundle.parser_provenance,
+            "corpus_metadata": corpus_metadata,
+            "metadata_confidence": corpus_metadata.get("metadata_confidence", 0.5),
+            "lifecycle_phase": corpus_metadata.get("lifecycle_phase") or "",
+            "doc_type": corpus_metadata.get("doc_type") or "",
+            "program_entities": list(corpus_metadata.get("program_entities") or []),
+            "signal_summary": signal_summary,
         }
         for doc in raw_docs:
             doc.metadata = {
@@ -1756,6 +2053,8 @@ def ingest_paths(
             collection_id=effective_collection_id,
             document_index_metadata=document_index_metadata,
         )
+        ingested_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        version_ordinal = max([_record_version_ordinal(record) for record in same_source_records] or [0]) + 1
         document_record = DocumentRecord(
             doc_id=doc_id,
             tenant_id=tenant_id,
@@ -1765,7 +2064,7 @@ def ingest_paths(
             content_hash=file_hash,
             source_path=stored_source_path,
             num_chunks=len(chunk_records),
-            ingested_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+            ingested_at=ingested_at,
             file_type=path.suffix.lstrip(".").lower(),
             doc_structure_type=document_index_metadata.doc_structure_type,
             source_display_path=source_display_path,
@@ -1778,6 +2077,17 @@ def ingest_paths(
             source_etag=str(blob_ref.get("etag") or ""),
             source_size_bytes=int(blob_ref.get("size") or 0),
             source_content_type=str(blob_ref.get("content_type") or source_metadata.get("mime_type") or ""),
+            active=True,
+            version_ordinal=version_ordinal,
+            superseded_at="",
+            parser_provenance=bundle.parser_provenance,
+            extraction_status=bundle.extraction_status,
+            extraction_error=bundle.extraction_error,
+            metadata_confidence=float(corpus_metadata.get("metadata_confidence") or 0.0),
+            lifecycle_phase=str(corpus_metadata.get("lifecycle_phase") or ""),
+            doc_type=str(corpus_metadata.get("doc_type") or ""),
+            program_entities=[str(item) for item in list(corpus_metadata.get("program_entities") or []) if str(item)],
+            signal_summary=signal_summary,
         )
         stores.doc_store.upsert_document(document_record)
         try:
@@ -1791,6 +2101,16 @@ def ingest_paths(
         except Exception:
             stores.doc_store.delete_document(doc_id, tenant_id=tenant_id)
             raise
+        _supersede_prior_source_versions(
+            stores,
+            same_source_records,
+            tenant_id=tenant_id,
+            collection_id=effective_collection_id,
+            source_type=source_type,
+            source_identity=candidate_identity,
+            active_doc_id=doc_id,
+            superseded_at=ingested_at,
+        )
         if getattr(stores, "graph_store", None) is not None:
             try:
                 stores.graph_store.ingest_document(  # type: ignore[union-attr]

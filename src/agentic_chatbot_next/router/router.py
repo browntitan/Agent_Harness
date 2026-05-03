@@ -14,6 +14,7 @@ from agentic_chatbot_next.rag.inventory import (
 )
 from agentic_chatbot_next.rag.hints import normalize_structured_query
 from agentic_chatbot_next.router.feedback_loop import build_router_decision_id
+from agentic_chatbot_next.router.mcp_intent import mcp_intent_detected
 from agentic_chatbot_next.router.patterns import (
     CompiledRouterPatterns,
     load_router_patterns,
@@ -41,6 +42,11 @@ _GRAPH_RETRIEVAL_RE = re.compile(
     r"|(?:\b(?:relationships?|entities|entity|multi[-\s]?hop|connected|dependencies|network)\b.*\bgraph\b)",
     re.IGNORECASE,
 )
+_GRAPH_METADATA_INTENT_RE = re.compile(
+    r"\b(?:relationships?|entities|entity|multi[-\s]?hop|connected|dependencies|network|evidence|"
+    r"vendors?|suppliers?|risks?|approvals?|causes?|causal|outcomes?|source[-\s]?resolve|cross[-\s]?document)\b",
+    re.IGNORECASE,
+)
 _GRAPH_ADMIN_RE = re.compile(
     r"\b(?:create|build|index|import|refresh|rebuild|update|delete|remove)\b.*\b(?:knowledge\s+)?graph\b"
     r"|\bgraph\s+(?:build|index|import|refresh|rebuild|delete|remove)\b",
@@ -59,6 +65,19 @@ _DEEP_RESEARCH_RE = re.compile(
     r"defense\s+(?:program|repository|corpus)|large\s+repository\s+of\s+(?:documents|files)|"
     r"major\s+subsystems?|corpus[-\s]?scale"
     r")\b",
+    re.IGNORECASE,
+)
+_MERMAID_DIAGRAM_RE = re.compile(
+    r"\b(mermaid|diagram|flowchart|sequence\s+diagram|state\s+diagram|class\s+diagram|er\s+diagram|erd|gantt)\b",
+    re.IGNORECASE,
+)
+_SKILL_SEARCH_RE = re.compile(
+    r"\b(search|find|load|use)\s+(?:your\s+)?skills?\b|\bskills?\s+(?:search|guidance)\b|\bsearch_skills\b",
+    re.IGNORECASE,
+)
+_DIAGRAM_ORCHESTRATION_RE = re.compile(
+    r"\b(first|then|after|before|multi[-\s]?step|research|rag|grounded|knowledge\s+base|default\s+kb|"
+    r"indexed\s+(?:documents|knowledge\s+base)|cite|cites?|citations?|sources?)\b",
     re.IGNORECASE,
 )
 
@@ -145,11 +164,53 @@ def is_graph_retrieval_request(user_text: str) -> bool:
     return bool(_GRAPH_RETRIEVAL_RE.search(str(user_text or "")))
 
 
+def _metadata_graph_ids(metadata: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    route_context = metadata.get("route_context") if isinstance(metadata.get("route_context"), dict) else {}
+    for source in (metadata, route_context):
+        for key in (
+            "graph_id",
+            "active_graph_id",
+            "selected_graph_id",
+            "active_graph_ids",
+            "selected_graph_ids",
+            "graph_ids",
+            "planned_graph_ids",
+        ):
+            value = source.get(key)
+            if isinstance(value, str):
+                clean = value.strip()
+                if clean:
+                    values.append(clean)
+            elif isinstance(value, list):
+                values.extend(str(item).strip() for item in value if str(item).strip())
+    return list(dict.fromkeys(values))
+
+
+def is_graph_metadata_request(user_text: str, session_metadata: dict[str, Any] | None = None) -> bool:
+    metadata = dict(session_metadata or {})
+    if not _metadata_graph_ids(metadata):
+        return False
+    if _GRAPH_ADMIN_RE.search(str(user_text or "")):
+        return False
+    if classify_inventory_query(user_text) != INVENTORY_QUERY_NONE:
+        return False
+    return bool(is_graph_retrieval_request(user_text) or _GRAPH_METADATA_INTENT_RE.search(str(user_text or "")))
+
+
 def is_deep_research_request(user_text: str) -> bool:
     text = str(user_text or "")
     if not text.strip():
         return False
     return bool(_DEEP_RESEARCH_RE.search(text))
+
+
+def is_mermaid_diagram_workflow_request(user_text: str) -> bool:
+    text = str(user_text or "")
+    if not _MERMAID_DIAGRAM_RE.search(text):
+        return False
+    return bool(_SKILL_SEARCH_RE.search(text) or _DIAGRAM_ORCHESTRATION_RE.search(text))
+
 
 def route_message(
     user_text: str,
@@ -183,12 +244,38 @@ def route_message(
             ),
         )
 
+    if mcp_intent_detected(metadata):
+        mcp_intent = dict(metadata.get("mcp_intent") or {})
+        reasons.append("mcp_intent")
+        trigger = str(mcp_intent.get("trigger") or "").strip()
+        if trigger:
+            reasons.append(f"mcp_intent_{trigger}")
+        return RouterDecision(
+            route="AGENT",
+            confidence=0.94,
+            reasons=reasons,
+            suggested_agent=targets.default_agent,
+            router_evidence={"mcp_intent": mcp_intent},
+            semantic_contract=build_deterministic_semantic_contract(
+                user_text=routing_text,
+                route="AGENT",
+                suggested_agent=targets.default_agent,
+                confidence=0.94,
+                reasoning="; ".join(reasons),
+                session_metadata=metadata,
+            ),
+        )
+
     if has_attachments:
         suggested = ""
-        if is_requirements_inventory_request(routing_text):
+        if is_mermaid_diagram_workflow_request(routing_text):
+            suggested = targets.default_agent
+        elif is_requirements_inventory_request(routing_text):
             suggested = targets.default_agent
         elif compiled.data_analysis_intent.matches(routing_text, normalized):
             suggested = targets.data_analyst_agent
+        elif is_graph_metadata_request(routing_text, metadata) or is_graph_retrieval_request(routing_text):
+            suggested = targets.graph_agent
         elif inventory_query_type != INVENTORY_QUERY_NONE:
             suggested = targets.default_agent
         elif is_deep_research_request(routing_text):
@@ -220,6 +307,23 @@ def route_message(
 
     if compiled.high_stakes_intent.matches(routing_text, normalized):
         reasons.append("high_stakes_topic")
+
+    if is_mermaid_diagram_workflow_request(routing_text):
+        reasons.append("mermaid_diagram_workflow")
+        return RouterDecision(
+            route="AGENT",
+            confidence=0.93,
+            reasons=reasons,
+            suggested_agent=targets.default_agent,
+            semantic_contract=build_deterministic_semantic_contract(
+                user_text=routing_text,
+                route="AGENT",
+                suggested_agent=targets.default_agent,
+                confidence=0.93,
+                reasoning="; ".join(reasons),
+                session_metadata=metadata,
+            ),
+        )
 
     if is_requirements_inventory_request(routing_text):
         reasons.append("requirements_inventory_intent")
@@ -255,8 +359,8 @@ def route_message(
             ),
         )
 
-    if is_graph_retrieval_request(routing_text):
-        reasons.append("graph_retrieval_intent")
+    if is_graph_metadata_request(routing_text, metadata) or is_graph_retrieval_request(routing_text):
+        reasons.append("graph_metadata_intent" if is_graph_metadata_request(routing_text, metadata) else "graph_retrieval_intent")
         return RouterDecision(
             route="AGENT",
             confidence=0.92 if len(reasons) <= 1 else 0.95,

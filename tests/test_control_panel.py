@@ -116,16 +116,16 @@ def _control_panel_settings(tmp_path: Path, *, enabled: bool = True, token: str 
         judge_provider="ollama",
         embeddings_provider="ollama",
         ollama_base_url="http://ollama:11434",
-        ollama_chat_model="gpt-oss:20b",
-        ollama_judge_model="gpt-oss:20b",
+        ollama_chat_model="nemotron-cascade-2:30b",
+        ollama_judge_model="nemotron-cascade-2:30b",
         ollama_embed_model="nomic-embed-text",
         graphrag_projects_dir=tmp_path / "graphrag" / "projects",
         graph_backend="microsoft_graphrag",
         graphrag_llm_provider="openai",
         graphrag_base_url="",
         graphrag_api_key="ollama",
-        graphrag_chat_model="gpt-oss:20b",
-        graphrag_index_chat_model="gpt-oss:20b",
+        graphrag_chat_model="nemotron-cascade-2:30b",
+        graphrag_index_chat_model="nemotron-cascade-2:30b",
         graphrag_embed_model="nomic-embed-text",
         graphrag_concurrency=2,
         graphrag_request_timeout_seconds=60,
@@ -1319,6 +1319,88 @@ async def test_agent_routes_round_trip_overlay_reload_and_pinned_skills(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_agent_skill_assignment_route_validates_and_canonicalizes_skills(tmp_path: Path) -> None:
+    settings = _control_panel_settings(tmp_path)
+    runtime = _build_runtime(settings)
+    skill_store = runtime.bot.ctx.stores.skill_store
+    skill_store.upsert_skill_pack(
+        SkillPackRecord(
+            skill_id="skill-1-v2",
+            name="Pinned Skill V2",
+            agent_scope="general",
+            checksum="checksum-2",
+            tenant_id=settings.default_tenant_id,
+            body_markdown="# Pinned Skill V2\nagent_scope: general\n",
+            owner_user_id=settings.default_user_id,
+            version_parent="skill-1",
+            status="active",
+            enabled=True,
+        ),
+        ["chunk-2"],
+    )
+    skill_store.upsert_skill_pack(
+        SkillPackRecord(
+            skill_id="skill-archived",
+            name="Archived Skill",
+            agent_scope="general",
+            checksum="checksum-3",
+            tenant_id=settings.default_tenant_id,
+            version_parent="skill-archived",
+            status="archived",
+            enabled=False,
+        ),
+        ["chunk-3"],
+    )
+    skill_store.upsert_skill_pack(
+        SkillPackRecord(
+            skill_id="skill-rag",
+            name="Wrong Scope Skill",
+            agent_scope="rag",
+            checksum="checksum-4",
+            tenant_id=settings.default_tenant_id,
+            version_parent="skill-rag",
+            status="active",
+            enabled=True,
+        ),
+        ["chunk-4"],
+    )
+    manager = _FakeManager(settings, runtime=runtime)
+
+    async with _admin_client(manager) as client:
+        saved = await client.put(
+            "/v1/admin/agents/general/skills",
+            headers=_admin_headers(),
+            json={"preload_skill_packs": ["skill-1-v2"]},
+        )
+        unknown = await client.put(
+            "/v1/admin/agents/general/skills",
+            headers=_admin_headers(),
+            json={"preload_skill_packs": ["missing-skill"]},
+        )
+        archived = await client.put(
+            "/v1/admin/agents/general/skills",
+            headers=_admin_headers(),
+            json={"preload_skill_packs": ["skill-archived"]},
+        )
+        wrong_scope = await client.put(
+            "/v1/admin/agents/general/skills",
+            headers=_admin_headers(),
+            json={"preload_skill_packs": ["skill-rag"]},
+        )
+
+    assert saved.status_code == 200
+    assert saved.json()["pending_reload"] is True
+    assert saved.json()["preload_skill_packs"] == ["skill-1"]
+    assert saved.json()["agent"]["preload_skill_packs"] == ["skill-1"]
+    assert saved.json()["agent"]["pinned_skills"][0]["skill_id"] == "skill-1-v2"
+    assert "preload_skill_packs: [\"skill-1\"]" in (Path(settings.control_panel_agent_overlays_dir) / "general.md").read_text(encoding="utf-8")
+    assert unknown.status_code == 400
+    assert archived.status_code == 400
+    assert wrong_scope.status_code == 400
+    assert "skill_scope 'general'" in wrong_scope.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_architecture_routes_reflect_live_registry_and_activity(tmp_path: Path) -> None:
     settings = _control_panel_settings(tmp_path)
     (Path(settings.agents_dir) / "basic.md").write_text(
@@ -1555,6 +1637,65 @@ async def test_operations_route_exposes_scheduler_snapshot_and_enriched_job_meta
     assert payload["jobs"][0]["scheduler_state"] == "completed"
     assert payload["jobs"][0]["estimated_token_cost"] == 320
     assert payload["jobs"][0]["queue_class"] == "interactive"
+
+
+@pytest.mark.parametrize(
+    ("engine", "expected_command"),
+    [
+        ("docker", "docker compose build --no-cache app app-bootstrap openwebui"),
+        ("podman", "PODMAN_BUILD_NO_CACHE=1 podman_startup/scripts/build-images.sh"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_service_reset_full_starts_detached_fixed_command_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    expected_command: str,
+) -> None:
+    settings = _control_panel_settings(tmp_path)
+    runtime = _build_runtime(settings)
+    manager = _FakeManager(settings, runtime=runtime)
+    launched: Dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        control_panel_routes.shutil,
+        "which",
+        lambda command: f"/usr/bin/{command}" if command in {"bash", "docker", "podman", "systemctl"} else None,
+    )
+
+    class FakePopen:
+        pid = 4321
+
+        def __init__(self, args: List[str], **kwargs: Any) -> None:
+            launched["args"] = args
+            launched["kwargs"] = kwargs
+
+    monkeypatch.setattr(control_panel_routes.subprocess, "Popen", FakePopen)
+
+    async with _admin_client(manager) as client:
+        response = await client.post(
+            "/v1/admin/services/reset-full",
+            headers=_admin_headers(),
+            json={"engine": engine, "confirmation": "reset-service-full"},
+        )
+        operations = await client.get("/v1/admin/operations", headers=_admin_headers())
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "started"
+    assert payload["engine"] == engine
+    assert payload["pid"] == 4321
+    assert expected_command in payload["commands"]
+    assert launched["kwargs"]["start_new_session"] is True
+    assert launched["kwargs"]["cwd"].endswith("agentic_chatbot_v3")
+    if engine == "podman":
+        assert "export PODMAN_BUILD_NO_CACHE=1" in launched["args"][-1]
+        assert "run_step podman_startup/scripts/build-images.sh" in launched["args"][-1]
+    else:
+        assert expected_command in launched["args"][-1]
+    assert operations.json()["last_service_reset"]["run_id"] == payload["run_id"]
+    assert any(event["action"] == "service_reset_full_start" for event in operations.json()["audit_events"])
 
 
 @pytest.mark.asyncio
@@ -2097,7 +2238,7 @@ async def test_admin_graph_routes_create_validate_build_and_bind_graph_skills(
             return {
                 "ok": True,
                 "provider": "openai",
-                "chat_model": "gpt-oss:20b",
+                "chat_model": "nemotron-cascade-2:30b",
                 "embed_model": "nomic-embed-text",
                 "cli_available": True,
                 "warnings": [],

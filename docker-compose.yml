@@ -26,8 +26,8 @@ x-app-env: &app-env
   JUDGE_PROVIDER: ${JUDGE_PROVIDER:-ollama}
   PG_DSN: postgresql://${RAG_DB_USER:-raguser}:${RAG_DB_PASSWORD:-ragpass}@rag-postgres:5432/${RAG_DB_NAME:-ragdb}
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-  OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-gpt-oss:20b}
-  OLLAMA_JUDGE_MODEL: ${OLLAMA_JUDGE_MODEL:-gpt-oss:20b}
+  OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-nemotron-cascade-2:30b}
+  OLLAMA_JUDGE_MODEL: ${OLLAMA_JUDGE_MODEL:-nemotron-cascade-2:30b}
   OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text:latest}
   RERANK_ENABLED: ${RERANK_ENABLED:-true}
   RERANK_PROVIDER: ${RERANK_PROVIDER:-ollama}
@@ -59,10 +59,10 @@ x-app-env: &app-env
   GRAPHRAG_LLM_PROVIDER: ${GRAPHRAG_LLM_PROVIDER:-openai}
   GRAPHRAG_BASE_URL: ${GRAPHRAG_BASE_URL:-http://host.docker.internal:11434/v1}
   GRAPHRAG_API_KEY: ${GRAPHRAG_API_KEY:-ollama}
-  GRAPHRAG_CHAT_MODEL: ${GRAPHRAG_CHAT_MODEL:-gpt-oss:20b}
-  GRAPHRAG_INDEX_CHAT_MODEL: ${GRAPHRAG_INDEX_CHAT_MODEL:-gpt-oss:20b}
+  GRAPHRAG_CHAT_MODEL: ${GRAPHRAG_CHAT_MODEL:-nemotron-cascade-2:30b}
+  GRAPHRAG_INDEX_CHAT_MODEL: ${GRAPHRAG_INDEX_CHAT_MODEL:-nemotron-cascade-2:30b}
   GRAPHRAG_COMMUNITY_REPORT_MODE: ${GRAPHRAG_COMMUNITY_REPORT_MODE:-text}
-  GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL: ${GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL:-gpt-oss:20b}
+  GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL: ${GRAPHRAG_COMMUNITY_REPORT_CHAT_MODEL:-nemotron-cascade-2:30b}
   GRAPHRAG_EMBED_MODEL: ${GRAPHRAG_EMBED_MODEL:-nomic-embed-text:latest}
   GRAPHRAG_CONCURRENCY: ${GRAPHRAG_CONCURRENCY:-1}
   GRAPHRAG_REQUEST_TIMEOUT_SECONDS: ${GRAPHRAG_REQUEST_TIMEOUT_SECONDS:-240}
@@ -89,6 +89,17 @@ x-app-env: &app-env
   CONNECTOR_PUBLISHABLE_API_KEY: ${CONNECTOR_PUBLISHABLE_API_KEY:-}
   CONNECTOR_ALLOWED_ORIGINS: ${CONNECTOR_ALLOWED_ORIGINS:-http://localhost:3001,http://localhost:18000}
   CONNECTOR_PUBLISHABLE_RATE_LIMIT_PER_MINUTE: ${CONNECTOR_PUBLISHABLE_RATE_LIMIT_PER_MINUTE:-60}
+  DEFERRED_TOOL_DISCOVERY_ENABLED: ${DEFERRED_TOOL_DISCOVERY_ENABLED:-true}
+  DEFERRED_TOOL_DISCOVERY_TOP_K: ${DEFERRED_TOOL_DISCOVERY_TOP_K:-8}
+  DEFERRED_TOOL_DISCOVERY_REQUIRE_SEARCH: ${DEFERRED_TOOL_DISCOVERY_REQUIRE_SEARCH:-true}
+  MCP_TOOL_PLANE_ENABLED: ${MCP_TOOL_PLANE_ENABLED:-true}
+  MCP_USER_SELF_SERVICE_ENABLED: ${MCP_USER_SELF_SERVICE_ENABLED:-true}
+  MCP_REQUIRE_HTTPS: ${MCP_REQUIRE_HTTPS:-false}
+  MCP_ALLOW_PRIVATE_NETWORK: ${MCP_ALLOW_PRIVATE_NETWORK:-true}
+  MCP_CONNECTION_TIMEOUT_SECONDS: ${MCP_CONNECTION_TIMEOUT_SECONDS:-15}
+  MCP_TOOL_CALL_TIMEOUT_SECONDS: ${MCP_TOOL_CALL_TIMEOUT_SECONDS:-60}
+  MCP_CATALOG_REFRESH_SECONDS: ${MCP_CATALOG_REFRESH_SECONDS:-3600}
+  MCP_SECRET_ENCRYPTION_KEY: ${MCP_SECRET_ENCRYPTION_KEY:-change-me-local-mcp-secret}
 
 x-app-volumes: &app-volumes
   - ./data/agents:/app/data/agents:ro
@@ -160,7 +171,7 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_BOOTSTRAP_MODELS: ${OLLAMA_BOOTSTRAP_MODELS:-gpt-oss:20b,rjmalagon/mxbai-rerank-large-v2:1.5b-fp16,nomic-embed-text:latest}
+      OLLAMA_BOOTSTRAP_MODELS: ${OLLAMA_BOOTSTRAP_MODELS:-nemotron-cascade-2:30b,rjmalagon/mxbai-rerank-large-v2:1.5b-fp16,nomic-embed-text:latest}
     entrypoint: >
       /bin/sh -c "
       set -eu;
@@ -233,6 +244,68 @@ services:
     tty: true
     stdin_open: true
     command: ["python", "run.py", "serve-api", "--host", "0.0.0.0", "--port", "8000"]
+
+  sam-gov-mcp:
+    image: agentic-chatbot-v3-app:latest
+    build: *app-build
+    profiles: ["sam-gov-mcp"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SAM_API_KEY: ${SAM_API_KEY:-}
+      SAM_OPPORTUNITIES_URL: ${SAM_OPPORTUNITIES_URL:-https://api.sam.gov/opportunities/v2/search}
+      SAM_DESCRIPTION_URL: ${SAM_DESCRIPTION_URL:-https://api.sam.gov/prod/opportunities/v1/noticedesc}
+      SAM_GOV_TIMEOUT_SECONDS: ${SAM_GOV_TIMEOUT_SECONDS:-30}
+      SAM_GOV_MCP_HOST: 0.0.0.0
+      SAM_GOV_MCP_PORT: "8000"
+      SAM_GOV_MCP_PATH: /mcp
+    ports:
+      - "${SAM_GOV_MCP_HOST_PORT:-18080}:8000"
+    command: ["python", "-m", "agentic_chatbot_next.mcp_servers.sam_gov"]
+
+  web-research-mcp:
+    image: agentic-chatbot-v3-app:latest
+    build: *app-build
+    profiles: ["web-research-mcp"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
+      WEB_RESEARCH_TIMEOUT_SECONDS: ${WEB_RESEARCH_TIMEOUT_SECONDS:-30}
+      WEB_RESEARCH_MAX_CONTENT_CHARS: ${WEB_RESEARCH_MAX_CONTENT_CHARS:-20000}
+      WEB_RESEARCH_ALLOW_PRIVATE_NETWORK: ${WEB_RESEARCH_ALLOW_PRIVATE_NETWORK:-false}
+      WEB_RESEARCH_MCP_HOST: 0.0.0.0
+      WEB_RESEARCH_MCP_PORT: "8000"
+      WEB_RESEARCH_MCP_PATH: /mcp
+    ports:
+      - "${WEB_RESEARCH_MCP_HOST_PORT:-18082}:8000"
+    command: ["python", "-m", "agentic_chatbot_next.mcp_servers.web_research"]
+
+  sam-mcp-smoke:
+    image: python:3.13-slim
+    profiles: ["sam-mcp-smoke"]
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SAM_API_KEY: ${SAM_API_KEY:-}
+      SAM_BASE_URL: ${SAM_BASE_URL:-https://api.sam.gov}
+      PIP_NO_CACHE_DIR: "1"
+    ports:
+      - "${SAM_MCP_SMOKE_HOST_PORT:-18081}:8000"
+    command:
+      - sh
+      - -c
+      - |
+        pip install --upgrade pip &&
+        pip install sam-mcp &&
+        python -c "from sam_mcp.server import mcp; mcp.settings.host='0.0.0.0'; mcp.settings.port=8000; mcp.run(transport='http')"
 
   openwebui:
     image: agentic-chatbot-v3-openwebui:latest

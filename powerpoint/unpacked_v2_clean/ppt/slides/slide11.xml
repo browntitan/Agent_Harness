@@ -174,7 +174,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>48 public endpoints + 70 admin endpoints = 118 total API surface</a:t>
+              <a:t>51 public endpoints + 76 admin endpoints = 127 total API surface</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -208,7 +208,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>PUBLIC API (48 endpoints)</a:t>
+              <a:t>PUBLIC API (51 endpoints)</a:t>
             </a:r>
           </a:p>
         </p:txBody>
@@ -1410,7 +1410,7 @@
               </a:defRPr>
             </a:pPr>
             <a:r>
-              <a:t>ADMIN API (70 endpoints)</a:t>
+              <a:t>ADMIN API (76 endpoints)</a:t>
             </a:r>
           </a:p>
         </p:txBody>

@@ -36,6 +36,7 @@ in the regex groups.
 The router may suggest:
 
 - `coordinator`
+- `research_coordinator`
 - `data_analyst`
 - `graph_manager`
 - `rag_worker`
@@ -55,8 +56,13 @@ Important boundaries:
 - the router still records its normal `BASIC` vs `AGENT` decision and reasons
 - `force_agent=true` only forces AGENT; it does not choose the agent
 - `requested_agent` is validated after routing against the routable non-`basic` registry roles
+  plus explicit non-routable manual overrides
 - common valid values are `general`, `coordinator`, `data_analyst`, `rag_worker`, and
   `graph_manager`
+- `research_coordinator` is valid when the registry exposes it as the research campaign
+  manager
+- `rag_researcher` is also valid because its metadata sets `manual_override_allowed=true`;
+  it is still not selected by normal router policy
 - `memory_maintainer` is not a valid override target when `MEMORY_ENABLED=false`
 
 ## Hybrid fallback behavior
@@ -118,10 +124,10 @@ evidence, GraphRAG, graph inventories, relationship/entity networks, dependencie
 source-planning, or named graph queries. These turns use `requested_scope_kind="graph_indexes"`
 and can start directly in the graph specialist instead of first routing through RAG.
 
-## Typical `coordinator` hints
+## Typical `research_coordinator` hints
 
-The router is especially likely to suggest `coordinator` for long-running document
-research campaigns such as:
+The router is especially likely to suggest `research_coordinator` for long-running or
+corpus-scale document research campaigns such as:
 
 - `identify all documents/files that ...`
 - corpus-wide inventories
@@ -131,6 +137,12 @@ research campaigns such as:
 
 This keeps small lookups fast on `rag_worker` while routing corpus-scale work into
 planner-led worker campaigns.
+
+## Typical `coordinator` hints
+
+`coordinator` remains the generic manager for explicit multi-step orchestration, delegated
+manager work, and active-document follow-ups that do not need the dedicated deep research
+campaign role.
 
 ## Typical BASIC signals
 

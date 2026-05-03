@@ -58,6 +58,12 @@ python run.py evaluate-defense-corpus --sync-first
 Like the rest of the live RAG stack, that benchmark is collection-first and index-first. The
 runtime does not query raw corpus folders directly at answer time.
 
+Current broad benchmark prompts should expect `research_coordinator` for corpus-wide
+reconciliation, exhaustive discovery, and multi-document synthesis. Bounded factual lookups
+still normally start in `rag_worker`, while optional autonomy checks can force
+`metadata.requested_agent="rag_researcher"` to exercise the workbench loop over the same
+indexed collection.
+
 The control panel and `/v1/collections...` admin routes can inspect, sync, upload, reindex,
 repair, and delete collection documents. Those admin flows still target the same DB-first corpus;
 `data/kb` remains seed content rather than the live answer-time source.

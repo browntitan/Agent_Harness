@@ -59,4 +59,8 @@
   <Relationship Id="rId31" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide30.xml"/>
   <Relationship Id="rId44" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide43.xml"/>
   <Relationship Id="rId52" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide51.xml"/>
+  <Relationship Id="rId60" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide54.xml"/>
+  <Relationship Id="rId61" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide55.xml"/>
+  <Relationship Id="rId62" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide56.xml"/>
+  <Relationship Id="rId63" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide57.xml"/>
 </Relationships>

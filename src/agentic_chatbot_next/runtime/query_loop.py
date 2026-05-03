@@ -111,6 +111,44 @@ def _tenant_id(settings: Any, session: SessionState) -> str:
     return str(getattr(session, "tenant_id", getattr(settings, "default_tenant_id", "local-dev")) or "local-dev")
 
 
+def mcp_intent_prompt_block(metadata: Mapping[str, Any] | None, *, user_text: str = "") -> str:
+    metadata_dict = dict(metadata or {})
+    route_context = dict(metadata_dict.get("route_context") or {})
+    mcp_intent = dict(metadata_dict.get("mcp_intent") or route_context.get("mcp_intent") or {})
+    if not bool(mcp_intent.get("detected")):
+        return ""
+    if mcp_intent.get("tool_discovery_required") is False:
+        return (
+            "This turn mentions MCP conceptually. Answer directly unless the user asks to use, list, inspect, "
+            "or call registered MCP services."
+        )
+    discover_query = str(mcp_intent.get("discover_query") or user_text or "").strip()
+    matched_connections = [
+        str(item.get("display_name") or item.get("connection_slug") or item.get("connection_id") or "").strip()
+        for item in list(mcp_intent.get("matched_connections") or [])
+        if isinstance(item, dict)
+    ]
+    matched_tools = [
+        str(item.get("registry_name") or item.get("raw_tool_name") or "").strip()
+        for item in list(mcp_intent.get("matched_tools") or [])
+        if isinstance(item, dict)
+    ]
+    lines = [
+        "This turn matched MCP intent. Treat registered MCP tools as the primary path for this request.",
+        "Do not answer from KB/RAG documents as a substitute for live MCP results. If no matching MCP tool is available, say that plainly and suggest checking the control-panel MCP connection and tool catalog.",
+        "First search operational guidance with search_skills for MCP workflow guidance when that tool is available.",
+        "Then call discover_tools with group=\"mcp\" and the user's task as the query before invoking any MCP capability.",
+        "Use call_deferred_tool only for an MCP tool returned by discover_tools in this same turn, and pass only tool arguments required by that returned schema.",
+    ]
+    if discover_query:
+        lines.append(f"Recommended MCP discovery query: {discover_query[:500]}")
+    if matched_connections:
+        lines.append("Matched MCP connections: " + ", ".join(matched_connections[:5]))
+    if matched_tools:
+        lines.append("Candidate MCP tools: " + ", ".join(matched_tools[:5]))
+    return "\n".join(lines)
+
+
 def _get_document_by_id(doc_store: Any, *, doc_id: str, tenant_id: str) -> Any | None:
     if doc_store is None or not hasattr(doc_store, "get_document"):
         return None
@@ -469,6 +507,9 @@ class QueryLoop:
             sections.append(ContextSection(name="active_doc_focus", content=active_doc_focus, priority=90, preserve=True))
         if task_context:
             sections.append(ContextSection(name="task_context", title="Task Context", content=task_context, priority=75))
+        mcp_block = mcp_intent_prompt_block(dict(session_state.metadata or {}), user_text=user_text)
+        if mcp_block:
+            sections.append(ContextSection(name="mcp_intent", title="MCP Intent", content=mcp_block, priority=87, preserve=True))
         deferred_tool_block = self._deferred_tool_prompt_block(deferred_tool_summary)
         if deferred_tool_block:
             sections.append(ContextSection(name="deferred_tools", title="Deferred Tool Discovery", content=deferred_tool_block, priority=74))

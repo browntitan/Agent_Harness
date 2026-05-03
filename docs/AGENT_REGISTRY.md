@@ -46,9 +46,11 @@ Expected loaded live roles:
 - `basic`
 - `general`
 - `coordinator`
+- `research_coordinator`
 - `utility`
 - `data_analyst`
 - `rag_worker`
+- `rag_researcher`
 - `graph_manager`
 - `planner`
 - `finalizer`
@@ -57,8 +59,19 @@ Expected loaded live roles:
 
 Routable starts come from `list_routable()` rather than the full loaded set. Current
 top-level non-`basic` starts include `general`, `coordinator`, `data_analyst`, `rag_worker`,
-and `graph_manager`. `graph_manager` is intentionally both routable and delegable: its
-metadata is `role_kind=top_level_or_worker` with `entry_path=router_fast_path_or_delegated`.
+`research_coordinator`, and `graph_manager`. `graph_manager` is intentionally both routable
+and delegable: its metadata is `role_kind=top_level_or_worker` with
+`entry_path=router_fast_path_or_delegated`.
+
+`research_coordinator` is the manager selected for long-running or corpus-scale research
+campaigns. It has `metadata.research_campaign_agent=true`, uses the normal coordinator mode,
+and can launch `rag_researcher` alongside `rag_worker`, `graph_manager`, `general`,
+`finalizer`, and `verifier`.
+
+`rag_researcher` is loaded but not routable. It is a ReAct-style RAG research specialist with
+`metadata.manual_override_allowed=true`; API/demo callers can select it through
+`metadata.requested_agent`, and coordinators can delegate to it, but normal router policy does
+not start there automatically.
 
 The registry can still load `memory_maintainer`, but the runtime filters it out of the
 requested-agent override surface and blocks launches when `MEMORY_ENABLED=false`.
@@ -73,3 +86,7 @@ requested-agent override surface and blocks launches when `MEMORY_ENABLED=false`
 4. builds tool policy and execution context from that definition
 
 Coordinator workers are also resolved through the same registry.
+
+`RuntimeService.list_requested_agent_overrides()` starts from routable non-`basic` roles and
+then appends non-routable agents that explicitly set `manual_override_allowed`. That is why
+`rag_researcher` is a valid manual override even though it is absent from `list_routable()`.

@@ -1,0 +1,19 @@
+sale_id,invoice_id,order_date,region_code,product_line,customer_segment,units,gross_revenue_usd,discount_pct,refund_usd,net_revenue_usd,marketing_spend_usd,close_status,notes
+S-001,INV-001,2026-01-05,NE,Core,Enterprise,10,"$11,400.00",5%,$0.00,"$11,400.00",$900.00,Won,standard order
+S-002,INV-002,01/07/2026,SW,Analytics,Mid-Market,5,"$11,250.00",10%,"$2,250.00","$9,000.00","$1,025.00",Won,partial return later
+S-003,INV-003,2026/01/09,NE,Automation,SMB,7,"$12,600.00",0%,$0.00,"$12,600.00","$1,150.00",Won,clean
+S-004,INV-004,Jan 13 2026,MW,Core,Enterprise,12,"$12,144.00",12%,"$2,024.00","$10,195.00","$1,275.00",Won,return and restock fee
+S-005,INV-005,2026-01-18,SE,Billing,SMB,18,"$8,100.00",0%,$0.00,"$8,100.00","$1,400.00",Won,low ASP
+S-006,INV-006,2026-01-20,SW,Core,Mid-Market,9,"$9,562.50",15%,$0.00,"$9,562.50","$1,525.00",Won,large discount
+S-007,INV-007,2026-02-02,NE,Analytics,Enterprise,6,"$14,352.00",8%,$0.00,"$14,352.00","$1,650.00",Won,partner sourced
+S-008,INV-008,02/04/2026,MW,Automation,SMB,4,"$7,600.00",0%,$0.00,"$7,600.00","$1,775.00",Won,
+S-009,INV-009,2026-02-10,SE,Core,Mid-Market,15,"$16,815.00",5%,$0.00,"$16,815.00","$1,900.00",Won,standard discount
+S-010,INV-010,2026-02-14,SW,Billing,SMB,20,"$6,880.00",20%,"$1,720.00","$5,160.00","$2,025.00",Won,duplicate invoice appears in CSV fixture
+S-011,INV-011,2026-02-19,NE,Core,Enterprise,8 units,"$9,680.00",0%,$0.00,"$9,680.00","$2,150.00",Won,
+S-012,INV-012,2026-02-22,SE,Analytics,Mid-Market,3,"$7,267.50",5%,$0.00,"$7,267.50","$2,275.00",Won,small enterprise upsell
+S-013,INV-013,2026-03-03,MW,Core,SMB,11,"$12,435.50",5%,$0.00,"$12,435.50","$2,400.00",Won,
+S-014,INV-014,03/08/2026,SW,Automation,Mid-Market,5,"$8,460.00",10%,$0.00,"$8,460.00",,Won,
+S-015,INV-015,2026-03-12,NE,Billing,Enterprise,25,"$11,000.00",0%,"$1,320.00","$9,730.00","$2,650.00",Won,setup issue
+S-016,INV-016,2026-03-19,SE,Automation,SMB,6,"$10,267.20",7%,"$1,711.20","$8,596.00","$2,775.00",Won,return and restock fee
+S-017,INV-010,2026-02-14,SW,Billing,SMB,20,"$6,880.00",20%,"$1,720.00","$5,160.00","$2,025.00",Won,intentional duplicate invoice row; should not be double-counted
+S-018,INV-018,not set,SW,Analytics,Mid-Market,pending,TBD,15%,$0.00,TBD,"$1,250.00",Open,open pipeline row; exclude from won revenue summaries

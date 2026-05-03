@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 
 import pytest
 
@@ -56,6 +56,39 @@ def test_probe_sandbox_image_fails_when_offline_import_probe_fails(monkeypatch):
     assert result.ok is False
     assert "failed the offline import probe" in result.detail
     assert "pandas" in result.detail
+
+
+def test_probe_sandbox_image_respects_timeout_for_image_inspect(monkeypatch):
+    monkeypatch.setattr("agentic_chatbot_next.sandbox.images.check_docker_availability", lambda timeout_seconds=8.0: type("R", (), {"ok": True, "detail": "ok", "remediation": ""})())
+    monkeypatch.setattr("agentic_chatbot_next.sandbox.images.shutil.which", lambda name: "/usr/local/bin/docker")
+    timeouts = []
+
+    def fake_run(command, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        raise TimeoutExpired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr("agentic_chatbot_next.sandbox.images.subprocess.run", fake_run)
+
+    result = probe_sandbox_image(DEFAULT_SANDBOX_IMAGE, timeout_seconds=2.5)
+
+    assert result.ok is False
+    assert timeouts == [2.5]
+    assert "Could not inspect sandbox image" in result.detail
+
+
+def test_probe_sandbox_image_uses_bounded_docker_availability_timeout(monkeypatch):
+    captured = {}
+
+    def fake_check(timeout_seconds=8.0):
+        captured["timeout_seconds"] = timeout_seconds
+        return type("R", (), {"ok": False, "detail": "docker unavailable", "remediation": "start docker"})()
+
+    monkeypatch.setattr("agentic_chatbot_next.sandbox.images.check_docker_availability", fake_check)
+
+    result = probe_sandbox_image(DEFAULT_SANDBOX_IMAGE, timeout_seconds=3.0)
+
+    assert result.ok is False
+    assert captured["timeout_seconds"] == 3.0
 
 
 def test_build_sandbox_image_builds_then_verifies(monkeypatch, tmp_path: Path):

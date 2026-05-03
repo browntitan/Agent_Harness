@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from agentic_chatbot_next.contracts.rag import Citation, RagContract, RetrievalSummary
 from agentic_chatbot_next.rag.hints import (
@@ -61,6 +61,7 @@ from agentic_chatbot_next.rag.retrieval_scope import (
 )
 from agentic_chatbot_next.rag.synthesis import build_extractive_grounded_answer, generate_grounded_answer
 from agentic_chatbot_next.rag.tabular import (
+    deterministic_status_evidence_results,
     plan_tabular_evidence_tasks,
     tabular_evidence_results_to_documents,
 )
@@ -76,6 +77,42 @@ def _tenant_id(settings: Any, session: Any) -> str:
         or getattr(settings, "default_tenant_id", "local-dev")
         or "local-dev"
     )
+
+
+def _mapping_or_attr(value: Any, key: str, default: Any = "") -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _requires_mermaid_output(
+    question: str,
+    *,
+    answer_contract: Any | None = None,
+    presentation_preferences: Dict[str, Any] | None = None,
+) -> bool:
+    final_output_mode = str(_mapping_or_attr(answer_contract, "final_output_mode", "") or "").strip().lower()
+    diagram_policy = str((presentation_preferences or {}).get("diagram_policy") or "").strip().lower()
+    if "mermaid" in final_output_mode or diagram_policy == "require_mermaid":
+        return True
+    return bool(re.search(r"\bmermaid\b", str(question or ""), flags=re.IGNORECASE))
+
+
+def _prefers_mermaid_output(
+    question: str,
+    *,
+    answer_contract: Any | None = None,
+    presentation_preferences: Dict[str, Any] | None = None,
+) -> bool:
+    if _requires_mermaid_output(
+        question,
+        answer_contract=answer_contract,
+        presentation_preferences=presentation_preferences,
+    ):
+        return True
+    diagram_policy = str((presentation_preferences or {}).get("diagram_policy") or "").strip().lower()
+    final_output_mode = str(_mapping_or_attr(answer_contract, "final_output_mode", "") or "").strip().lower()
+    return bool(diagram_policy == "auto_mermaid" or "diagram" in final_output_mode)
 
 
 def _early_contract(query: str, answer_payload: Dict[str, Any], *, search_mode: str = "none") -> RagContract:
@@ -415,6 +452,405 @@ def _content_terms(value: str) -> set[str]:
     }
 
 
+_STRUCTURED_LABEL_ALIASES: Dict[str, tuple[str, ...]] = {
+    "approval": ("approval", "approver", "approved by", "approval owner"),
+    "cost": ("cost", "amount", "price", "budget", "spend", "revenue", "value"),
+    "customer": ("customer", "client", "account"),
+    "date": ("date", "due", "deadline", "milestone", "target date"),
+    "issue": ("issue", "problem", "defect", "finding"),
+    "owner": ("owner", "assignee", "responsible", "lead", "poc"),
+    "region": ("region", "area", "territory"),
+    "risk": ("risk", "hazard", "threat"),
+    "status": ("status", "state", "disposition", "outcome"),
+    "supplier": ("supplier", "vendor", "provider", "manufacturer"),
+}
+_STRUCTURED_CONTEXT_LABEL_TERMS = {
+    "comment",
+    "comments",
+    "context",
+    "evidence",
+    "finding",
+    "findings",
+    "note",
+    "notes",
+    "question",
+    "ref",
+    "refs",
+    "source",
+    "sources",
+}
+
+
+def _doc_is_binding_structured_evidence(doc: Any) -> bool:
+    metadata = dict(getattr(doc, "metadata", {}) or {})
+    source_type = str(metadata.get("source_type") or "").strip().lower()
+    chunk_type = str(metadata.get("chunk_type") or "").strip().lower()
+    return bool(
+        metadata.get("is_synthetic_evidence")
+        or source_type in {"tabular_analysis", "tool_result"}
+        or chunk_type in {"tabular_analysis", "tool_result"}
+        or metadata.get("sheet_name")
+        or metadata.get("cell_range")
+        or metadata.get("row_start") is not None
+    )
+
+
+def _structured_label_terms(question: str) -> set[str]:
+    lowered = str(question or "").casefold()
+    requested: set[str] = set()
+    for canonical, aliases in _STRUCTURED_LABEL_ALIASES.items():
+        for alias in aliases:
+            if re.search(rf"\b{re.escape(alias.casefold())}s?\b", lowered):
+                requested.add(canonical)
+                requested.update(alias.casefold().split())
+                break
+    return requested
+
+
+def _structured_label_tokens(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+def _structured_label_match_score(label: str, requested: set[str]) -> float:
+    if not requested:
+        return 0.0
+    lowered = str(label or "").casefold()
+    label_tokens = _structured_label_tokens(lowered)
+    if not label_tokens:
+        return 0.0
+    score = 0.0
+    for canonical, aliases in _STRUCTURED_LABEL_ALIASES.items():
+        canonical_requested = canonical in requested
+        for alias in aliases:
+            alias_tokens = _structured_label_tokens(alias)
+            if not alias_tokens:
+                continue
+            alias_requested = bool(alias_tokens & requested)
+            if alias_requested and label_tokens == alias_tokens:
+                score = max(score, 6.0)
+            elif alias_requested and alias_tokens <= label_tokens:
+                score = max(score, 5.0)
+            elif alias_requested and alias in lowered:
+                score = max(score, 4.0)
+            elif canonical_requested and canonical in label_tokens:
+                score = max(score, 4.0)
+            elif canonical_requested and alias_tokens <= label_tokens:
+                score = max(score, 1.5)
+    if label_tokens & _STRUCTURED_CONTEXT_LABEL_TERMS and len(label_tokens) > 1:
+        score = max(0.0, score - 3.0)
+    return score
+
+
+def _label_matches_requested(label: str, requested: set[str]) -> bool:
+    return _structured_label_match_score(label, requested) > 0.0
+
+
+def _extract_labeled_values(text: str) -> list[Dict[str, str]]:
+    values: list[Dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in re.finditer(
+        r"\b([A-Za-z][A-Za-z0-9_ /-]{1,42})\s*:\s*([^|;\n.]{1,120})",
+        str(text or ""),
+    ):
+        label = re.sub(r"\s+", " ", match.group(1)).strip(" -")
+        value = re.sub(r"\s+", " ", match.group(2)).strip(" ,")
+        if not label or not value:
+            continue
+        if len(value) < 2 or value.casefold() in {"none", "n/a", "unknown"}:
+            continue
+        key = (label.casefold(), value.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append({"label": label, "value": value})
+        if len(values) >= 20:
+            break
+    return values
+
+
+def _structured_candidate_score(question: str, doc: Any) -> float:
+    metadata = dict(getattr(doc, "metadata", {}) or {})
+    content = str(getattr(doc, "page_content", "") or "")
+    query_terms = _content_terms(question)
+    evidence_terms = _content_terms(
+        " ".join(
+            [
+                str(metadata.get("title") or ""),
+                str(metadata.get("source_path") or ""),
+                str(metadata.get("sheet_name") or ""),
+                str(metadata.get("cell_range") or ""),
+                content[:1800],
+            ]
+        )
+    )
+    score = float(len(query_terms & evidence_terms))
+    score += float(metadata.get("_adaptive_score") or 0.0) * 0.05
+    score += max(0.0, float(metadata.get("tabular_confidence") or 0.0)) * 3.0
+    if bool(metadata.get("is_synthetic_evidence")):
+        score += 8.0
+    if metadata.get("sheet_name") or metadata.get("cell_range") or metadata.get("row_start") is not None:
+        score += 3.0
+    return score
+
+
+def _binding_evidence_candidates(question: str, docs: list[Any], *, limit: int = 6) -> list[Dict[str, Any]]:
+    requested_labels = _structured_label_terms(question)
+    candidates: list[Dict[str, Any]] = []
+    for doc in docs:
+        if not _doc_is_binding_structured_evidence(doc):
+            continue
+        metadata = dict(getattr(doc, "metadata", {}) or {})
+        content = str(getattr(doc, "page_content", "") or "")
+        labeled_values = _extract_labeled_values(content)
+        requested_values: list[Dict[str, str]] = []
+        requested_label_score = 0.0
+        for item in labeled_values:
+            label_score = _structured_label_match_score(str(item.get("label") or ""), requested_labels)
+            if label_score >= 3.0:
+                requested_values.append({**item, "label_score": round(label_score, 3)})
+                requested_label_score += label_score
+        candidate_values = requested_values or labeled_values[:5]
+        citation_id = str(metadata.get("chunk_id") or "").strip()
+        if not citation_id and not candidate_values:
+            continue
+        candidates.append(
+            {
+                "citation_id": citation_id,
+                "doc_id": str(metadata.get("doc_id") or ""),
+                "title": str(metadata.get("title") or ""),
+                "source_path": str(metadata.get("source_path") or ""),
+                "sheet_name": str(metadata.get("sheet_name") or ""),
+                "cell_range": str(metadata.get("cell_range") or ""),
+                "row_start": metadata.get("row_start"),
+                "row_end": metadata.get("row_end"),
+                "score": round(_structured_candidate_score(question, doc), 3),
+                "requested_label_score": round(requested_label_score, 3),
+                "requested_labeled_values": requested_values[:6],
+                "labeled_values": candidate_values[:6],
+                "snippet": _summary_snippet(content, limit=360),
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            float(item.get("requested_label_score") or 0.0),
+            len(item.get("requested_labeled_values") or []),
+            float(item.get("score") or 0.0),
+        ),
+        reverse=True,
+    )
+    return candidates[: max(1, int(limit))]
+
+
+def _value_present_in_answer(value: str, answer: str) -> bool:
+    clean = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not clean:
+        return False
+    answer_text = re.sub(r"\s+", " ", str(answer or "")).casefold()
+    if clean.casefold() in answer_text:
+        return True
+    terms = [term for term in _content_terms(clean) if len(term) >= 3]
+    if len(terms) >= 2:
+        return all(term in answer_text for term in terms[:4])
+    return bool(terms and terms[0] in answer_text)
+
+
+def _question_expects_keyed_structured_value(question: str) -> bool:
+    text = str(question or "").casefold()
+    return bool(
+        _structured_label_terms(question)
+        or re.search(r"\b(?:what|which|who|when|where|how much|how many)\b", text)
+    )
+
+
+def _build_structured_value_fallback_payload(
+    query: str,
+    candidate: Dict[str, Any],
+    required_values: list[Dict[str, str]],
+) -> Dict[str, Any]:
+    citation_id = str(candidate.get("citation_id") or "").strip()
+    value_parts = [
+        f"{str(item.get('label') or 'Value').strip()}: {str(item.get('value') or '').strip()}"
+        for item in required_values
+        if str(item.get("value") or "").strip()
+    ]
+    if not value_parts:
+        return {}
+    location_parts: list[str] = []
+    if candidate.get("sheet_name"):
+        location_parts.append(f"sheet {candidate['sheet_name']}")
+    row_start = candidate.get("row_start")
+    row_end = candidate.get("row_end")
+    if row_start is not None:
+        if row_end is not None and str(row_end) != str(row_start):
+            location_parts.append(f"rows {row_start}-{row_end}")
+        else:
+            location_parts.append(f"row {row_start}")
+    if candidate.get("cell_range"):
+        location_parts.append(f"cells {candidate['cell_range']}")
+    title = str(candidate.get("title") or candidate.get("doc_id") or "the structured evidence").strip()
+    location = f" ({'; '.join(location_parts)})" if location_parts else ""
+    suffix = f" ({citation_id})" if citation_id else ""
+    answer = f"The structured evidence in {title}{location} supports: {'; '.join(value_parts)}.{suffix}"
+    return {
+        "answer": answer,
+        "used_citation_ids": [citation_id] if citation_id else [],
+        "followups": [],
+        "warnings": ["STRUCTURED_EVIDENCE_VERIFIER_FALLBACK"],
+        "confidence_hint": 0.62,
+    }
+
+
+def _structured_evidence_verifier_feedback(candidate: Dict[str, Any], missing_values: list[Dict[str, str]]) -> str:
+    citation_id = str(candidate.get("citation_id") or "").strip()
+    value_parts = [
+        f"{str(item.get('label') or 'Value').strip()}: {str(item.get('value') or '').strip()}"
+        for item in missing_values
+        if str(item.get("value") or "").strip()
+    ]
+    source_parts = [str(candidate.get("title") or candidate.get("doc_id") or "structured evidence").strip()]
+    if candidate.get("sheet_name"):
+        source_parts.append(f"sheet={candidate['sheet_name']}")
+    if candidate.get("cell_range"):
+        source_parts.append(f"cells={candidate['cell_range']}")
+    if citation_id:
+        source_parts.append(f"citation_id={citation_id}")
+    return (
+        "Evidence verifier feedback: the prior draft omitted binding structured evidence. "
+        f"Use these exact value(s) when answering: {'; '.join(value_parts)}. "
+        f"Ground the answer in {'; '.join(part for part in source_parts if part)}."
+    )
+
+
+def _apply_structured_evidence_arbitration(
+    answer_payload: Dict[str, Any],
+    *,
+    query: str,
+    selected_docs: list[Any],
+    retrieval_run: Any,
+    regenerate_answer: Callable[[Dict[str, Any], list[Dict[str, str]]], Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    candidates = _binding_evidence_candidates(query, selected_docs)
+    verification: Dict[str, Any] = {
+        "attempted": True,
+        "binding_candidate_count": len(candidates),
+        "binding_candidates": [
+            {
+                key: value
+                for key, value in candidate.items()
+                if key
+                in {
+                    "citation_id",
+                    "doc_id",
+                    "title",
+                    "sheet_name",
+                    "cell_range",
+                    "row_start",
+                    "row_end",
+                    "score",
+                    "requested_label_score",
+                    "requested_labeled_values",
+                }
+            }
+            for candidate in candidates[:4]
+        ],
+        "conflicts": [],
+        "action": "accepted",
+    }
+    retrieval_run.retrieval_verification = {
+        **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+        "evidence_verification": verification,
+    }
+    if not candidates or not _question_expects_keyed_structured_value(query):
+        return answer_payload
+
+    answer = str(answer_payload.get("answer") or "")
+    requested_labels = _structured_label_terms(query)
+    requested_candidates = [candidate for candidate in candidates if candidate.get("requested_labeled_values")]
+    top = requested_candidates[0] if requested_labels and requested_candidates else candidates[0]
+    required_values = list(top.get("requested_labeled_values") or []) or list(top.get("labeled_values") or [])[:3]
+    missing_values = [
+        item
+        for item in required_values
+        if not _value_present_in_answer(str(item.get("value") or ""), answer)
+    ]
+    if not missing_values:
+        return answer_payload
+
+    verification["conflicts"] = [
+        {
+            "reason": "answer_omitted_binding_labeled_value",
+            "label": str(item.get("label") or ""),
+            "expected_value": str(item.get("value") or ""),
+            "citation_id": str(top.get("citation_id") or ""),
+        }
+        for item in missing_values[:6]
+    ]
+
+    if regenerate_answer is not None:
+        try:
+            regenerated_payload = regenerate_answer(top, missing_values) or {}
+        except Exception as exc:
+            regenerated_payload = {"warnings": [f"STRUCTURED_EVIDENCE_REGENERATION_FAILED: {exc}"]}
+        regenerated_answer = str(regenerated_payload.get("answer") or "")
+        if regenerated_answer and not any(
+            not _value_present_in_answer(str(item.get("value") or ""), regenerated_answer)
+            for item in missing_values[:2]
+        ):
+            verification["action"] = "regenerated_with_verifier_feedback"
+            retrieval_run.retrieval_verification = {
+                **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+                "evidence_verification": verification,
+            }
+            warnings = [str(item) for item in (regenerated_payload.get("warnings") or []) if str(item)]
+            if "STRUCTURED_EVIDENCE_VERIFIER_REGENERATED" not in warnings:
+                warnings.append("STRUCTURED_EVIDENCE_VERIFIER_REGENERATED")
+            for warning in (answer_payload.get("warnings") or []):
+                if str(warning) and str(warning) not in warnings:
+                    warnings.append(str(warning))
+            return {
+                **answer_payload,
+                **regenerated_payload,
+                "warnings": warnings,
+                "confidence_hint": max(
+                    float(answer_payload.get("confidence_hint") or 0.0),
+                    float(regenerated_payload.get("confidence_hint") or 0.0),
+                ),
+            }
+
+    fallback_payload = _build_structured_value_fallback_payload(query, top, missing_values) or build_extractive_grounded_answer(
+        query,
+        [
+            doc
+            for doc in selected_docs
+            if str((getattr(doc, "metadata", {}) or {}).get("chunk_id") or "") == str(top.get("citation_id") or "")
+        ]
+        or [doc for doc in selected_docs if _doc_is_binding_structured_evidence(doc)],
+        warning="STRUCTURED_EVIDENCE_VERIFIER_FALLBACK",
+    )
+    fallback_answer = str(fallback_payload.get("answer") or "")
+    if not fallback_answer or any(
+        not _value_present_in_answer(str(item.get("value") or ""), fallback_answer)
+        for item in missing_values[:2]
+    ):
+        return answer_payload
+
+    verification["action"] = "replaced_with_structured_extractive_answer"
+    retrieval_run.retrieval_verification = {
+        **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+        "evidence_verification": verification,
+    }
+    warnings = [str(item) for item in (fallback_payload.get("warnings") or []) if str(item)]
+    for warning in (answer_payload.get("warnings") or []):
+        if str(warning) and str(warning) not in warnings:
+            warnings.append(str(warning))
+    return {
+        **answer_payload,
+        **fallback_payload,
+        "warnings": warnings,
+        "confidence_hint": max(float(answer_payload.get("confidence_hint") or 0.0), float(fallback_payload.get("confidence_hint") or 0.0)),
+    }
+
+
 def _augment_used_citation_ids(
     *,
     query: str,
@@ -493,9 +929,6 @@ def _augment_with_tabular_evidence(
     runtime_bridge: RagRuntimeBridge | None,
     progress_emitter: Any | None = None,
 ) -> tuple[List[Any], List[str]]:
-    if runtime_bridge is None or not hasattr(runtime_bridge, "run_tabular_evidence_tasks"):
-        return selected_docs, []
-
     max_tasks = int(getattr(settings, "rag_tabular_handoff_max_tasks", 2) or 2)
     planning_docs = _merge_unique_documents(selected_docs, list(getattr(retrieval_run, "candidate_docs", []) or []))
     tasks = plan_tabular_evidence_tasks(query, planning_docs, max_tasks=max_tasks)
@@ -508,7 +941,7 @@ def _augment_with_tabular_evidence(
             label="Analyzing spreadsheet evidence",
             detail=f"{len(tasks)} tabular source(s)",
             agent="rag_worker",
-            waiting_on="data_analyst",
+            waiting_on="status_extractor",
             docs=[
                 {
                     "doc_id": task.doc_id,
@@ -528,6 +961,64 @@ def _augment_with_tabular_evidence(
         "tasks": [task.to_dict() for task in tasks],
     }
     warnings: List[str] = []
+    status_started = time.perf_counter()
+    status_results, status_warnings, status_stats = deterministic_status_evidence_results(query, tasks)
+    status_docs = tabular_evidence_results_to_documents(status_results, tasks)
+    _record_stage_timing(retrieval_run, "status_workbook_extractor", (time.perf_counter() - status_started) * 1000.0)
+    if status_stats.get("attempted"):
+        handoff_record["status_workbook"] = status_stats
+        try:
+            retrieval_run.status_extractors = dict(status_stats)
+        except Exception:
+            pass
+    if status_docs:
+        selected_docs = _merge_unique_documents(status_docs, selected_docs)
+        candidate_counts = dict(getattr(retrieval_run, "candidate_counts", {}) or {})
+        candidate_counts["status_workbook_evidence_docs"] = len(status_docs)
+        candidate_counts["status_workbook_records"] = int(status_stats.get("record_count") or 0)
+        retrieval_run.candidate_counts = candidate_counts
+        strategies = list(getattr(retrieval_run, "strategies_used", []) or [])
+        if "status_workbook_extractor" not in strategies:
+            strategies.append("status_workbook_extractor")
+        retrieval_run.strategies_used = strategies
+        sources_used = list(getattr(retrieval_run, "sources_used", []) or [])
+        for task in tasks:
+            if task.title and task.title not in sources_used:
+                sources_used.append(task.title)
+        retrieval_run.sources_used = sources_used
+        handoff_record.update(
+            {
+                "status": "ok",
+                "source": "deterministic_status_extractor",
+                "result_count": len(status_results),
+                "synthetic_doc_count": len(status_docs),
+                "warnings": list(status_warnings[:8]),
+            }
+        )
+        retrieval_run.retrieval_verification = {
+            **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+            "tabular_handoff": handoff_record,
+        }
+        return selected_docs, list(dict.fromkeys([*warnings, *status_warnings]))
+
+    if runtime_bridge is None or not hasattr(runtime_bridge, "run_tabular_evidence_tasks"):
+        if status_warnings:
+            warnings.append("STATUS_WORKBOOK_EXTRACTOR_WARNINGS")
+        handoff_record.update(
+            {
+                "status": "no_structured_evidence",
+                "source": "deterministic_status_extractor",
+                "warnings": list(status_warnings[:8]),
+            }
+        )
+        retrieval_run.retrieval_verification = {
+            **dict(getattr(retrieval_run, "retrieval_verification", {}) or {}),
+            "tabular_handoff": handoff_record,
+        }
+        return selected_docs, list(dict.fromkeys(warnings))
+
+    handoff_record["fallback_to_worker"] = True
+    started = time.perf_counter()
     try:
         batch = runtime_bridge.run_tabular_evidence_tasks(tasks)
     except Exception as exc:
@@ -779,6 +1270,20 @@ def run_rag_contract(
     resolved_coverage_goal = normalize_coverage_goal(coverage_goal)
     resolved_result_mode = normalize_result_mode(result_mode)
     resolved_controller_hints = coerce_controller_hints(controller_hints)
+    session_metadata = dict(getattr(session, "metadata", {}) or {})
+    resolved_turn_intent = (
+        dict(session_metadata.get("resolved_turn_intent") or {})
+        if isinstance(session_metadata.get("resolved_turn_intent"), dict)
+        else {}
+    )
+    if answer_contract is None:
+        maybe_contract = resolved_turn_intent.get("answer_contract")
+        answer_contract = dict(maybe_contract) if isinstance(maybe_contract, dict) else maybe_contract
+    presentation_preferences = (
+        dict(resolved_turn_intent.get("presentation_preferences") or {})
+        if isinstance(resolved_turn_intent.get("presentation_preferences"), dict)
+        else {}
+    )
     if answer_contract is not None and not answer_contract_allows_inventory(answer_contract):
         if resolved_result_mode == "inventory" or bool(resolved_controller_hints.get("prefer_inventory_output")):
             resolved_result_mode = "comparison" if answer_contract_kind(answer_contract) == "comparison" else "answer"
@@ -790,7 +1295,6 @@ def run_rag_contract(
             ):
                 resolved_controller_hints.pop(key, None)
     tenant_id = _tenant_id(settings, session)
-    session_metadata = dict(getattr(session, "metadata", {}) or {})
     route_context = dict(session_metadata.get("route_context") or {})
     resolved_controller_hints = {
         **deep_rag_controller_hints(route_context),
@@ -1040,6 +1544,7 @@ def run_rag_contract(
         progress_emitter=progress_emitter,
     )
 
+    inventory_mode = False
     if not selected_docs:
         if scope_decision.mode in {"kb_only", "both"} and kb_status is not None and not kb_status.ready:
             answer_payload = _kb_not_ready_answer(kb_status)
@@ -1073,6 +1578,8 @@ def run_rag_contract(
                         coverage_goal=resolved_coverage_goal,
                         result_mode=resolved_result_mode,
                         controller_hints=resolved_controller_hints,
+                        answer_contract=answer_contract,
+                        presentation_preferences=presentation_preferences,
                     ),
                     evidence_docs=selected_docs,
                     callbacks=callbacks or [],
@@ -1153,6 +1660,8 @@ def run_rag_contract(
                         coverage_goal=resolved_coverage_goal,
                         result_mode=resolved_result_mode,
                         controller_hints=resolved_controller_hints,
+                        answer_contract=answer_contract,
+                        presentation_preferences=presentation_preferences,
                     ),
                     evidence_docs=selected_docs,
                     callbacks=callbacks or [],
@@ -1173,6 +1682,49 @@ def run_rag_contract(
                     rejected_candidates=rejected_discovery_candidates,
                     verification_failed=True,
                 )
+    structured_regenerate_answer = None
+    if not inventory_mode and selected_docs and not _budget_requires_extractive_fallback(retrieval_run, settings):
+        def structured_regenerate_answer(candidate: Dict[str, Any], missing_values: list[Dict[str, str]]) -> Dict[str, Any]:
+            feedback = _structured_evidence_verifier_feedback(candidate, missing_values)
+            regeneration_started = time.perf_counter()
+            payload = generate_grounded_answer(
+                providers.chat,
+                settings=settings,
+                question=query,
+                conversation_context=(
+                    _answer_context(
+                        query,
+                        conversation_context,
+                        retrieval_run.evidence_ledger,
+                        base_guidance=base_guidance,
+                        skill_context=skill_context,
+                        task_context=task_context,
+                        coverage_goal=resolved_coverage_goal,
+                        result_mode=resolved_result_mode,
+                        controller_hints=resolved_controller_hints,
+                        answer_contract=answer_contract,
+                        presentation_preferences=presentation_preferences,
+                    )
+                    + "\n\n"
+                    + feedback
+                ),
+                evidence_docs=selected_docs,
+                callbacks=callbacks or [],
+            )
+            _record_stage_timing(
+                retrieval_run,
+                "structured_evidence_regeneration",
+                (time.perf_counter() - regeneration_started) * 1000.0,
+            )
+            return payload
+
+    answer_payload = _apply_structured_evidence_arbitration(
+        answer_payload,
+        query=query,
+        selected_docs=selected_docs,
+        retrieval_run=retrieval_run,
+        regenerate_answer=structured_regenerate_answer,
+    )
     answer_payload = _apply_requested_doc_resolution_note(
         answer_payload,
         resolution=requested_doc_resolution,
@@ -1264,6 +1816,8 @@ def _answer_context(
     coverage_goal: str = "",
     result_mode: str = "",
     controller_hints: Dict[str, Any] | None = None,
+    answer_contract: Any | None = None,
+    presentation_preferences: Dict[str, Any] | None = None,
 ) -> str:
     context = str(conversation_context or "").strip()
     normalized_controller_hints = coerce_controller_hints(controller_hints)
@@ -1274,8 +1828,8 @@ def _answer_context(
     if prefers_bounded_synthesis(question) and not detailed_doc_focus_mode:
         context = (
             f"{context}\n\n"
-            "Formatting directive: answer with one short synthesis paragraph, then 3 to 6 bullets "
-            "covering the main implementation details, and end with a `Sources:` line naming the "
+            "Formatting directive: answer with a direct synthesis, then supporting bullets or a compact table "
+            "covering the main implementation details when they help, and end with a `Sources:` line naming the "
             "most relevant documents used. Do not switch into a per-document inventory unless the "
             "user explicitly asked to list or identify documents."
         ).strip()
@@ -1295,6 +1849,28 @@ def _answer_context(
         context = (
             f"{context}\n\n"
             "Formatting directive: prefer a per-document inventory with file titles and short grounded evidence."
+        ).strip()
+    if _requires_mermaid_output(
+        question,
+        answer_contract=answer_contract,
+        presentation_preferences=presentation_preferences,
+    ):
+        context = (
+            f"{context}\n\n"
+            "Formatting directive: produce the final answer as exactly one fenced ```mermaid code block, "
+            "using simple Mermaid-safe node labels derived from the evidence. Put citations, source notes, "
+            "warnings, and uncertainty outside the code block under a short Grounding notes section; do not place "
+            "citation IDs or markdown links inside Mermaid node labels."
+        ).strip()
+    elif _prefers_mermaid_output(
+        question,
+        answer_contract=answer_contract,
+        presentation_preferences=presentation_preferences,
+    ):
+        context = (
+            f"{context}\n\n"
+            "Formatting directive: include a Mermaid diagram when it helps communicate the grounded workflow or architecture. "
+            "Keep citations and grounding notes outside the Mermaid code block."
         ).strip()
     if normalize_coverage_goal(coverage_goal) in {"corpus_wide", "exhaustive"}:
         context = (

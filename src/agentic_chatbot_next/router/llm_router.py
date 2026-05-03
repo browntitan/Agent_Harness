@@ -42,6 +42,7 @@ from agentic_chatbot_next.router.router import (
     is_requirements_inventory_request,
     route_message,
 )
+from agentic_chatbot_next.router.mcp_intent import mcp_intent_detected
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +341,29 @@ def _deterministic_fast_path(
                 ),
                 confidence=1.0,
                 reasoning="explicit_force_agent",
+                session_metadata=metadata,
+            ),
+        )
+
+    if mcp_intent_detected(metadata):
+        mcp_intent = dict(metadata.get("mcp_intent") or {})
+        reasons = ["mcp_intent"]
+        trigger = str(mcp_intent.get("trigger") or "").strip()
+        if trigger:
+            reasons.append(f"mcp_intent_{trigger}")
+        return RouterDecision(
+            route="AGENT",
+            confidence=0.94,
+            reasons=reasons,
+            suggested_agent=targets.default_agent,
+            router_method="deterministic",
+            router_evidence={"mcp_intent": mcp_intent},
+            semantic_contract=build_deterministic_semantic_contract(
+                user_text=user_text,
+                route="AGENT",
+                suggested_agent=targets.default_agent,
+                confidence=0.94,
+                reasoning="; ".join(reasons),
                 session_metadata=metadata,
             ),
         )

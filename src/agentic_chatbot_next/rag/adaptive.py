@@ -973,6 +973,8 @@ class RetrievalRun:
     claim_ledger: Dict[str, Any] = field(default_factory=dict)
     verified_hops: List[str] = field(default_factory=list)
     retrieval_verification: Dict[str, Any] = field(default_factory=dict)
+    workbook_profiles: Dict[str, Any] = field(default_factory=dict)
+    status_extractors: Dict[str, Any] = field(default_factory=dict)
     stage_timings_ms: Dict[str, float] = field(default_factory=dict)
     budget_ms: int = 0
     budget_exhausted: bool = False
@@ -1000,6 +1002,8 @@ class RetrievalRun:
             claim_ledger=dict(self.claim_ledger),
             verified_hops=list(self.verified_hops),
             retrieval_verification=dict(self.retrieval_verification),
+            workbook_profiles=dict(self.workbook_profiles),
+            status_extractors=dict(self.status_extractors),
             stage_timings_ms=dict(self.stage_timings_ms),
             budget_ms=int(self.budget_ms),
             budget_exhausted=bool(self.budget_exhausted),

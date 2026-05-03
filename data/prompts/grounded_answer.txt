@@ -3,9 +3,11 @@ Answer the QUESTION using ONLY the EVIDENCE snippets provided.
 Rules:
 - If a claim depends on evidence, cite it inline using (citation_id).
 - If evidence is insufficient, say what is missing and ask a clarifying question.
-- Prefer the smallest answer shape that fully answers the request.
-- For explanatory questions, prefer one short synthesis paragraph followed by 3-6 bullets.
+- Default to substantial but not verbose: answer directly and include enough cited context, distinctions, and caveats to make the answer useful.
+- For explanatory questions, prefer a short synthesis followed by supporting bullets or a compact table when evidence supports it.
 - Use per-document inventories only when the request explicitly asks which files or documents matched.
+- For workbook/status evidence, preserve workbook, sheet, row(s), cell range, and key column values from the evidence text.
+- Evidence marked `binding_structured` is direct tool-extracted or structured evidence; prefer it over weaker neighboring snippets when answering keyed facts, and do not replace its labeled values with values from other evidence.
 - Preserve uncertainty or conflicting evidence instead of resolving it by guesswork.
 - Do NOT fabricate document details.
 

@@ -34,10 +34,11 @@ Supported arguments:
 - `search_mode`
 - `max_search_rounds`
 - `scratchpad_context_key`
-
-Internal planner/worker payloads may carry additional RAG-shaping fields such as
-`research_profile`, `coverage_goal`, `result_mode`, and `controller_hints`, but those are
-not part of the public `rag_agent_tool` input surface.
+- `research_profile`
+- `coverage_goal`
+- `result_mode`
+- `controller_hints_json`
+- `skill_context`
 
 Coordinator-owned typed handoff artifacts are also internal-only. They can shape the live
 `rag_worker` path, but direct tool callers do not send them as first-class tool arguments.
@@ -45,6 +46,8 @@ Coordinator-owned typed handoff artifacts are also internal-only. They can shape
 Important boundary:
 
 - `rag_agent_tool` exposes caller-controlled retrieval knobs
+- `controller_hints_json` is the public JSON-string form of controller hints; it must parse
+  to a JSON object
 - exact file targeting for named indexed docs is now also available through the read-only
   `resolve_indexed_docs`, `search_indexed_docs`, `read_indexed_doc`, and
   `compare_indexed_docs` tools
@@ -55,9 +58,27 @@ Important boundary:
 - planner/coordinator payloads may add internal structured retrieval hints
 - typed handoffs may add validated downstream context for worker-to-worker campaigns
 - optional GraphRAG augmentation stays internal to the retrieval controller
+- `skill_context` is optional synthesis guidance; it does not bypass citation grounding
 
 That split is what lets the runtime support both direct grounded RAG and delegated
 tool-wrapped grounded RAG without changing the contract shape.
+
+Invalid controller-hint examples return a warning contract without running retrieval:
+
+```json
+{
+  "answer": "",
+  "citations": [],
+  "used_citation_ids": [],
+  "confidence": 0.0,
+  "retrieval_summary": {
+    "query_used": "find evidence",
+    "search_mode": "none"
+  },
+  "followups": [],
+  "warnings": ["INVALID_CONTROLLER_HINTS_JSON: expected a JSON object"]
+}
+```
 
 ## Output
 
@@ -126,8 +147,9 @@ For direct callers, the tool still returns one final answer contract. The intern
 fan-out path is runtime-owned and not exposed as a separate public tool surface.
 
 For broad corpus-discovery campaigns, the public tool is still only one piece of the full
-runtime story. The live system now prefers coordinator-owned multi-worker planning above
-the tool layer, while preserving the same public contract for any direct RAG tool call.
+runtime story. The live system now prefers `research_coordinator`-owned multi-worker
+planning above the tool layer, while preserving the same public contract for any direct RAG
+tool call.
 
 When GraphRAG is enabled, that remains true: graph traversal is an internal retrieval
 augmentation step. End-user graph inventory and graph-backed evidence may also route directly

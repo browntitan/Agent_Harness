@@ -31,6 +31,12 @@ The runtime has also been hardened beyond the original foundation pass with:
 - validated `metadata.requested_agent` overrides for API/demo/operator control
 - provider-level circuit breakers and graceful degradation paths
 - bounded coordinator revision rounds
+- `research_coordinator` as the routed manager for deep corpus campaigns
+- `rag_researcher` as a manual/delegated ReAct RAG researcher
+- deferred `rag_workbench` tools for query planning, structure navigation, evidence grading,
+  pruning, validation, and controller-hint construction
+- optional reranking through the local Ollama reranker defaults
+- frontend event policy and context-budget controls
 - runtime skill CRUD and scoped skill versioning through the gateway
 - capability profiles, RBAC clipping, deferred tool discovery, and MCP tool catalogs
 - coordinator-owned typed handoffs for worker campaigns
@@ -112,10 +118,14 @@ That live surface now includes:
 - `/v1/capabilities/catalog` and `/v1/users/me/capabilities` for effective user capability
   profiles
 - summarized streaming progress milestones for the UI timeline
+- safe frontend audit/context events such as `agent_context_loaded`, gated by
+  `FRONTEND_EVENTS_*`
 - coordinator-owned typed handoff artifacts for planned worker campaigns
 - optional session/job-scoped team mailbox coordination for typed peer status, handoff, and
   question flows
 - `graph_manager` as a routable-or-worker graph specialist
+- `research_coordinator` as the router-preferred manager for corpus-scale research campaigns
+- `rag_researcher` as a non-routable but manually selectable/delegable RAG research specialist
 - managed GraphRAG backed by PostgreSQL graph stores, with Neo4j compatibility guarded by
   backend settings
 
@@ -209,3 +219,13 @@ Important graph-related operator knobs now include:
 
 Those settings keep graph retrieval optional. The live runtime defaults to managed Microsoft
 GraphRAG and still works without Neo4j.
+
+Nearby non-graph defaults worth keeping aligned with code:
+
+- `MAX_REVISION_ROUNDS=8` is the configured default; coordinator execution may apply lower
+  effective caps by workflow type
+- `RERANK_ENABLED=true`, `RERANK_PROVIDER=ollama`, and
+  `RERANK_MODEL=rjmalagon/mxbai-rerank-large-v2:1.5b-fp16` are the local reranker defaults
+- `CONTEXT_BUDGET_ENABLED=false` keeps context budgeting opt-in, but the manager is wired into
+  the kernel/query loop
+- `FRONTEND_EVENTS_DETAIL_LEVEL=safe_preview` is the default UI transparency posture

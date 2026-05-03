@@ -75,7 +75,9 @@ describe('control-panel api error guidance', () => {
             '/v1/admin/access/effective-access': {},
             '/v1/admin/mcp/connections': {},
             '/v1/admin/operations': {},
+            '/v1/admin/services/reset-full': {},
             '/v1/skills': {},
+            '/v1/skills/build-draft': {},
           },
         }, 200)
       }
@@ -95,7 +97,7 @@ describe('control-panel api error guidance', () => {
 
   it('maps missing Ollama model errors to model guidance', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ detail: 'Model `gpt-oss:20b` not found in Ollama.' }, 503),
+      jsonResponse({ detail: 'Model `nemotron-cascade-2:30b` not found in Ollama.' }, 503),
     )
 
     await expect(api.getOverview('token')).rejects.toMatchObject({
@@ -140,5 +142,59 @@ describe('control-panel api error guidance', () => {
         },
       },
     })
+  })
+
+  it('updates agent skill assignments through the focused admin route', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ saved: true, pending_reload: true }, 200),
+    )
+
+    await api.updateAgentSkills('token', 'general', ['skill-family'])
+
+    expect(fetchSpy).toHaveBeenCalledWith('/v1/admin/agents/general/skills', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ preload_skill_packs: ['skill-family'] }),
+    }))
+  })
+
+  it('posts skill auto-builder drafts through the focused route', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ object: 'skill.build_draft', draft: { body_markdown: '# Skill' } }, 200),
+    )
+
+    await api.buildSkillDraft('token', {
+      context: 'Build a routing workflow.',
+      examples: '- Review route choice.',
+      agent_scope: 'general',
+    })
+
+    expect(fetchSpy).toHaveBeenCalledWith('/v1/skills/build-draft', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        context: 'Build a routing workflow.',
+        examples: '- Review route choice.',
+        agent_scope: 'general',
+      }),
+    }))
+  })
+
+  it('posts the full service reset confirmation and engine', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({
+        status: 'started',
+        run_id: 'docker-test',
+        engine: 'docker',
+        started_at: '2026-04-08T10:07:00Z',
+        log_path: '/tmp/reset.log',
+        commands: ['docker compose build --no-cache app app-bootstrap openwebui'],
+      }, 200),
+    )
+
+    await api.resetServiceFull('token', 'docker')
+
+    expect(fetchSpy).toHaveBeenCalledWith('/v1/admin/services/reset-full', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ engine: 'docker', confirmation: 'reset-service-full' }),
+    }))
   })
 })

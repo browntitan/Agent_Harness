@@ -119,4 +119,11 @@
   <Override PartName="/ppt/notesSlides/notesSlide51.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
   <Override PartName="/ppt/notesSlides/notesSlide52.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
   <Override PartName="/ppt/notesSlides/notesSlide53.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
+  <Override PartName="/ppt/notesSlides/notesSlide54.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
+  <Override PartName="/ppt/notesSlides/notesSlide55.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
+  <Override PartName="/ppt/notesSlides/notesSlide56.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
+  <Override PartName="/ppt/slides/slide54.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/slide55.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/slide56.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/slide57.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
 </Types>

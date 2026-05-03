@@ -53,6 +53,7 @@ from agentic_chatbot_next.rag.retrieval_scope import (
 from agentic_chatbot_next.providers.factory import ProviderBundle
 from agentic_chatbot_next.rag.engine import render_rag_contract, run_rag_contract
 from agentic_chatbot_next.router.llm_router import route_turn
+from agentic_chatbot_next.router.mcp_intent import detect_mcp_intent, mcp_intent_detected
 from agentic_chatbot_next.router.patterns import load_router_patterns, patterns_path_from_settings
 from agentic_chatbot_next.router.policy import choose_agent_name
 from agentic_chatbot_next.router.router import RouterDecision, is_deep_research_request
@@ -95,6 +96,19 @@ _DIRECT_RAG_REQUEST_HINTS = re.compile(
     r"search|cite|cites?|citation|citations|source|sources|grounded|knowledge\s+base|"
     r"default\s+kb|indexed\s+(?:documents|knowledge\s+base)|check\s+(?:indexed|uploaded)\s+sources"
     r")\b",
+    re.IGNORECASE,
+)
+_MERMAID_DIAGRAM_HINTS = re.compile(
+    r"\b(mermaid|diagram|flowchart|sequence\s+diagram|state\s+diagram|class\s+diagram|er\s+diagram|erd|gantt)\b",
+    re.IGNORECASE,
+)
+_SKILL_SEARCH_HINTS = re.compile(
+    r"\b(search|find|load|use)\s+(?:your\s+)?skills?\b|\bskills?\s+(?:search|guidance)\b|\bsearch_skills\b",
+    re.IGNORECASE,
+)
+_DIAGRAM_ORCHESTRATION_HINTS = re.compile(
+    r"\b(first|then|after|before|multi[-\s]?step|research|rag|grounded|knowledge\s+base|default\s+kb|"
+    r"indexed\s+(?:documents|knowledge\s+base)|cite|cites?|citations?|sources?)\b",
     re.IGNORECASE,
 )
 _POLICY_LOOKUP_WORKFLOW_HINTS = re.compile(
@@ -217,13 +231,20 @@ def _should_shortcut_to_rag_worker(
     requested_agent_override: str,
     force_agent: bool,
     helper_task_type: str,
+    mcp_intent_detected: bool = False,
 ) -> bool:
+    if mcp_intent_detected:
+        return False
     if force_agent or requested_agent_override or helper_task_type:
         return False
     if str(scope_mode or "").strip().lower() in {"none", "ambiguous"}:
         return False
     lowered = str(user_text or "").casefold()
     if re.search(r"\b(calculator|compute|remember|memory|save\s+this|recall)\b", lowered):
+        return False
+    if _MERMAID_DIAGRAM_HINTS.search(user_text) and (
+        _SKILL_SEARCH_HINTS.search(user_text) or _DIAGRAM_ORCHESTRATION_HINTS.search(user_text)
+    ):
         return False
     has_index_scope = any(
         str(request_metadata.get(key) or "").strip()
@@ -727,6 +748,7 @@ class RuntimeService:
                 dict(getattr(session, "metadata", {}) or {}).get("collection_id")
                 or getattr(self.ctx.settings, "default_collection_id", "default")
             ),
+            providers=self.ctx.providers,
         )
         session.uploaded_doc_ids.extend([doc_id for doc_id in doc_ids if doc_id not in session.uploaded_doc_ids])
 
@@ -966,6 +988,31 @@ class RuntimeService:
             if clarification_resume_applied
             else user_text
         )
+        mcp_intent = detect_mcp_intent(
+            routing_user_text,
+            settings=self.ctx.settings,
+            stores=self.ctx.stores,
+            tenant_id=str(getattr(session, "tenant_id", "") or getattr(self.ctx.settings, "default_tenant_id", "local-dev")),
+            user_id=str(getattr(session, "user_id", "") or getattr(self.ctx.settings, "default_user_id", "local-cli")),
+        )
+        if bool(mcp_intent.get("detected")):
+            preflight_metadata = {
+                **preflight_metadata,
+                "mcp_intent": mcp_intent,
+            }
+            session.metadata = {
+                **dict(getattr(session, "metadata", {}) or {}),
+                "mcp_intent": mcp_intent,
+            }
+        else:
+            preflight_metadata = {
+                key: value
+                for key, value in preflight_metadata.items()
+                if key != "mcp_intent"
+            }
+            session_metadata_without_mcp = dict(getattr(session, "metadata", {}) or {})
+            session_metadata_without_mcp.pop("mcp_intent", None)
+            session.metadata = session_metadata_without_mcp
         preflight_scope = decide_retrieval_scope(
             self.ctx.settings,
             SimpleNamespace(metadata=preflight_metadata, uploaded_doc_ids=preflight_uploads),
@@ -1015,6 +1062,7 @@ class RuntimeService:
             requested_agent_override=requested_agent_override,
             force_agent=force_agent,
             helper_task_type=helper_task_type,
+            mcp_intent_detected=bool(mcp_intent.get("detected")),
         ):
             route_metadata = {
                 "route": "AGENT",
@@ -1203,6 +1251,8 @@ class RuntimeService:
                 "effective_user_text": routing_user_text[:500],
                 "runtime_diagnostics": runtime_settings_diagnostics(self.ctx.settings),
             }
+            if mcp_intent_detected(preflight_metadata):
+                meta["mcp_intent"] = dict(preflight_metadata.get("mcp_intent") or {})
             decision_record = self.kernel.router_feedback.register_decision(
                 session,
                 user_text=routing_user_text,
@@ -1267,6 +1317,12 @@ class RuntimeService:
                 decision,
                 registry=self.kernel.registry,
             ) or "general"
+            if mcp_intent_detected(preflight_metadata) and not requested_agent_override:
+                if selected_agent != "general":
+                    selected_agent = "general"
+                    meta["mcp_intent_forced_general"] = True
+                else:
+                    meta["mcp_intent_forced_general"] = False
             coordinator_default_applied = False
             scope_kind = str(semantic_routing_payload.get("requested_scope_kind") or "").strip().lower()
             answer_origin = str(semantic_routing_payload.get("answer_origin") or "").strip().lower()
@@ -1340,6 +1396,9 @@ class RuntimeService:
                             **payload,
                         },
                     )
+            if mcp_intent_detected(preflight_metadata) and not requested_agent_override and selected_agent != "general":
+                selected_agent = "general"
+                meta["mcp_intent_forced_general"] = True
             if not effective_capabilities.allows_agent(selected_agent):
                 if selected_agent != "coordinator" and effective_capabilities.allows_agent("coordinator"):
                     selected_agent = "coordinator"

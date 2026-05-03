@@ -331,6 +331,7 @@ def test_policy_aware_tool_node_accepts_new_langgraph_runtime_shape(monkeypatch)
     monkeypatch.delattr(node, "messages_key", raising=False)
     node._messages_key = "messages"
     captured: list[object] = []
+    extracted: list[object] = []
 
     class _FakeToolRuntime:
         def __init__(self, **kwargs):
@@ -339,6 +340,11 @@ def test_policy_aware_tool_node_accepts_new_langgraph_runtime_shape(monkeypatch)
     import langgraph.prebuilt.tool_node as tool_node_module
 
     monkeypatch.setattr(tool_node_module, "ToolRuntime", _FakeToolRuntime, raising=False)
+
+    def fake_extract_state(input_payload, config):
+        extracted.append(config)
+        return input_payload
+    monkeypatch.setattr(node, "_extract_state", fake_extract_state, raising=False)
 
     def fake_run_one(call, input_type, tool_runtime):
         del input_type
@@ -369,6 +375,8 @@ def test_policy_aware_tool_node_accepts_new_langgraph_runtime_shape(monkeypatch)
 
     assert result["messages"][0].content == "alpha_tool:tool_alpha:runtime-store"
     assert captured[0].context == {"tenant": "tenant"}
+    assert captured[0].state["messages"][0].content == "Run the tool."
+    assert extracted and extracted[0]["metadata"]["agentic_parallel_group_size"] == 1
 
 
 def test_policy_aware_tool_node_builds_tool_runtime_when_runtime_arg_missing(monkeypatch) -> None:

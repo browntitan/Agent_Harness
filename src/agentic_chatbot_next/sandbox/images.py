@@ -91,7 +91,8 @@ def probe_sandbox_image(
     *,
     timeout_seconds: float = 30.0,
 ) -> SandboxImageProbeResult:
-    docker_check = check_docker_availability()
+    probe_timeout = max(0.1, float(timeout_seconds or 30.0))
+    docker_check = check_docker_availability(timeout_seconds=min(8.0, probe_timeout))
     if not docker_check.ok:
         return SandboxImageProbeResult(
             ok=False,
@@ -108,7 +109,7 @@ def probe_sandbox_image(
             inspect_command,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=min(10.0, probe_timeout),
             check=False,
         )
     except Exception as exc:
@@ -149,7 +150,7 @@ def probe_sandbox_image(
             probe_command,
             capture_output=True,
             text=True,
-            timeout=timeout_seconds,
+            timeout=probe_timeout,
             check=False,
         )
     except Exception as exc:

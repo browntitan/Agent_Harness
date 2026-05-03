@@ -746,6 +746,20 @@ def test_answer_context_uses_detailed_directive_for_active_doc_focus_summary():
     assert "one short synthesis paragraph" not in context
 
 
+def test_answer_context_requires_mermaid_without_inline_citations():
+    context = _answer_context(
+        "Use the default KB, then produce a Mermaid flowchart with citations below it.",
+        "assistant: evidence ready.",
+        {},
+        answer_contract={"kind": "grounded_synthesis", "final_output_mode": "grounded_mermaid_diagram"},
+        presentation_preferences={"diagram_policy": "require_mermaid"},
+    )
+
+    assert "exactly one fenced ```mermaid code block" in context
+    assert "outside the code block" in context
+    assert "do not place citation IDs" in context
+
+
 def test_run_rag_contract_uses_metadata_inventory_answer_for_kb_listing_queries(monkeypatch):
     monkeypatch.setattr(
         "agentic_chatbot_next.rag.engine.run_retrieval_controller",

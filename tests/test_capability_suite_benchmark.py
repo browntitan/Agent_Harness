@@ -65,6 +65,15 @@ def test_load_cases_filters_easy_and_guided_query_falls_back(tmp_path: Path) -> 
     assert cases[0].prompt_for("query") == "Original question?"
 
 
+def test_canonical_scope_mismatch_rows_are_aligned() -> None:
+    with Path("rag_system_capability_test_suite.csv").open(newline="", encoding="utf-8") as handle:
+        rows = {row["test_id"]: row for row in csv.DictReader(handle)}
+
+    assert "at least two" in rows["KB-E07"]["expected_answer"]
+    assert rows["REQ-H01"]["guided_query"]
+    assert "all legal and control documents" in rows["REQ-H01"]["guided_query"]
+
+
 def test_build_gateway_payload_sets_collection_and_graph_metadata() -> None:
     case = suite.CapabilityCase(
         test_id="GRAPH-E02",

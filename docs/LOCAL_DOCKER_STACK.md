@@ -102,6 +102,9 @@ mount for `/app/src`.
 - `rag-postgres`: PostgreSQL with pgvector
 - native macOS Ollama: model runtime reached from containers through `host.docker.internal`
 - `ollama` / `ollama-bootstrap`: optional Dockerized model runtime behind the `docker-ollama` profile
+- Ollama reranker residency defaults include
+  `rjmalagon/mxbai-rerank-large-v2:1.5b-fp16` alongside the chat and embedding models so graph
+  and RAG reranking can stay warm in local stacks
 - `app-bootstrap`: runs migrations, skill indexing, KB sync, and a runtime registry smoke check
 - `app`: FastAPI gateway, OpenAI-compatible API, control-panel static host, MCP/capability
   APIs, graph APIs, and admin routes, marked healthy only after `/health/ready` passes
@@ -123,11 +126,15 @@ docker compose logs -n 100 openwebui-bootstrap
 ## Smoke Tests
 
 - In Open WebUI, select `Enterprise Agent` and ask `What knowledge base collections do we have access to?`
+- Ask a broad corpus prompt such as `Identify all documents that discuss routing or requested-agent overrides.`
+  Expected routing is `research_coordinator` when deep research policy applies.
 - Upload a small file in OpenWebUI and ask the agent to summarize it. OpenWebUI is only
   a byte transport in this stack; the file is first ingested into the agent document
   repository, and all retrieval/citations come from that repository.
 - In the control panel, confirm collections, uploads, graphs, skills, MCP connections,
   access/capability panels, runtime config, agents/prompts, and operations load.
+- Confirm runtime config shows rerank defaults, `MAX_REVISION_ROUNDS=8`, frontend event toggles,
+  and context-budget settings.
 - If MCP is enabled, create or test a Streamable HTTP connection from the control panel or
   `/v1/mcp/connections` and confirm refreshed tools appear in the cached catalog before
   trying to call them from chat.

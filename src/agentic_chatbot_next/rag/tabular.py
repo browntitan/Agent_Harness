@@ -8,16 +8,30 @@ from typing import Any, Dict, Iterable, List, Sequence
 from langchain_core.documents import Document
 
 from agentic_chatbot_next.rag.fanout import TabularEvidenceResult, TabularEvidenceTask
+from agentic_chatbot_next.rag.status_workbooks import (
+    detect_status_domains_for_query,
+    extract_status_records,
+    query_has_status_intent,
+)
 
 _SPREADSHEET_TYPES = {"csv", "xls", "xlsx"}
 _SPREADSHEET_SUFFIXES = {f".{item}" for item in _SPREADSHEET_TYPES}
 
 _OPERATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
+        "status_extract",
+        re.compile(
+            r"\b(risks?|issues?|actions?|action\s+items?|schedules?|budgets?|costs?|"
+            r"cdrls?|deliverables?|requirements?|test\s+events?|milestones?|owners?|due\s+dates?)\b",
+            flags=re.I,
+        ),
+    ),
+    (
         "lookup",
         re.compile(
             r"\b(lookup|look\s+up|find|show|list|which|what|where|row|record|cell|value|"
-            r"current|latest|approved|status|date|amount|price|cost|variance|milestone|supplier)\b",
+            r"current|latest|approved|status|date|amount|price|cost|variance|milestone|supplier|"
+            r"risk|issue|action|cdrl|requirement|test\s+event)\b",
             flags=re.I,
         ),
     ),
@@ -115,6 +129,10 @@ def query_needs_tabular_handoff(query: str) -> bool:
     return bool(requested_tabular_operations(query))
 
 
+def query_needs_status_workbook_extraction(query: str) -> bool:
+    return query_has_status_intent(query)
+
+
 def _row_hint(metadata: Dict[str, Any]) -> Dict[str, Any]:
     hint: Dict[str, Any] = {}
     for key in ("sheet_name", "cell_range"):
@@ -135,6 +153,8 @@ def plan_tabular_evidence_tasks(
     max_tasks: int = 2,
 ) -> List[TabularEvidenceTask]:
     operations = requested_tabular_operations(query)
+    if query_needs_status_workbook_extraction(query) and "status_extract" not in operations:
+        operations = ["status_extract", *operations]
     if not operations:
         return []
 
@@ -197,6 +217,99 @@ def plan_tabular_evidence_tasks(
             )
         )
     return tasks
+
+
+def deterministic_status_evidence_results(
+    query: str,
+    tasks: Sequence[TabularEvidenceTask],
+    *,
+    max_records_per_task: int = 12,
+) -> tuple[List[TabularEvidenceResult], List[str], Dict[str, Any]]:
+    """Run read-only workbook status extraction for tasks with local workbook paths."""
+
+    if not query_needs_status_workbook_extraction(query):
+        return [], [], {"attempted": False, "reason": "not_status_query"}
+
+    requested_domains = detect_status_domains_for_query(query)
+    results: List[TabularEvidenceResult] = []
+    warnings: List[str] = []
+    stats: Dict[str, Any] = {
+        "attempted": True,
+        "task_count": len(tasks),
+        "requested_domains": list(requested_domains),
+        "record_count": 0,
+        "domain_counts": {},
+        "fallback_reasons": [],
+    }
+    for task in tasks:
+        if task.file_type and task.file_type.lower().lstrip(".") not in {"xls", "xlsx"}:
+            continue
+        path = _local_source_path(task.source_path)
+        if path is None:
+            reason = f"missing_local_source:{task.doc_id or task.title}"
+            warnings.append(reason)
+            stats["fallback_reasons"].append(reason)
+            continue
+        if path.suffix.lower() not in {".xls", ".xlsx"}:
+            continue
+        try:
+            records = extract_status_records(
+                path,
+                domains=requested_domains,
+                sheet_name=task.sheet_hints[0] if len(task.sheet_hints) == 1 else "",
+                doc_id=task.doc_id,
+                title=task.title,
+                source_path=task.source_path or str(path),
+                max_records=max_records_per_task,
+            )
+        except Exception as exc:
+            reason = f"status_extractor_failed:{task.doc_id or task.title}"
+            warnings.append(reason)
+            stats["fallback_reasons"].append(reason)
+            continue
+        if not records:
+            reason = f"no_status_records:{task.doc_id or task.title}"
+            stats["fallback_reasons"].append(reason)
+            continue
+        findings = []
+        source_refs = []
+        domain_counts: Dict[str, int] = dict(stats.get("domain_counts") or {})
+        for record in records[: max(1, int(max_records_per_task or 12))]:
+            payload = record.to_dict()
+            payload["summary"] = record.summary
+            findings.append(payload)
+            source_refs.append(record.source_ref.to_dict())
+            domain_counts[record.domain] = domain_counts.get(record.domain, 0) + 1
+        stats["domain_counts"] = domain_counts
+        stats["record_count"] = int(stats.get("record_count") or 0) + len(findings)
+        domain_text = ", ".join(sorted(domain_counts)) or "status"
+        results.append(
+            TabularEvidenceResult(
+                task_id=task.task_id,
+                status="ok",
+                summary=f"Found {len(findings)} workbook status record(s) in {task.title} for {domain_text}.",
+                findings=findings,
+                source_refs=source_refs,
+                operations=["profile_workbook_status", "extract_workbook_status"],
+                warnings=[],
+                confidence=max((float(record.confidence or 0.0) for record in records), default=0.75),
+            )
+        )
+    return results, warnings, stats
+
+
+def _local_source_path(source_path: str) -> Path | None:
+    raw = str(source_path or "").strip()
+    if raw.startswith("file://"):
+        raw = raw[7:]
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    try:
+        path = path.resolve()
+    except Exception:
+        pass
+    return path if path.exists() else None
 
 
 def _render_source_ref(ref: Dict[str, Any], task: TabularEvidenceTask) -> str:

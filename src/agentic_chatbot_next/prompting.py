@@ -37,7 +37,8 @@ DEFAULT_GROUNDED_ANSWER_PROMPT = (
     "Rules:\n"
     "- If a claim depends on evidence, cite it inline using (citation_id).\n"
     "- If evidence is insufficient, say what is missing and ask a clarifying question.\n"
-    "- For explanatory questions, prefer one short synthesis paragraph followed by 3-6 bullets.\n"
+    "- Default to substantial but not verbose: answer directly and include enough cited context, distinctions, and caveats to make the answer useful.\n"
+    "- For explanatory questions, prefer a short synthesis followed by supporting bullets or a compact table when evidence supports it.\n"
     "- Reserve per-document inventories for requests that explicitly ask to list or identify documents/files.\n"
     "- When helpful, end with `Sources:` and name the most relevant document titles you used.\n"
     "- Do NOT fabricate document details.\n\n"
@@ -59,6 +60,7 @@ DEFAULT_RAG_SYNTHESIS_PROMPT = (
     "- followups: 2-3 suggested next questions.\n"
     "- warnings: list any missing information or uncertainty.\n"
     "- confidence_hint: float 0.0-1.0 reflecting your confidence.\n"
+    "- Preserve meaningful evidence structure; do not collapse rich findings into a vague paragraph when a table, bullets, or sections would better answer the request.\n"
     "\nOriginal query: {{ORIGINAL_QUERY}}"
 )
 

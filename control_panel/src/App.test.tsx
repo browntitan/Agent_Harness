@@ -126,8 +126,8 @@ function createDoc(
 }
 
 function parseSkillName(bodyMarkdown: string): string {
-  const firstLine = bodyMarkdown.split('\n')[0]?.trim() ?? ''
-  return firstLine.startsWith('# ') ? firstLine.slice(2).trim() || 'New Skill' : 'New Skill'
+  const heading = bodyMarkdown.split('\n').map(line => line.trim()).find(line => line.startsWith('# '))
+  return heading ? heading.slice(2).trim() || 'New Skill' : 'New Skill'
 }
 
 function parseSkillMetadata(bodyMarkdown: string): Record<string, string> {
@@ -150,7 +150,7 @@ function createFetchMock(options: {
   const state = {
     maxAgentSteps: '6',
     clarificationSensitivity: '50',
-    ollamaChatModel: 'gpt-oss:20b',
+    ollamaChatModel: 'nemotron-cascade-2:30b',
     promptBase: 'Base general prompt',
     promptOverlay: '',
     agent: {
@@ -976,6 +976,7 @@ function createFetchMock(options: {
     const paths: Record<string, unknown> = {
       '/v1/admin/overview': {},
       '/v1/admin/operations': {},
+      '/v1/admin/services/reset-full': {},
       '/v1/admin/config/schema': {},
       '/v1/admin/config/effective': {},
       '/v1/admin/agents': {},
@@ -989,6 +990,7 @@ function createFetchMock(options: {
       '/v1/admin/access/effective-access': {},
       '/v1/admin/mcp/connections': {},
       '/v1/skills': {},
+      '/v1/skills/build-draft': {},
     }
     if (compatibilityMode !== 'partial-architecture') {
       paths['/v1/admin/architecture'] = {}
@@ -1021,10 +1023,10 @@ function createFetchMock(options: {
         collections: { supported: true, required_routes: ['/v1/admin/collections'], missing_routes: [], reason: '' },
         uploads: { supported: true, required_routes: ['/v1/admin/uploads'], missing_routes: [], reason: '' },
         graphs: { supported: true, required_routes: ['/v1/admin/graphs', '/v1/admin/graphs/{graph_id}'], missing_routes: [], reason: '' },
-        skills: { supported: true, required_routes: ['/v1/skills'], missing_routes: [], reason: '' },
+        skills: { supported: true, required_routes: ['/v1/skills', '/v1/skills/build-draft'], missing_routes: [], reason: '' },
         access: { supported: true, required_routes: ['/v1/admin/access/principals', '/v1/admin/access/roles', '/v1/admin/access/effective-access'], missing_routes: [], reason: '' },
         mcp: { supported: true, required_routes: ['/v1/admin/mcp/connections'], missing_routes: [], reason: '' },
-        operations: { supported: true, required_routes: ['/v1/admin/operations'], missing_routes: [], reason: '' },
+        operations: { supported: true, required_routes: ['/v1/admin/operations', '/v1/admin/services/reset-full'], missing_routes: [], reason: '' },
       },
     }
   }
@@ -1054,8 +1056,8 @@ function createFetchMock(options: {
           embeddings_provider: 'ollama',
         },
         models: {
-          ollama_chat_model: 'gpt-oss:20b',
-          ollama_judge_model: 'gpt-oss:20b',
+          ollama_chat_model: 'nemotron-cascade-2:30b',
+          ollama_judge_model: 'nemotron-cascade-2:30b',
           ollama_embed_model: 'nomic-embed-text',
         },
         counts: {
@@ -1108,6 +1110,29 @@ function createFetchMock(options: {
         ],
         audit_events: state.auditEvents,
       })
+    }
+
+    if (path === '/v1/admin/services/reset-full' && method === 'POST') {
+      const body = readJsonBody(init)
+      const engine = String(body.engine ?? 'docker')
+      const result = {
+        status: 'started',
+        run_id: `${engine}-test-run`,
+        engine,
+        started_at: '2026-04-08T10:07:00Z',
+        log_path: `/tmp/service-reset-${engine}.log`,
+        commands: engine === 'podman'
+          ? ['PODMAN_BUILD_NO_CACHE=1 podman_startup/scripts/build-images.sh']
+          : ['docker compose build --no-cache app app-bootstrap openwebui'],
+      }
+      state.auditEvents.push({
+        action: 'service_reset_full_start',
+        actor: 'control-panel',
+        timestamp: '2026-04-08T10:07:00Z',
+        changed_keys: [],
+        details: { engine, run_id: result.run_id },
+      })
+      return jsonResponse(result)
     }
 
     if (path === '/v1/admin/access/principals' && method === 'GET') {
@@ -1325,7 +1350,7 @@ function createFetchMock(options: {
             group: 'Providers',
             description: 'Primary Ollama chat model used by the runtime.',
             kind: 'enum',
-            choices: ['gpt-oss:20b', 'gpt-oss:120b'],
+            choices: ['nemotron-cascade-2:30b', 'gpt-oss:120b'],
             secret: false,
             readonly: false,
             reload_scope: 'runtime_swap',
@@ -1422,7 +1447,13 @@ function createFetchMock(options: {
         agents: [{
           name: state.agent.name,
           mode: state.agent.mode,
+          description: state.agent.description,
           prompt_file: state.agent.prompt_file,
+          skill_scope: state.agent.skill_scope,
+          allowed_tools: state.agent.allowed_tools,
+          allowed_worker_agents: state.agent.allowed_worker_agents,
+          preload_skill_packs: state.agent.preload_skill_packs,
+          memory_scopes: state.agent.memory_scopes,
           overlay_active: state.agent.overlay_active,
         }],
         tools: [{
@@ -1440,10 +1471,31 @@ function createFetchMock(options: {
       })
     }
 
+    if (path === '/v1/admin/agents/general/skills' && method === 'PUT') {
+      const body = readJsonBody(init)
+      state.agent = {
+        ...state.agent,
+        preload_skill_packs: Array.isArray(body.preload_skill_packs) ? body.preload_skill_packs.map(String) : [],
+        overlay_active: true,
+      }
+      return jsonResponse({
+        saved: true,
+        pending_reload: true,
+        preload_skill_packs: state.agent.preload_skill_packs,
+        agent: {
+          ...state.agent,
+          pinned_skills: state.agent.preload_skill_packs.map(skillId => state.skills[skillId]).filter(Boolean),
+          pinned_skill_warnings: [],
+          overlay_markdown: 'overlay',
+        },
+      })
+    }
+
     if (path === '/v1/admin/agents/general' && method === 'GET') {
       return jsonResponse({
         ...state.agent,
         pinned_skills: state.agent.preload_skill_packs.map(skillId => state.skills[skillId]).filter(Boolean),
+        pinned_skill_warnings: [],
         overlay_markdown: state.agent.overlay_active ? 'overlay' : '',
       })
     }
@@ -2335,6 +2387,50 @@ function createFetchMock(options: {
       })
     }
 
+    if (path === '/v1/skills/build-draft' && method === 'POST') {
+      const body = readJsonBody(init)
+      const agentScope = String(body.agent_scope ?? 'general')
+      const markdown = [
+        '---',
+        'name: Auto Smoke Skill',
+        `agent_scope: ${agentScope}`,
+        'tool_tags: search_skills',
+        'task_tags: workflow, smoke',
+        'version: 1',
+        'enabled: true',
+        'description: Auto-built smoke workflow.',
+        'when_to_apply: Use when a smoke-test workflow is needed.',
+        'kind: retrievable',
+        '---',
+        '# Auto Smoke Skill',
+        '',
+        '## Workflow',
+        '',
+        '- Confirm the smoke-test target.',
+        '- Run the smoke-test workflow.',
+        '',
+        '## Examples',
+        '',
+        '- User asks for a smoke-test workflow.',
+        '',
+      ].join('\n')
+      return jsonResponse({
+        object: 'skill.build_draft',
+        draft: {
+          body_markdown: markdown,
+          name: 'Auto Smoke Skill',
+          agent_scope: agentScope,
+          description: 'Auto-built smoke workflow.',
+          tool_tags: ['search_skills'],
+          task_tags: ['workflow', 'smoke'],
+          when_to_apply: 'Use when a smoke-test workflow is needed.',
+          workflow: '- Confirm the smoke-test target.\n- Run the smoke-test workflow.',
+          examples: '- User asks for a smoke-test workflow.',
+          warnings: [],
+        },
+      })
+    }
+
     const skillMatch = path.match(/^\/v1\/skills\/([^/]+)$/)
     if (skillMatch && method === 'GET') {
       return jsonResponse({
@@ -2352,12 +2448,12 @@ function createFetchMock(options: {
       state.skills[skillId] = {
         skill_id: skillId,
         name,
-        agent_scope: 'general',
+        agent_scope: String(body.agent_scope ?? 'general'),
         graph_id: String(body.graph_id ?? ''),
         collection_id: String(body.collection_id ?? ''),
         body_markdown: bodyMarkdown,
-        enabled: true,
-        status: 'active',
+        enabled: Boolean(body.enabled ?? true),
+        status: String(body.status ?? 'active'),
         version: '1',
         version_parent: skillId,
         updated_at: '2026-04-08T10:00:00Z',
@@ -2372,9 +2468,12 @@ function createFetchMock(options: {
       state.skills[skillId] = {
         ...state.skills[skillId],
         name: parseSkillName(bodyMarkdown),
+        agent_scope: String(body.agent_scope ?? state.skills[skillId]?.agent_scope ?? 'general'),
         graph_id: String(body.graph_id ?? state.skills[skillId]?.graph_id ?? ''),
         collection_id: String(body.collection_id ?? state.skills[skillId]?.collection_id ?? ''),
         body_markdown: bodyMarkdown,
+        enabled: Boolean(body.enabled ?? state.skills[skillId]?.enabled ?? true),
+        status: String(body.status ?? state.skills[skillId]?.status ?? 'active'),
       }
       return jsonResponse({ object: 'skill', data: state.skills[skillId] })
     }
@@ -2775,6 +2874,15 @@ describe('App', () => {
     openSection('Operations')
     expect(await screen.findByRole('heading', { name: 'Last Reload', level: 3 })).toBeInTheDocument()
     expect(within(getSection('Last Reload')).getAllByText(/config_apply|agent_reload/).length).toBeGreaterThan(0)
+    expect(await screen.findByRole('heading', { name: 'Service Reset', level: 3 })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Reset Service (Full)' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Run Docker Reset' }))
+    await waitFor(() => expect(within(getSection('Service Reset')).getByText('docker-test-run')).toBeInTheDocument())
+    expect(fetchMock.mock.calls.some(([input, init]) => (
+      requestPath(input) === '/v1/admin/services/reset-full' &&
+      requestMethod(input, init) === 'POST' &&
+      readJsonBody(init).engine === 'docker'
+    ))).toBe(true)
     fireEvent.click(screen.getByRole('tab', { name: 'Jobs' }))
     expect(await screen.findByRole('heading', { name: 'Scheduler Health', level: 3 })).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Background Jobs', level: 3 })).toBeInTheDocument()
@@ -3243,6 +3351,34 @@ describe('App', () => {
     expect(buildIndex).toBeGreaterThan(applyIndex)
   })
 
+  it('keeps the ingestion wizard local path textarea focused while typing', async () => {
+    const { fetchMock } = createFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderApp()
+    fireEvent.change(screen.getByPlaceholderText('Admin token'), { target: { value: 'token' } })
+    fireEvent.click(screen.getByText('Unlock'))
+    expect(await screen.findByRole('heading', { name: 'Runtime', level: 3 })).toBeInTheDocument()
+
+    openSection('Collections')
+    fireEvent.click(await screen.findByRole('button', { name: 'Ingestion Wizard' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Ingestion Wizard' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Source' }))
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Local Source' }))
+
+    const pathInput = within(dialog).getByLabelText('Wizard Server-Readable Local Paths') as HTMLTextAreaElement
+    pathInput.focus()
+    expect(pathInput).toHaveFocus()
+
+    fireEvent.change(pathInput, { target: { value: '/tmp/defense-rag/doc-one.md' } })
+    expect(pathInput).toHaveValue('/tmp/defense-rag/doc-one.md')
+    expect(pathInput).toHaveFocus()
+
+    fireEvent.change(pathInput, { target: { value: '/tmp/defense-rag/doc-one.md\n/tmp/defense-rag/doc-two.md' } })
+    expect(pathInput).toHaveValue('/tmp/defense-rag/doc-one.md\n/tmp/defense-rag/doc-two.md')
+    expect(pathInput).toHaveFocus()
+  })
+
   it('creates a named graph from the wizard after creating a new collection and ingesting local paths', async () => {
     const { fetchMock } = createFetchMock()
     vi.stubGlobal('fetch', fetchMock)
@@ -3332,19 +3468,31 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Editor' }))
     fireEvent.click(screen.getByRole('button', { name: 'New Skill' }))
-    const skillEditor = within(getSection('Skill Editor')).getByRole('textbox')
-    fireEvent.change(skillEditor, {
-      target: {
-        value: '# Smoke Skill\nagent_scope: general\n\ndescription: Temp skill.\n\n## Workflow\n\n- Do the smoke test.\n',
-      },
-    })
+    fireEvent.change(screen.getByLabelText('Skill Name'), { target: { value: 'Smoke Skill' } })
+    fireEvent.change(screen.getByLabelText('Skill Description'), { target: { value: 'Temp skill.' } })
+    fireEvent.change(screen.getByLabelText('Skill Builder Context'), { target: { value: 'Build a repeatable smoke-test workflow.' } })
+    fireEvent.change(screen.getByLabelText('Skill Examples'), { target: { value: '- User asks for a smoke-test workflow.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Auto Build' }))
+    await waitFor(() => expect(screen.getByLabelText('Skill Name')).toHaveValue('Auto Smoke Skill'))
+    expect(screen.getByLabelText('Skill Examples')).toHaveValue('- User asks for a smoke-test workflow.')
+    expect(screen.getByLabelText('Skill Workflow')).toHaveValue('- Confirm the smoke-test target.\n- Run the smoke-test workflow.')
+    fireEvent.change(screen.getByLabelText('Skill Workflow'), { target: { value: '- Do the smoke test.' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create Skill' }))
 
-    expect(await screen.findByRole('button', { name: /^Smoke Skill\b/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /^Auto Smoke Skill\b/ })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Deactivate' }))
     await waitFor(() => expect(within(getSection('Skill Status')).getAllByText('archived').length).toBeGreaterThan(0))
     fireEvent.click(screen.getByRole('button', { name: 'Activate' }))
     await waitFor(() => expect(within(getSection('Skill Status')).getAllByText('active').length).toBeGreaterThan(0))
+    fireEvent.change(screen.getByLabelText('Target Agent'), { target: { value: 'general' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Pin to Agent' }))
+    await waitFor(() => expect(within(getSection('Skill Editor')).getByText('Reload agents before testing newly pinned skills.')).toBeInTheDocument())
+    await waitFor(() => expect(within(getSection('Skill Library')).getByText('general')).toBeInTheDocument())
+
+    openSection('Agents')
+    await screen.findByRole('heading', { name: 'Agent Editor', level: 3 })
+    expect(within(getSection('Agent Editor')).queryByLabelText('preload_skill_packs')).not.toBeInTheDocument()
+    expect(await screen.findByText('Save Skill Assignments')).toBeInTheDocument()
   })
 
   it('shows dependency blockers when a skill status change is rejected', async () => {

@@ -18,6 +18,7 @@ Answer grounded document questions with evidence-backed retrieval and transparen
 
 ## Output Shaping
 
+- Default to compact but complete grounded answers: preserve evidence scope, citations, important details, warnings, and useful distinctions instead of reducing rich evidence to only a quick summary.
 - Keep every grounded claim tied to retrieved evidence.
 - Prefer transparent insufficiency over unsupported synthesis.
 - Avoid implying exhaustive absence or full-corpus coverage unless the retrieval path actually supports it.

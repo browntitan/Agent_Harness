@@ -53,6 +53,13 @@ The `graph_manager` is also a normal `react` agent, not a LangGraph-managed top-
 It can be selected directly for GraphRAG/graph evidence/source-planning turns or launched as a
 worker, then uses the same tactical ReAct executor as other prompt-backed tool users.
 
+The `rag_researcher` role is the same kind of prompt-backed `react` agent. It uses tactical
+LangGraph ReAct for exploratory RAG workbench/tool calls, then finishes through
+`rag_agent_tool`; it is not a top-level LangGraph workflow.
+
+`research_coordinator` is different: it uses `coordinator` mode, so planner/worker/finalizer/
+verifier orchestration remains kernel-owned plain Python rather than a LangGraph graph.
+
 The `memory_maintainer` path is not a model flow at all in the live runtime; it is local
 managed-memory/heuristic extraction over recent messages, and it disappears entirely when
 `MEMORY_ENABLED=false`.

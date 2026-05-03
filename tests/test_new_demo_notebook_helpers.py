@@ -1261,7 +1261,7 @@ def test_preflight_accepts_runtime_default_chat_model_and_latest_alias(monkeypat
         status_code = 200
 
         def json(self):
-            return {"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]}
+            return {"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]}
 
         def raise_for_status(self):
             return None

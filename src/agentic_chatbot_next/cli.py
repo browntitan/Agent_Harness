@@ -739,7 +739,7 @@ def reindex_document(
     collection_id: Optional[str] = typer.Option(None, "--collection-id"),
     dotenv: Optional[str] = typer.Option(None, "--dotenv"),
 ):
-    """Delete any existing rows for a source path, then ingest the file again."""
+    """Ingest a new active version for a source path while retaining old rows."""
 
     store_ctx = _make_store_context_or_exit(dotenv)
     tenant_id = store_ctx.settings.default_tenant_id
@@ -749,9 +749,6 @@ def reindex_document(
         for record in store_ctx.stores.doc_store.list_documents(tenant_id=tenant_id, collection_id=effective_collection)
         if Path(record.source_path) == path and record.source_type == source_type
     ]
-    for record in existing:
-        store_ctx.stores.doc_store.delete_document(record.doc_id, tenant_id=tenant_id)
-
     from agentic_chatbot_next.rag import ingest_paths  # noqa: PLC0415
 
     doc_ids = ingest_paths(
@@ -765,7 +762,7 @@ def reindex_document(
     console.print(
         json.dumps(
             {
-                "deleted_doc_ids": [record.doc_id for record in existing],
+                "superseded_doc_ids": [record.doc_id for record in existing],
                 "ingested_doc_ids": doc_ids,
                 "collection_id": effective_collection,
             },

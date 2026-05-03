@@ -4,6 +4,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
+from agentic_chatbot_next.rag.corpus_metadata import enrich_corpus_metadata
 from agentic_chatbot_next.rag.metadata_extractor import (
     INDEX_METADATA_VERSION,
     build_chunk_index_metadata,
@@ -12,6 +13,17 @@ from agentic_chatbot_next.rag.metadata_extractor import (
 )
 from agentic_chatbot_next.rag.ingest import _build_chunk_records
 from agentic_chatbot_next.rag.structure_detector import detect_structure
+
+
+class _FakeMetadataModel:
+    def __init__(self, content: str | Exception) -> None:
+        self.content = content
+
+    def invoke(self, messages):
+        del messages
+        if isinstance(self.content, Exception):
+            raise self.content
+        return type("Response", (), {"content": self.content})()
 
 
 def test_document_index_metadata_detects_requirements_outline_and_entities(tmp_path: Path) -> None:
@@ -97,3 +109,55 @@ def test_chunk_records_embed_with_metadata_context_while_storing_clean_content()
     assert records[0].embedding_text is not None
     assert records[0].embedding_text.startswith("[index metadata]")
     assert "section: Security Controls" in records[0].embedding_text
+
+
+def test_corpus_metadata_merges_llm_signals_and_falls_back_on_invalid_json(tmp_path: Path) -> None:
+    path = tmp_path / "CDRL_A001_status.md"
+    docs = [
+        Document(
+            page_content=(
+                "CDRL A001 Program Falcon status report. "
+                "WBS 1.2.3 is approved. REQ-42 shall be verified. Revision B."
+            ),
+            metadata={"parser": "unit-test"},
+        )
+    ]
+    providers = type(
+        "Providers",
+        (),
+        {
+            "chat": _FakeMetadataModel(
+                '{"doc_type":"status_report","lifecycle_phase":"approved",'
+                '"program_entities":["FALCON"],"authors":["Pat Lee"],"revision":"B",'
+                '"signals":{"cdrl":[{"value":"CDRL A001","evidence":"CDRL A001","confidence":0.9}],'
+                '"wbs":[{"value":"1.2.3","evidence":"WBS 1.2.3","confidence":0.8}],'
+                '"requirements":[{"value":"REQ-42","evidence":"REQ-42 shall","confidence":0.8}],'
+                '"status":[{"value":"approved","evidence":"approved","confidence":0.8}]},'
+                '"metadata_confidence":0.91}'
+            )
+        },
+    )()
+
+    enriched = enrich_corpus_metadata(
+        path=path,
+        raw_docs=docs,
+        providers=providers,
+        metadata_enrichment="llm",
+    )
+
+    assert enriched["doc_type"] == "status_report"
+    assert enriched["lifecycle_phase"] == "approved"
+    assert "FALCON" in enriched["program_entities"]
+    assert enriched["metadata_confidence"] >= 0.9
+    assert enriched["signal_summary"]["cdrl"]["count"] >= 1
+
+    fallback = enrich_corpus_metadata(
+        path=path,
+        raw_docs=docs,
+        providers=type("Providers", (), {"chat": _FakeMetadataModel("not json")})(),
+        metadata_enrichment="llm",
+    )
+
+    assert fallback["metadata_enrichment"] == "deterministic"
+    assert fallback["metadata_confidence"] < 0.5
+    assert any("LLM metadata enrichment failed" in warning for warning in fallback["warnings"])

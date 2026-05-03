@@ -451,7 +451,10 @@ def _infer_answer_contract(query: str, metadata: Mapping[str, Any] | None) -> An
         kind = "analysis"
     depth = "deep" if _DEEP_RE.search(normalized_query) or kind == "grounded_synthesis" and broad_coverage else "standard"
     final_output_mode = ""
-    if kind == REQUIREMENTS_WORKFLOW_KIND:
+    explicit_mermaid = bool(re.search(r"\bmermaid\b", normalized_query, flags=re.I))
+    if explicit_mermaid:
+        final_output_mode = "grounded_mermaid_diagram" if kind == "grounded_synthesis" else "mermaid_diagram"
+    elif kind == REQUIREMENTS_WORKFLOW_KIND:
         final_output_mode = "requirement_inventory"
     elif kind == "inventory":
         final_output_mode = "document_titles_only"

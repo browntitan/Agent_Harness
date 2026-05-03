@@ -4,8 +4,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
+import inspect
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 from threading import Thread
@@ -29,6 +32,7 @@ from agentic_chatbot_next.control_panel.runtime_manager import RuntimeManager, g
 from agentic_chatbot_next.graph.prompt_tuning import GraphPromptTuningService
 from agentic_chatbot_next.graph.service import GraphService
 from agentic_chatbot_next.mcp.client import McpClientError
+from agentic_chatbot_next.mcp.security import decrypt_mcp_secret, encrypt_mcp_secret
 from agentic_chatbot_next.mcp.service import McpCatalogService
 from agentic_chatbot_next.observability.events import RuntimeEvent
 from agentic_chatbot_next.persistence.postgres import (
@@ -62,6 +66,7 @@ from agentic_chatbot_next.router.router import build_router_targets
 from agentic_chatbot_next.runtime.context import filesystem_key
 from agentic_chatbot_next.sandbox.workspace import SessionWorkspace
 from agentic_chatbot_next.storage import blob_ref_from_record, build_blob_store
+from agentic_chatbot_next.skills.dependency_graph import build_skill_dependency_graph
 from agentic_chatbot_next.skills.pack_loader import load_skill_pack_from_text
 from agentic_chatbot_next.tools.registry import build_tool_definitions
 
@@ -85,7 +90,7 @@ MAX_EXTRACTED_CONTENT_CHARS = 240_000
 CONTROL_PANEL_CAPABILITIES_SCHEMA_VERSION = "1"
 CONTROL_PANEL_CONTRACT_VERSION = "control-panel-v1"
 COLLECTION_IGNORED_FILENAMES = {".ds_store", "thumbs.db"}
-COLLECTION_SUPPORTED_SUFFIXES = TEXT_SOURCE_SUFFIXES | {".docx", ".pdf", ".xls", ".xlsx"} | set(IMAGE_SUFFIXES)
+COLLECTION_SUPPORTED_SUFFIXES = TEXT_SOURCE_SUFFIXES | {".docx", ".pdf", ".pptx", ".xls", ".xlsx"} | set(IMAGE_SUFFIXES)
 UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024
 MAX_COLLECTION_UPLOAD_FILES = 2_000
 MAX_COLLECTION_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -107,13 +112,28 @@ CONTROL_PANEL_REQUIRED_ROUTES: Dict[str, List[str]] = {
     "collections": ["/v1/admin/collections"],
     "uploads": ["/v1/admin/uploads"],
     "graphs": ["/v1/admin/graphs", "/v1/admin/graphs/{graph_id}"],
-    "skills": ["/v1/skills"],
+    "skills": ["/v1/skills", "/v1/skills/build-draft"],
     "access": ["/v1/admin/access/principals", "/v1/admin/access/roles", "/v1/admin/access/effective-access"],
-    "mcp": ["/v1/admin/mcp/connections"],
-    "operations": ["/v1/admin/operations"],
+    "mcp": ["/v1/admin/mcp/connections", "/v1/admin/mcp/connections/{connection_id}/restart"],
+    "operations": ["/v1/admin/operations", "/v1/admin/services/reset-full"],
 }
 COLLECTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SERVICE_RESET_CONFIRMATION = "reset-service-full"
+SERVICE_RESET_ENGINES = {"docker", "podman"}
+PODMAN_RESET_CONTAINERS = ("rag-postgres", "app-bootstrap", "app", "openwebui", "openwebui-bootstrap")
+PODMAN_INFRA_SERVICES = (
+    "agentic-network.service",
+    "rag_postgres_data-volume.service",
+    "ollama_data-volume.service",
+    "openwebui_data-volume.service",
+    "app_runtime-volume.service",
+    "app_uploads-volume.service",
+    "app_workspaces-volume.service",
+    "app_cache-volume.service",
+    "app_control_panel_data-volume.service",
+    "graphrag_projects-volume.service",
+)
 
 
 def _dedupe(items: List[str] | tuple[str, ...]) -> List[str]:
@@ -130,6 +150,12 @@ def _dedupe(items: List[str] | tuple[str, ...]) -> List[str]:
 
 class ConfigChangeRequest(BaseModel):
     changes: Dict[str, Any] = Field(default_factory=dict)
+    actor: str = "control-panel"
+
+
+class ServiceResetRequest(BaseModel):
+    engine: str = "docker"
+    confirmation: str = ""
     actor: str = "control-panel"
 
 
@@ -151,6 +177,11 @@ class AgentUpdateRequest(BaseModel):
     allow_background_jobs: Optional[bool] = None
     metadata: Optional[Dict[str, Any]] = None
     body: Optional[str] = None
+    actor: str = "control-panel"
+
+
+class AgentSkillsUpdateRequest(BaseModel):
+    preload_skill_packs: List[str] = Field(default_factory=list)
     actor: str = "control-panel"
 
 
@@ -341,6 +372,7 @@ class McpAdminConnectionCreateRequest(BaseModel):
     owner_user_id: Optional[str] = None
     actor: str = "control-panel"
     metadata_json: Dict[str, Any] = Field(default_factory=dict)
+    server_environment: Dict[str, str] = Field(default_factory=dict)
 
 
 class McpAdminConnectionUpdateRequest(BaseModel):
@@ -353,6 +385,13 @@ class McpAdminConnectionUpdateRequest(BaseModel):
     status: Optional[str] = None
     actor: str = "control-panel"
     metadata_json: Optional[Dict[str, Any]] = None
+    server_environment: Optional[Dict[str, str]] = None
+
+
+class McpAdminRestartRequest(BaseModel):
+    engine: str = "docker"
+    confirmation: str = "restart-mcp-server"
+    actor: str = "control-panel"
 
 
 class McpAdminToolUpdateRequest(BaseModel):
@@ -485,8 +524,188 @@ def _mcp_service(runtime: Any) -> McpCatalogService:
     return McpCatalogService(runtime.settings, _mcp_store_or_503(runtime))
 
 
+MCP_SERVER_ENV_METADATA_KEY = "server_environment"
+MCP_SERVER_ENV_SECRET_KEY = "encrypted_values"
+MCP_SERVER_RUNTIME_METADATA_KEY = "server_runtime"
+MCP_RESTART_CONFIRMATION = "restart-mcp-server"
+_MCP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MCP_MANAGED_SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+
+
+def _normalise_mcp_server_environment(raw: Dict[str, str] | None) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    for key, value in dict(raw or {}).items():
+        clean_key = str(key or "").strip()
+        clean_value = str(value or "")
+        if not clean_key:
+            continue
+        if not _MCP_ENV_NAME_RE.match(clean_key):
+            raise ValueError(f"Invalid MCP server environment variable name: {clean_key!r}.")
+        if clean_value == "":
+            continue
+        env[clean_key] = clean_value
+    return env
+
+
+def _metadata_with_mcp_server_environment(
+    settings: Any,
+    metadata_json: Dict[str, Any] | None,
+    server_environment: Dict[str, str] | None,
+) -> Dict[str, Any]:
+    metadata = dict(metadata_json or {})
+    env = _normalise_mcp_server_environment(server_environment)
+    if not env:
+        metadata.pop(MCP_SERVER_ENV_METADATA_KEY, None)
+        return metadata
+    metadata[MCP_SERVER_ENV_METADATA_KEY] = {
+        "configured_keys": sorted(env),
+        "encrypted_values": encrypt_mcp_secret(settings, json.dumps(env, sort_keys=True)),
+        "delivery": "server_process_environment",
+        "restart_required": True,
+    }
+    return metadata
+
+
+def _sanitize_mcp_metadata(metadata_json: Dict[str, Any] | None) -> Dict[str, Any]:
+    metadata = dict(metadata_json or {})
+    server_env = metadata.get(MCP_SERVER_ENV_METADATA_KEY)
+    if isinstance(server_env, dict):
+        configured_keys = [str(item) for item in list(server_env.get("configured_keys") or []) if str(item)]
+        metadata[MCP_SERVER_ENV_METADATA_KEY] = {
+            "configured": bool(configured_keys),
+            "configured_keys": configured_keys,
+            "delivery": str(server_env.get("delivery") or "server_process_environment"),
+            "restart_required": bool(server_env.get("restart_required", True)),
+        }
+    server_runtime = metadata.get(MCP_SERVER_RUNTIME_METADATA_KEY)
+    if isinstance(server_runtime, dict):
+        metadata[MCP_SERVER_RUNTIME_METADATA_KEY] = {
+            "kind": str(server_runtime.get("kind") or ""),
+            "service": str(server_runtime.get("service") or ""),
+            "restart_supported": bool(server_runtime.get("restart_supported", False)),
+            "restart_engine": str(server_runtime.get("restart_engine") or "docker"),
+        }
+    return metadata
+
+
 def _serialize_mcp_record(record: Any) -> Dict[str, Any]:
-    return record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+    payload = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+    if "server_url" in payload:
+        payload["metadata_json"] = _sanitize_mcp_metadata(dict(payload.get("metadata_json") or {}))
+    return payload
+
+
+def _allowed_mcp_restart_services(settings: Any) -> set[str]:
+    configured = str(getattr(settings, "control_panel_mcp_restart_services", "") or os.getenv("CONTROL_PANEL_MCP_RESTART_SERVICES", "")).strip()
+    services = {item.strip() for item in configured.split(",") if item.strip()}
+    services.update({"sam-gov-mcp", "sam-mcp-smoke", "web-research-mcp"})
+    return {item for item in services if _MCP_MANAGED_SERVICE_RE.match(item)}
+
+
+def _mcp_restart_service(metadata_json: Dict[str, Any], settings: Any) -> str:
+    runtime = dict(metadata_json.get(MCP_SERVER_RUNTIME_METADATA_KEY) or {})
+    kind = str(runtime.get("kind") or "").strip()
+    service = str(runtime.get("service") or "").strip()
+    if kind != "docker_compose_service" or not bool(runtime.get("restart_supported", False)):
+        raise HTTPException(status_code=400, detail="This MCP connection is external or does not declare a managed restart target.")
+    if not _MCP_MANAGED_SERVICE_RE.match(service):
+        raise HTTPException(status_code=400, detail="MCP restart service name is invalid.")
+    if service not in _allowed_mcp_restart_services(settings):
+        raise HTTPException(status_code=403, detail=f"MCP restart service {service!r} is not allowlisted.")
+    return service
+
+
+def _mcp_restart_environment(settings: Any, metadata_json: Dict[str, Any]) -> Dict[str, str]:
+    server_env = dict(metadata_json.get(MCP_SERVER_ENV_METADATA_KEY) or {})
+    encrypted = str(server_env.get(MCP_SERVER_ENV_SECRET_KEY) or "").strip()
+    if not encrypted:
+        return {}
+    try:
+        payload = json.loads(decrypt_mcp_secret(settings, encrypted))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not decrypt MCP server environment: {exc}") from exc
+    return _normalise_mcp_server_environment({str(key): str(value) for key, value in dict(payload or {}).items()})
+
+
+def _restart_managed_mcp_service(
+    *,
+    manager: RuntimeManager,
+    connection_id: str,
+    service_name: str,
+    environment: Dict[str, str],
+    request: McpAdminRestartRequest,
+) -> Dict[str, Any]:
+    engine = str(request.engine or "docker").strip().lower()
+    if engine != "docker":
+        raise HTTPException(status_code=400, detail="Managed MCP restart currently supports only Docker Compose services.")
+    if request.confirmation != MCP_RESTART_CONFIRMATION:
+        raise HTTPException(status_code=400, detail="MCP server restart requires explicit confirmation.")
+    repo_root = _service_reset_repo_root()
+    _validate_service_reset_environment("docker", repo_root)
+    settings = manager.get_settings()
+    run_id = f"mcp-{service_name}-{uuid.uuid4().hex[:12]}"
+    runs_dir = _service_reset_runs_dir(settings) / "mcp"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = runs_dir / f"{run_id}.log"
+    status_path = runs_dir / f"{run_id}.exitcode"
+    metadata_path = runs_dir / f"{run_id}.json"
+    step = ServiceResetStep(["docker", "compose", "up", "-d", "--force-recreate", "--no-deps", service_name], env=dict(environment))
+    command = _service_reset_command_text(step, redact_env=True)
+    started_at = utc_now_iso()
+    metadata = {
+        "status": "started",
+        "run_id": run_id,
+        "engine": engine,
+        "connection_id": connection_id,
+        "service": service_name,
+        "started_at": started_at,
+        "actor": request.actor,
+        "repo_root": str(repo_root),
+        "log_path": str(log_path),
+        "status_path": str(status_path),
+        "commands": [command],
+        "environment_keys": sorted(environment),
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    script = _build_service_reset_script(
+        engine=engine,
+        run_id=run_id,
+        repo_root=repo_root,
+        log_path=log_path,
+        status_path=status_path,
+        steps=[step],
+        include_step_env_exports=False,
+    )
+    bash = shutil.which("bash") or "bash"
+    try:
+        process = subprocess.Popen(
+            [bash, "-lc", script],
+            cwd=str(repo_root),
+            env={**dict(os.environ), **dict(environment)},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception as exc:
+        metadata["status"] = "failed_to_start"
+        metadata["error"] = str(exc)
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        raise HTTPException(status_code=500, detail=f"Could not restart MCP service {service_name}: {exc}") from exc
+
+    metadata["pid"] = process.pid
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    manager.get_overlay_store().append_audit_event(
+        action="mcp_server_restart_start",
+        actor=request.actor,
+        details={
+            "connection_id": connection_id,
+            "service": service_name,
+            "run_id": run_id,
+            "environment_keys": sorted(environment),
+        },
+    )
+    return metadata
 
 
 def _request_context(
@@ -596,6 +815,10 @@ def _serialize_skill_reference(record: Any) -> Dict[str, Any]:
     }
 
 
+def _skill_family_id(record: Any) -> str:
+    return str(getattr(record, "version_parent", "") or getattr(record, "skill_id", "") or "").strip()
+
+
 def _access_store(runtime: Any) -> Any:
     store = getattr(getattr(runtime.bot, "ctx", None), "stores", None)
     store = getattr(store, "access_store", None)
@@ -696,6 +919,219 @@ def _serialize_job_summary(job: Any, job_manager: Any | None = None) -> Dict[str
     if job_manager is not None and hasattr(job_manager, "mailbox_summary"):
         payload["mailbox"] = job_manager.mailbox_summary(str(getattr(job, "job_id", "") or ""))
     return payload
+
+
+@dataclass(frozen=True)
+class ServiceResetStep:
+    argv: List[str]
+    env: Dict[str, str] = field(default_factory=dict)
+    allow_failure: bool = False
+
+
+def _service_reset_repo_root() -> Path:
+    candidates = [Path.cwd(), Path(__file__).resolve().parents[3]]
+    for candidate in candidates:
+        if (candidate / "docker-compose.yml").exists():
+            return candidate
+    return Path.cwd()
+
+
+def _service_reset_runs_dir(settings: Any) -> Path:
+    audit_path = Path(getattr(settings, "control_panel_audit_log_path", "data/control_panel/audit/events.jsonl"))
+    return audit_path.parent.parent / "service_resets"
+
+
+def _service_reset_command_text(step: ServiceResetStep, *, redact_env: bool = False) -> str:
+    prefix = " ".join(
+        f"{shlex.quote(key)}={shlex.quote('<redacted>' if redact_env else value)}"
+        for key, value in step.env.items()
+    )
+    command = shlex.join(step.argv)
+    return f"{prefix} {command}".strip()
+
+
+def _docker_service_reset_steps() -> List[ServiceResetStep]:
+    return [
+        ServiceResetStep(["docker", "compose", "down", "--remove-orphans"]),
+        ServiceResetStep(["docker", "compose", "build", "--no-cache", "app", "app-bootstrap", "openwebui"]),
+        ServiceResetStep(["docker", "compose", "up", "-d", "rag-postgres"]),
+        ServiceResetStep(["docker", "compose", "up", "--force-recreate", "app-bootstrap"]),
+        ServiceResetStep(["docker", "compose", "up", "-d", "--force-recreate", "app", "openwebui"]),
+        ServiceResetStep(["docker", "compose", "up", "--force-recreate", "openwebui-bootstrap"]),
+    ]
+
+
+def _podman_service_reset_steps() -> List[ServiceResetStep]:
+    return [
+        ServiceResetStep(["podman_startup/scripts/stop.sh"]),
+        ServiceResetStep(["systemctl", "--user", "reset-failed"], allow_failure=True),
+        ServiceResetStep(["podman", "rm", "-f", *PODMAN_RESET_CONTAINERS], allow_failure=True),
+        ServiceResetStep(
+            ["podman_startup/scripts/build-images.sh"],
+            env={"PODMAN_BUILD_NO_CACHE": "1"},
+        ),
+        ServiceResetStep(["systemctl", "--user", "start", *PODMAN_INFRA_SERVICES]),
+        ServiceResetStep(["systemctl", "--user", "start", "rag-postgres.service"]),
+        ServiceResetStep(["systemctl", "--user", "restart", "app-bootstrap.service"]),
+        ServiceResetStep(["systemctl", "--user", "restart", "app.service", "openwebui.service"]),
+        ServiceResetStep(["systemctl", "--user", "restart", "openwebui-bootstrap.service"]),
+    ]
+
+
+def _service_reset_steps(engine: str) -> List[ServiceResetStep]:
+    if engine == "docker":
+        return _docker_service_reset_steps()
+    if engine == "podman":
+        return _podman_service_reset_steps()
+    raise HTTPException(status_code=400, detail="Unsupported service reset engine.")
+
+
+def _validate_service_reset_environment(engine: str, repo_root: Path) -> None:
+    bash = shutil.which("bash")
+    if not bash:
+        raise HTTPException(status_code=503, detail="bash is required to run a full service reset.")
+    if engine == "docker":
+        if not shutil.which("docker"):
+            raise HTTPException(status_code=503, detail="Docker CLI is not available on the control-panel host.")
+        if not (repo_root / "docker-compose.yml").exists():
+            raise HTTPException(status_code=503, detail="docker-compose.yml was not found from the control-panel process.")
+    if engine == "podman":
+        missing = [command for command in ("podman", "systemctl") if not shutil.which(command)]
+        if missing:
+            raise HTTPException(status_code=503, detail=f"{', '.join(missing)} is required for the Podman service reset.")
+        if not (repo_root / "podman_startup" / "scripts" / "build-images.sh").exists():
+            raise HTTPException(status_code=503, detail="podman_startup scripts were not found from the control-panel process.")
+
+
+def _build_service_reset_script(
+    *,
+    engine: str,
+    run_id: str,
+    repo_root: Path,
+    log_path: Path,
+    status_path: Path,
+    steps: List[ServiceResetStep],
+    include_step_env_exports: bool = True,
+) -> str:
+    lines = [
+        "set -euo pipefail",
+        f"mkdir -p {shlex.quote(str(log_path.parent))}",
+        f"exec >> {shlex.quote(str(log_path))} 2>&1",
+        f"echo 'Service reset run {run_id} ({engine}) started at '$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        f"cd {shlex.quote(str(repo_root))}",
+        f"STATUS_PATH={shlex.quote(str(status_path))}",
+        "trap 'code=$?; printf \"%s\\n\" \"$code\" > \"$STATUS_PATH\"; if [ \"$code\" -eq 0 ]; then echo \"Service reset completed successfully at $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; else echo \"Service reset failed with exit code $code at $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; fi' EXIT",
+        "run_step() {",
+        "  echo",
+        "  echo \"+ $*\"",
+        "  \"$@\"",
+        "}",
+    ]
+    for step in steps:
+        if include_step_env_exports:
+            for key, value in step.env.items():
+                lines.append(f"export {shlex.quote(key)}={shlex.quote(value)}")
+        command = " ".join(shlex.quote(part) for part in step.argv)
+        if step.allow_failure:
+            lines.append(f"run_step {command} || true")
+        else:
+            lines.append(f"run_step {command}")
+    return "\n".join(lines) + "\n"
+
+
+def _read_latest_service_reset(settings: Any) -> Dict[str, Any]:
+    runs_dir = _service_reset_runs_dir(settings)
+    if not runs_dir.exists():
+        return {}
+    metadata_files = sorted(runs_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for metadata_path in metadata_files:
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        status_path = Path(str(payload.get("status_path") or ""))
+        if status_path.exists():
+            code = status_path.read_text(encoding="utf-8").strip()
+            if code:
+                payload["exit_code"] = code
+                payload["status"] = "completed" if code == "0" else "failed"
+        return payload
+    return {}
+
+
+def _start_service_reset(
+    request: ServiceResetRequest,
+    manager: RuntimeManager,
+) -> Dict[str, Any]:
+    engine = str(request.engine or "").strip().lower()
+    if engine not in SERVICE_RESET_ENGINES:
+        raise HTTPException(status_code=400, detail="engine must be either docker or podman.")
+    if request.confirmation != SERVICE_RESET_CONFIRMATION:
+        raise HTTPException(status_code=400, detail="Full service reset requires explicit confirmation.")
+
+    settings = manager.get_settings()
+    repo_root = _service_reset_repo_root()
+    _validate_service_reset_environment(engine, repo_root)
+    steps = _service_reset_steps(engine)
+    run_id = f"{engine}-{uuid.uuid4().hex[:12]}"
+    runs_dir = _service_reset_runs_dir(settings)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = runs_dir / f"{run_id}.log"
+    status_path = runs_dir / f"{run_id}.exitcode"
+    metadata_path = runs_dir / f"{run_id}.json"
+    commands = [_service_reset_command_text(step) for step in steps]
+    started_at = utc_now_iso()
+    metadata = {
+        "status": "started",
+        "run_id": run_id,
+        "engine": engine,
+        "started_at": started_at,
+        "actor": request.actor,
+        "repo_root": str(repo_root),
+        "log_path": str(log_path),
+        "status_path": str(status_path),
+        "commands": commands,
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+    script = _build_service_reset_script(
+        engine=engine,
+        run_id=run_id,
+        repo_root=repo_root,
+        log_path=log_path,
+        status_path=status_path,
+        steps=steps,
+    )
+    bash = shutil.which("bash") or "bash"
+    try:
+        process = subprocess.Popen(
+            [bash, "-lc", script],
+            cwd=str(repo_root),
+            env=dict(os.environ),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception as exc:
+        metadata["status"] = "failed_to_start"
+        metadata["error"] = str(exc)
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        raise HTTPException(status_code=500, detail=f"Could not start {engine} service reset: {exc}") from exc
+
+    metadata["pid"] = process.pid
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    manager.get_overlay_store().append_audit_event(
+        action="service_reset_full_start",
+        actor=request.actor,
+        details={
+            "engine": engine,
+            "run_id": run_id,
+            "log_path": str(log_path),
+            "commands": commands,
+        },
+    )
+    return metadata
 
 
 def _graph_service(
@@ -1080,28 +1516,46 @@ def _enrich_graph_payload(runtime: Any, payload: Dict[str, Any], *, owner_user_i
     return enriched
 
 
-def _serialize_agent(
+def _serialize_loaded_agent(
     runtime: Any,
     overlay_store: OverlayStore,
     *,
-    agent_name: str,
+    loaded: Any,
     include_body: bool,
     owner_user_id: str = "",
 ) -> Dict[str, Any]:
-    loaded = runtime.bot.kernel.registry.get_loaded_file(agent_name)
-    if loaded is None:
-        raise HTTPException(status_code=404, detail="Agent not found.")
     definition = loaded.definition
     skill_store = getattr(runtime.bot.ctx.stores, "skill_store", None)
     pinned_skills = []
+    pinned_skill_warnings = []
     if skill_store is not None and definition.preload_skill_packs:
-        pinned_skills = [
-            _serialize_skill_reference(record)
-            for record in skill_store.get_skill_packs_by_ids(
-                list(definition.preload_skill_packs),
+        try:
+            visible_records = skill_store.list_skill_packs(
                 tenant_id=runtime.settings.default_tenant_id,
                 owner_user_id=owner_user_id,
             )
+        except TypeError:
+            visible_records = skill_store.list_skill_packs(
+                tenant_id=runtime.settings.default_tenant_id,
+            )
+        dependency_graph = build_skill_dependency_graph(visible_records)
+        pinned_records = []
+        for skill_id in definition.preload_skill_packs:
+            record = dependency_graph.active_record_for_identifier(str(skill_id))
+            if record is not None:
+                pinned_records.append(record)
+        pinned_skills = [_serialize_skill_reference(record) for record in pinned_records]
+        resolved = {
+            _skill_family_id(record)
+            for record in pinned_records
+        } | {
+            str(record.skill_id or "")
+            for record in pinned_records
+        }
+        pinned_skill_warnings = [
+            f"Pinned skill '{skill_id}' could not be resolved to a visible skill."
+            for skill_id in definition.preload_skill_packs
+            if str(skill_id) not in resolved
         ]
     payload = {
         "name": definition.name,
@@ -1120,11 +1574,32 @@ def _serialize_agent(
         "source_path": str(loaded.source_path),
         "overlay_active": _agent_overlay_active(overlay_store, definition.name),
         "pinned_skills": pinned_skills,
+        "pinned_skill_warnings": pinned_skill_warnings,
     }
     if include_body:
         payload["body"] = loaded.body
         payload["overlay_markdown"] = overlay_store.read_agent_overlay(definition.name)
     return payload
+
+
+def _serialize_agent(
+    runtime: Any,
+    overlay_store: OverlayStore,
+    *,
+    agent_name: str,
+    include_body: bool,
+    owner_user_id: str = "",
+) -> Dict[str, Any]:
+    loaded = runtime.bot.kernel.registry.get_loaded_file(agent_name)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    return _serialize_loaded_agent(
+        runtime,
+        overlay_store,
+        loaded=loaded,
+        include_body=include_body,
+        owner_user_id=owner_user_id,
+    )
 
 
 def _normalize_collection_id(value: str) -> str:
@@ -1942,6 +2417,10 @@ def _reconstruct_document_content(chunks: List[Any]) -> Dict[str, Any]:
 
 def _serialize_document_record(record: Any) -> Dict[str, Any]:
     source_metadata = dict(getattr(record, "source_metadata", {}) or {})
+    try:
+        metadata_confidence = float(getattr(record, "metadata_confidence", source_metadata.get("metadata_confidence", 0.5)) or 0.0)
+    except (TypeError, ValueError):
+        metadata_confidence = 0.0
     return {
         "doc_id": record.doc_id,
         "title": record.title,
@@ -1959,6 +2438,17 @@ def _serialize_document_record(record: Any) -> Dict[str, Any]:
         "ingested_at": record.ingested_at,
         "file_type": record.file_type,
         "doc_structure_type": record.doc_structure_type,
+        "active": bool(getattr(record, "active", True)),
+        "version_ordinal": int(getattr(record, "version_ordinal", 1) or 1),
+        "superseded_at": str(getattr(record, "superseded_at", "") or ""),
+        "parser_provenance": dict(getattr(record, "parser_provenance", {}) or source_metadata.get("parser_provenance") or {}),
+        "extraction_status": str(getattr(record, "extraction_status", "") or source_metadata.get("extraction_status") or "success"),
+        "extraction_error": str(getattr(record, "extraction_error", "") or source_metadata.get("extraction_error") or ""),
+        "metadata_confidence": metadata_confidence,
+        "lifecycle_phase": str(getattr(record, "lifecycle_phase", "") or source_metadata.get("lifecycle_phase") or ""),
+        "doc_type": str(getattr(record, "doc_type", "") or source_metadata.get("doc_type") or ""),
+        "program_entities": list(getattr(record, "program_entities", []) or source_metadata.get("program_entities") or []),
+        "signal_summary": dict(getattr(record, "signal_summary", {}) or source_metadata.get("signal_summary") or {}),
         "source_metadata": source_metadata,
         "metadata_summary": source_metadata.get("index_metadata") if isinstance(source_metadata.get("index_metadata"), dict) else {},
     }
@@ -1967,8 +2457,17 @@ def _serialize_document_record(record: Any) -> Dict[str, Any]:
 def _document_detail_payload(runtime: Any, tenant_id: str, record: Any) -> Dict[str, Any]:
     chunks = runtime.bot.ctx.stores.chunk_store.list_document_chunks(record.doc_id, tenant_id=tenant_id)
     extracted = _reconstruct_document_content(chunks)
+    list_versions = getattr(runtime.bot.ctx.stores.doc_store, "list_document_versions", None)
+    if callable(list_versions):
+        try:
+            versions = [_serialize_document_record(item) for item in list_versions(record.doc_id, tenant_id)]
+        except Exception:
+            versions = [_serialize_document_record(record)]
+    else:
+        versions = [_serialize_document_record(record)]
     return {
         "document": _serialize_document_record(record),
+        "versions": versions,
         "extracted_content": extracted,
         "raw_source": _read_raw_source(runtime, record),
         "metadata_summary": (
@@ -2323,9 +2822,8 @@ def _ingest_collection_candidates(
     copied_display_paths: Dict[str, str] = {}
     for candidate in candidates:
         try:
-            doc_ids = ingest_paths(
-                runtime.settings,
-                runtime.bot.ctx.stores,
+            doc_ids = _call_ingest_paths(
+                runtime,
                 [candidate.absolute_path],
                 source_type=candidate.source_type,
                 tenant_id=tenant_id,
@@ -2335,6 +2833,7 @@ def _ingest_collection_candidates(
                 source_metadata_by_path={str(candidate.absolute_path): dict(candidate.source_metadata or {})},
                 metadata_profile=metadata_profile,
                 metadata_enrichment=metadata_enrichment,
+                providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
             )
             outcome = "ingested" if doc_ids else "already_indexed"
             message = "" if doc_ids else "Already indexed or no extractable content was found."
@@ -2395,6 +2894,7 @@ def _preview_collection_candidates(
                 candidate.absolute_path,
                 metadata_profile=metadata_profile,
                 metadata_enrichment=metadata_enrichment,
+                providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
                 source_metadata=dict(candidate.source_metadata or {}),
             )
             file_results.append(
@@ -2421,6 +2921,12 @@ def _preview_collection_candidates(
     result["status"] = "preview" if not result.get("failed_count") else "partial"
     result["preview"] = True
     return result
+
+
+def _call_ingest_paths(runtime: Any, paths: List[Path], **kwargs: Any) -> List[str]:
+    accepted = set(inspect.signature(ingest_paths).parameters)
+    filtered = {key: value for key, value in kwargs.items() if key in accepted}
+    return ingest_paths(runtime.settings, runtime.bot.ctx.stores, paths, **filtered)
 
 
 def _refresh_registered_source(
@@ -2612,6 +3118,66 @@ def _render_agent_overlay_markdown(existing: Any, request: AgentUpdateRequest) -
         lines.append(f"{key}: {rendered}")
     lines.extend(["---", str(body or "").rstrip(), ""])
     return "\n".join(lines)
+
+
+def _canonical_agent_skill_ids(runtime: Any, agent_name: str, requested_ids: List[str]) -> List[str]:
+    loaded = runtime.bot.kernel.registry.get_loaded_file(agent_name)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+    agent_scope = str(loaded.definition.skill_scope or "").strip()
+    if not agent_scope:
+        if _dedupe(requested_ids):
+            raise HTTPException(status_code=400, detail="Agent does not have a skill_scope.")
+        return []
+    skill_store = getattr(runtime.bot.ctx.stores, "skill_store", None)
+    if skill_store is None:
+        raise HTTPException(status_code=503, detail="Skill store is not configured.")
+    tenant_id = runtime.settings.default_tenant_id
+    try:
+        scoped_records = skill_store.list_skill_packs(
+            tenant_id=tenant_id,
+            agent_scope=agent_scope,
+        )
+    except TypeError:
+        scoped_records = skill_store.list_skill_packs(
+            tenant_id=tenant_id,
+            agent_scope=agent_scope,
+        )
+    try:
+        all_records = skill_store.list_skill_packs(tenant_id=tenant_id)
+    except TypeError:
+        all_records = scoped_records
+    scoped_graph = build_skill_dependency_graph(scoped_records)
+    all_graph = build_skill_dependency_graph(all_records)
+    canonical_ids: List[str] = []
+    for requested_id in _dedupe(requested_ids):
+        active_record = scoped_graph.active_record_for_identifier(requested_id)
+        if active_record is None:
+            global_record = all_graph.active_record_for_identifier(requested_id)
+            if global_record is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Skill '{requested_id}' is scoped to '{global_record.agent_scope}', "
+                        f"but agent '{agent_name}' uses skill_scope '{agent_scope}'."
+                    ),
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Skill '{requested_id}' must resolve to an active skill in scope '{agent_scope}'.",
+            )
+        if str(active_record.agent_scope or "").strip() != agent_scope:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Skill '{requested_id}' is scoped to '{active_record.agent_scope}', "
+                    f"but agent '{agent_name}' uses skill_scope '{agent_scope}'."
+                ),
+            )
+        canonical_id = _skill_family_id(active_record)
+        if canonical_id and canonical_id not in canonical_ids:
+            canonical_ids.append(canonical_id)
+    return canonical_ids
 
 
 def _catalog_for_settings(settings: Any) -> Any:
@@ -3307,6 +3873,11 @@ def admin_create_mcp_connection(
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     owner_user_id = request.owner_user_id or runtime.settings.default_user_id
     try:
+        metadata_json = _metadata_with_mcp_server_environment(
+            runtime.settings,
+            request.metadata_json,
+            request.server_environment,
+        )
         record = _mcp_service(runtime).create_connection(
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
@@ -3316,7 +3887,7 @@ def admin_create_mcp_connection(
             secret=request.secret,
             allowed_agents=request.allowed_agents,
             visibility=request.visibility,
-            metadata_json=request.metadata_json,
+            metadata_json=metadata_json,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3340,6 +3911,31 @@ def admin_update_mcp_connection(
     if not bool(getattr(runtime.settings, "mcp_tool_plane_enabled", False)):
         raise HTTPException(status_code=404, detail="MCP tool plane is disabled.")
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    metadata_json = request.metadata_json
+    current = None
+    if request.metadata_json is not None or request.server_environment is not None:
+        current = _mcp_store_or_503(runtime).get_connection(
+            connection_id,
+            tenant_id=tenant_id,
+            owner_user_id=x_user_id or None,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="MCP connection not found.")
+
+    if request.server_environment is not None:
+        try:
+            metadata_json = _metadata_with_mcp_server_environment(
+                runtime.settings,
+                request.metadata_json if request.metadata_json is not None else current.metadata_json,
+                request.server_environment,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif request.metadata_json is not None and current is not None:
+        metadata_json = dict(request.metadata_json or {})
+        current_server_env = dict(current.metadata_json or {}).get(MCP_SERVER_ENV_METADATA_KEY)
+        if isinstance(current_server_env, dict) and current_server_env.get(MCP_SERVER_ENV_SECRET_KEY):
+            metadata_json[MCP_SERVER_ENV_METADATA_KEY] = current_server_env
     try:
         record = _mcp_service(runtime).update_connection(
             connection_id,
@@ -3352,7 +3948,7 @@ def admin_update_mcp_connection(
             allowed_agents=request.allowed_agents,
             visibility=request.visibility,
             status=request.status,
-            metadata_json=request.metadata_json,
+            metadata_json=metadata_json,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3414,6 +4010,31 @@ def admin_test_mcp_connection(
         details={"connection_id": connection_id, "health": health},
     )
     return {"health": health}
+
+
+@router.post("/mcp/connections/{connection_id}/restart")
+def admin_restart_mcp_connection_server(
+    connection_id: str,
+    request: McpAdminRestartRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    connection = _mcp_store_or_503(runtime).get_connection(connection_id, tenant_id=tenant_id, owner_user_id=x_user_id or None)
+    if connection is None:
+        raise HTTPException(status_code=404, detail="MCP connection not found.")
+    service_name = _mcp_restart_service(dict(connection.metadata_json or {}), runtime.settings)
+    environment = _mcp_restart_environment(runtime.settings, dict(connection.metadata_json or {}))
+    result = _restart_managed_mcp_service(
+        manager=manager,
+        connection_id=connection_id,
+        service_name=service_name,
+        environment=environment,
+        request=request,
+    )
+    return {"restart": result}
 
 
 @router.post("/mcp/connections/{connection_id}/refresh-tools")
@@ -3503,10 +4124,19 @@ def get_operations(manager: RuntimeManager = Depends(_admin_manager)) -> Dict[st
             scheduler_snapshot = {}
     return {
         "last_reload": manager.last_reload_summary(),
+        "last_service_reset": _read_latest_service_reset(runtime.settings),
         "scheduler": scheduler_snapshot,
         "jobs": [_serialize_job_summary(job, runtime.bot.kernel.job_manager) for job in jobs],
         "audit_events": overlay_store.read_audit_events(limit=100),
     }
+
+
+@router.post("/services/reset-full")
+def reset_services_full(
+    request: ServiceResetRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+) -> Dict[str, Any]:
+    return _start_service_reset(request, manager)
 
 
 @router.get("/access/principals")
@@ -4056,6 +4686,50 @@ def update_agent(
         "pending_reload": True,
         "overlay_path": str(overlay_path),
         "agent": get_agent(agent_name, manager, None),
+    }
+
+
+@router.put("/agents/{agent_name}/skills")
+def update_agent_skills(
+    agent_name: str,
+    request: AgentSkillsUpdateRequest,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    overlay_store = manager.get_overlay_store()
+    existing = runtime.bot.kernel.registry.get_loaded_file(agent_name)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Agent not found.")
+
+    canonical_skill_ids = _canonical_agent_skill_ids(runtime, agent_name, request.preload_skill_packs)
+    markdown = _render_agent_overlay_markdown(
+        existing,
+        AgentUpdateRequest(
+            preload_skill_packs=canonical_skill_ids,
+            actor=request.actor,
+        ),
+    )
+    overlay_path = overlay_store.agent_overlay_path(agent_name)
+    loaded_overlay = load_agent_markdown_text(markdown, source_path=overlay_path)
+    overlay_store.write_agent_overlay(agent_name, markdown)
+    overlay_store.append_audit_event(
+        action="agent_skill_assignment_write",
+        actor=request.actor,
+        details={"agent_name": agent_name, "preload_skill_packs": canonical_skill_ids},
+    )
+    return {
+        "saved": True,
+        "pending_reload": True,
+        "overlay_path": str(overlay_path),
+        "preload_skill_packs": canonical_skill_ids,
+        "agent": _serialize_loaded_agent(
+            runtime,
+            overlay_store,
+            loaded=loaded_overlay,
+            include_body=True,
+            owner_user_id=x_user_id or runtime.settings.default_user_id,
+        ),
     }
 
 
@@ -5290,12 +5964,10 @@ def reindex_uploaded_file(
     source_path = _materialize_record_source_path(runtime, record)
     if source_path is None or not source_path.exists():
         raise HTTPException(status_code=400, detail="Uploaded file source path is no longer available for reindex.")
-    runtime.bot.ctx.stores.doc_store.delete_document(doc_id, tenant_id=tenant_id)
     source_metadata = dict(getattr(record, "source_metadata", {}) or {})
     index_metadata = source_metadata.get("index_metadata") if isinstance(source_metadata.get("index_metadata"), dict) else {}
-    doc_ids = ingest_paths(
-        runtime.settings,
-        runtime.bot.ctx.stores,
+    doc_ids = _call_ingest_paths(
+        runtime,
         [source_path],
         source_type=UPLOAD_SOURCE_TYPE,
         tenant_id=tenant_id,
@@ -5305,6 +5977,7 @@ def reindex_uploaded_file(
         source_metadata_by_path={str(source_path.resolve()): source_metadata},
         metadata_profile=str(index_metadata.get("metadata_profile") or source_metadata.get("metadata_profile") or "auto"),
         metadata_enrichment=str(index_metadata.get("metadata_enrichment") or source_metadata.get("metadata_enrichment") or "deterministic"),
+        providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
     )
     manager.get_overlay_store().append_audit_event(
         action="upload_file_reindex",
@@ -5312,7 +5985,7 @@ def reindex_uploaded_file(
         details={"collection_id": record.collection_id, "doc_id": doc_id},
     )
     return {
-        "deleted_doc_id": doc_id,
+        "superseded_doc_id": doc_id,
         "ingested_doc_ids": doc_ids,
         "collection_id": record.collection_id,
     }
@@ -5804,6 +6477,7 @@ def list_collection_documents(
     collection_id: str,
     manager: RuntimeManager = Depends(_admin_manager),
     title_contains: str = "",
+    include_versions: bool = False,
     limit: int = 100,
     x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
 ) -> Dict[str, Any]:
@@ -5811,12 +6485,20 @@ def list_collection_documents(
     tenant_id = x_tenant_id or runtime.settings.default_tenant_id
     normalized_collection_id = _normalize_collection_id(collection_id)
     normalized_title_query = str(title_contains or "").strip().lower()
-    records = [
-        record
-        for record in runtime.bot.ctx.stores.doc_store.list_documents(
+    try:
+        raw_records = runtime.bot.ctx.stores.doc_store.list_documents(
+            tenant_id=tenant_id,
+            collection_id=normalized_collection_id,
+            active_only=not include_versions,
+        )
+    except TypeError:
+        raw_records = runtime.bot.ctx.stores.doc_store.list_documents(
             tenant_id=tenant_id,
             collection_id=normalized_collection_id,
         )
+    records = [
+        record
+        for record in raw_records
         if not _is_upload_record(record)
         and (
             not normalized_title_query
@@ -5830,6 +6512,31 @@ def list_collection_documents(
             _serialize_document_record(record)
             for record in records
         ]
+    }
+
+
+@router.get("/collections/{collection_id}/documents/{doc_id}/versions")
+def get_collection_document_versions(
+    collection_id: str,
+    doc_id: str,
+    manager: RuntimeManager = Depends(_admin_manager),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> Dict[str, Any]:
+    runtime = _snapshot_or_503(manager)
+    tenant_id = x_tenant_id or runtime.settings.default_tenant_id
+    normalized_collection_id = _normalize_collection_id(collection_id)
+    record = runtime.bot.ctx.stores.doc_store.get_document(doc_id, tenant_id=tenant_id)
+    if record is None or record.collection_id != normalized_collection_id or _is_upload_record(record):
+        raise HTTPException(status_code=404, detail="Document not found.")
+    list_versions = getattr(runtime.bot.ctx.stores.doc_store, "list_document_versions", None)
+    if callable(list_versions):
+        versions = list_versions(doc_id, tenant_id)
+    else:
+        versions = [record]
+    return {
+        "doc_id": doc_id,
+        "collection_id": normalized_collection_id,
+        "versions": [_serialize_document_record(item) for item in versions],
     }
 
 
@@ -5866,12 +6573,10 @@ def reindex_collection_document(
     source_path = _materialize_record_source_path(runtime, record)
     if source_path is None or not source_path.exists():
         raise HTTPException(status_code=400, detail="Document source path is no longer available for reindex.")
-    runtime.bot.ctx.stores.doc_store.delete_document(doc_id, tenant_id=tenant_id)
     source_metadata = dict(getattr(record, "source_metadata", {}) or {})
     index_metadata = source_metadata.get("index_metadata") if isinstance(source_metadata.get("index_metadata"), dict) else {}
-    doc_ids = ingest_paths(
-        runtime.settings,
-        runtime.bot.ctx.stores,
+    doc_ids = _call_ingest_paths(
+        runtime,
         [source_path],
         source_type=record.source_type,
         tenant_id=tenant_id,
@@ -5881,6 +6586,7 @@ def reindex_collection_document(
         source_metadata_by_path={str(source_path.resolve()): source_metadata},
         metadata_profile=str(index_metadata.get("metadata_profile") or source_metadata.get("metadata_profile") or "auto"),
         metadata_enrichment=str(index_metadata.get("metadata_enrichment") or source_metadata.get("metadata_enrichment") or "deterministic"),
+        providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
     )
     manager.get_overlay_store().append_audit_event(
         action="document_reindex",
@@ -5888,7 +6594,7 @@ def reindex_collection_document(
         details={"collection_id": normalized_collection_id, "doc_id": doc_id},
     )
     return {
-        "deleted_doc_id": doc_id,
+        "superseded_doc_id": doc_id,
         "ingested_doc_ids": doc_ids,
         "collection_id": normalized_collection_id,
     }

@@ -651,7 +651,7 @@ def load_settings(
 
     # Ollama
     ollama_base_url = str(_getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
-    ollama_chat_model = str(_getenv("OLLAMA_CHAT_MODEL", "gpt-oss:20b"))
+    ollama_chat_model = str(_getenv("OLLAMA_CHAT_MODEL", "nemotron-cascade-2:30b"))
     ollama_embed_model = str(_getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text:latest"))
     ollama_judge_model = str(_getenv("OLLAMA_JUDGE_MODEL", ollama_chat_model))
     ollama_temperature = _as_float("OLLAMA_TEMPERATURE", 0.2)

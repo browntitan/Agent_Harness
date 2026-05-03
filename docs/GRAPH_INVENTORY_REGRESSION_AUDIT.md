@@ -55,3 +55,10 @@ Plain inventory prompts should still avoid deep RAG. Relationship, evidence, and
 prompts may legitimately route to `graph_manager`, which can use `list_graph_indexes`,
 `inspect_graph_index`, `search_graph_index`, `explain_source_plan`, and `rag_agent_tool` to
 resolve graph candidates back to cited text evidence.
+
+Current graph search also uses the shared reranking layer when enabled:
+`RERANK_ENABLED=true`, `RERANK_PROVIDER=ollama`,
+`RERANK_MODEL=rjmalagon/mxbai-rerank-large-v2:1.5b-fp16`, `RERANK_TOP_N=12`, and
+heuristic fallback when the reranker is unavailable. Graph source planning is also available
+to `rag_researcher`, which can use graph candidates as part of an exploratory source-selection
+loop before final text-grounded RAG synthesis.

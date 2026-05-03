@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Slide Image Placeholder 1"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldImg"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="3" name="Notes Placeholder 2"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="body" idx="1"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US" dirty="0"/>
+              <a:t>This flow illustrates two important patterns that work together: MCP tool discovery and cross-agent escalation. When the system has more tools than can fit in a single LLM context window, it defers some tools to keep the initial prompt lean. The agent's system prompt includes a "Deferred Tools" section listing available tool groups and example names, with instructions to call discover_tools() before using any deferred capability. Here is a concrete example: a user asks the general agent to "check our compliance score in the external audit system." The general agent does not have audit system tools in its initial tool set. But it sees the deferred tools hint mentioning "api_integrations" and "compliance_tools." It calls discover_tools(query="compliance audit score checking"), which searches the deferred tool catalog using semantic matching. The matching tools are returned and added to the agent's available tool set for this turn. The agent then calls call_deferred_tool(tool_name="audit_compliance_check", arguments=...) to execute the resolved tool. This is powered by MCP -- the Model Context Protocol -- which handles external tool server connections with Fernet symmetric encryption for credential security. The second pattern shown here is cross-agent escalation via invoke_agent(). Mid-task, any agent can call invoke_agent(agent_name="data_analyst", message="Analyze this compliance data") to hand off a subtask to a specialist. Unlike the coordinator pattern where work is planned upfront, invoke_agent() is reactive -- the agent discovers mid-execution that it needs capabilities it does not have. The key architectural benefit is that invoke_agent() preserves the current session context. The invoked agent gets a scoped copy of the session, runs its own QueryLoop with its own tools and mode, and returns its result to the calling agent. This means you can compose agent capabilities dynamically without pre-planning every possible workflow. The general agent might discover it needs data analysis, invoke data_analyst, get results back, and continue its own reasoning loop with those results incorporated. This is fundamentally different from the coordinator's top-down decomposition -- it is bottom-up, emergent composition of agent capabilities.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="4" name="Slide Number Placeholder 3"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldNum" sz="quarter" idx="10"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:fld id="{F7021451-1387-4CA6-816F-3879F97B5CBC}" type="slidenum">
+              <a:rPr lang="en-US"/>
+              <a:t>0</a:t>
+            </a:fld>
+            <a:endParaRPr lang="en-US"/>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

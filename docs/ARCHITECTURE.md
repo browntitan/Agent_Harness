@@ -56,6 +56,7 @@ chat turns rather than forming a separate sidecar service.
   callers
 - detection of optional `metadata.long_output`
 - choosing the initial agent
+- honoring explicit manual overrides such as non-routable `rag_researcher`
 - choosing synchronous composition versus background job execution for long-form writing
 - per-session live-progress sink registration for streaming API turns
 - handoff into the session kernel
@@ -83,6 +84,10 @@ The router still records the normal `BASIC` vs `AGENT` decision even when caller
 `metadata.requested_agent`. That override is validated later by `RuntimeService` and only changes
 the initial AGENT role; it does not replace router decision logging or the underlying routing
 reasons.
+
+Corpus-scale research now has a distinct routed manager: `research_coordinator`. Small grounded
+lookups still prefer `rag_worker`, generic AGENT work still defaults to `general`, and broad
+document discovery or deep repository research can start in `research_coordinator`.
 
 ### Session kernel
 
@@ -125,6 +130,8 @@ It handles:
 - direct RAG worker execution via `run_rag_contract(...)`
 - evidence-only RAG worker execution for internal deep-search fan-out jobs
 - graph-manager `react` execution for graph fast-path and delegated graph source planning
+- manual/delegated `rag_researcher` execution through the same `react` path for autonomous RAG
+  source selection and evidence-plan preparation
 - one bounded async peer delegation from the direct `rag_worker` path when the judge model
   decides a specialist follow-up is a better next step than immediate synthesis
 - direct memory-maintainer execution via heuristic extraction when `MEMORY_ENABLED=true`
@@ -181,6 +188,11 @@ Frontmatter is validated at load time through a Pydantic schema before it become
 validation remains a separate pass for unknown tools, unknown workers, invalid memory scopes,
 and missing prompt files.
 
+Current role inventory includes both `research_coordinator` and `rag_researcher`.
+`research_coordinator` is routable and marked as the research campaign manager.
+`rag_researcher` is intentionally non-routable but allowed as a manual requested-agent override
+and as a delegated worker.
+
 ### Provider resilience
 
 Provider bundles are resolved once per agent role, then chat and judge models are wrapped with
@@ -236,6 +248,7 @@ Bound runtime tool groups today are:
 - `skills`
 - `memory`
 - `rag_gateway`
+- `rag_workbench`
 - `graph_gateway`
 - `analyst`
 - `orchestration`
@@ -293,6 +306,12 @@ indexed skill metadata can drive:
 - `coverage_goal`
 - `result_mode`
 
+The `rag_workbench` group is the exploratory surface used by `rag_researcher`. Its tools plan
+query facets, search chunks and document sections, inspect document structure, filter indexed
+documents, grade/prune evidence candidates, validate the evidence plan, and build
+`controller_hints_json` for final `rag_agent_tool` synthesis. Those tools are deferred for
+general agents and eager only for `rag_researcher`.
+
 ### RAG
 
 The live RAG flow lives under `src/agentic_chatbot_next/rag/`.
@@ -322,6 +341,10 @@ Internally, the live controller is now adaptive:
 - `deep` mode can perform multi-round retrieval, chunk-window expansion, document-focused
   rereads, pruning, and bounded internal evidence-worker fan-out
 
+Candidate ordering now also includes the optional Ollama reranker layer when `RERANK_ENABLED=true`.
+The default local reranker is `rjmalagon/mxbai-rerank-large-v2:1.5b-fp16`; if it is unavailable,
+the runtime can fall back to deterministic heuristics.
+
 The retrieval stack is also graph-augmented when graph features are enabled. PostgreSQL
 full-text and pgvector remain the default lexical and semantic base. Managed graph catalogs,
 GraphRAG project artifacts, graph query cache rows, and graph source records live in
@@ -343,14 +366,23 @@ current retrieval path; it does not replace the existing vector and keyword path
 The direct `rag_worker` path is now also shaped by structured hints resolved from skill
 packs and planner/coordinator payloads.
 
+For spreadsheet evidence, adaptive RAG can ask the runtime bridge to run bounded
+`data_analyst` tabular-evidence jobs. The analyst uses `profile_dataset` first, then returns
+structured findings and source refs that the RAG layer converts into citation-eligible tabular
+evidence before synthesis.
+
 Large corpus-mining requests are intentionally split above the direct RAG layer:
 
 - small grounded lookups stay on direct `rag_worker`
 - broad corpus discovery, inventories, and exhaustive comparisons route to
-  coordinator-owned research campaigns
+  `research_coordinator` / coordinator-owned research campaigns
 
 That keeps `rag_worker` specialized for retrieval while `coordinator` remains the owner of
 durable sub-agent orchestration.
+
+When the task needs a source-selection-heavy exploratory loop rather than a broad campaign,
+callers or coordinators can use `rag_researcher`. It is a prompt-backed ReAct specialist that
+uses `rag_workbench` and graph source-planning tools before calling `rag_agent_tool`.
 
 Coordinator-owned typed handoffs are now the supported worker-to-worker pattern. The runtime
 passes validated artifacts such as:
@@ -387,6 +419,13 @@ as a fallback/compatibility path for explicit structured memory intent. The dele
 path is kernel-owned rather than an automatic delegated agent run. When `MEMORY_ENABLED=false`,
 neither path runs and the memory tool surface disappears.
 
+### Context Budgeting
+
+When `CONTEXT_BUDGET_ENABLED=true`, `ContextBudgetManager` estimates prompt, history, and tool
+result size before model calls. It can compact older history into a persisted boundary, restore
+recent file/skill handles, and microcompact large current-turn tool results into sidecar
+references. These controls are runtime context management, not user-visible summarization.
+
 ### Persistence
 
 The next runtime persists file-backed runtime artifacts such as:
@@ -397,6 +436,7 @@ The next runtime persists file-backed runtime artifacts such as:
 - notifications
 - jobs
 - mailbox messages
+- context compaction boundaries and large tool-result sidecars
 - worker artifacts
 - long-form job state and metadata
 
@@ -432,6 +472,10 @@ Current milestone and status families include:
 
 Common payload fields now include `label`, `detail`, `agent`, `job_id`, `task_id`, `docs`,
 `counts`, `why`, and `waiting_on`.
+
+Frontend transparency is filtered by `FRONTEND_EVENTS_*` settings. The live stream can include
+safe `agent_context_loaded` audit items describing prompt docs, resolved skills, context
+sections, and redacted memory/context previews without exposing raw chain-of-thought.
 
 ## High-level flow
 

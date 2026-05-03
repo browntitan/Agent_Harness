@@ -293,6 +293,17 @@ def test_requirements_extraction_turn_contract_uses_upload_scope_and_workflow() 
     assert intent.requested_scope["workflow"] == "requirements_extraction"
 
 
+def test_mermaid_turn_contract_records_diagram_output_mode() -> None:
+    intent = resolve_turn_intent(
+        "Use the default KB, research how skills are indexed, then produce a Mermaid flowchart with citations below it.",
+        {"kb_collection_id": "default"},
+    )
+
+    assert intent.answer_contract.kind == "grounded_synthesis"
+    assert intent.answer_contract.final_output_mode == "grounded_mermaid_diagram"
+    assert intent.presentation_preferences.diagram_policy == "require_mermaid"
+
+
 def test_requirements_document_selection_clarification_resumes_original_request() -> None:
     original = resolve_turn_intent(
         "extract all shall statements from the uploaded document",

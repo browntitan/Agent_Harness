@@ -69,7 +69,9 @@ _LEGAL_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _ALL_DOCUMENTS_RE = re.compile(
-    r"\b(?:all|every)\s+(?:documents?|docs?|files?)\b|\b(?:entire|whole)\s+(?:corpus|collection)\b|\bacross\s+(?:the\s+)?(?:corpus|documents?|docs?|files?)\b",
+    r"\b(?:all|every)\s+(?:(?:[A-Za-z0-9_-]+)\s+){0,12}(?:documents?|docs?|files?)\b|"
+    r"\b(?:entire|whole)\s+(?:corpus|collection)\b|"
+    r"\bacross\s+(?:the\s+)?(?:(?:[A-Za-z0-9_-]+)\s+){0,12}(?:corpus|documents?|docs?|files?)\b",
     re.IGNORECASE,
 )
 _FAR_DFARS_CLAUSE_RE = re.compile(r"\b(?:52|252)\.\d{3}-\d+\b|\b(?:FAR|DFARS)\b", re.IGNORECASE)

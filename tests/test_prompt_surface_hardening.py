@@ -30,6 +30,11 @@ _DEMO_HINT_TERMS = re.compile(
     r"|defense[-_\s]+(?:corpus|graph|repository|program)",
     re.IGNORECASE,
 )
+_TERSE_DEFAULT_TERMS = re.compile(
+    r"concise by default|Be concise and direct|clearly and concisely|"
+    r"smallest answer shape|one short synthesis paragraph|simplest shape",
+    re.IGNORECASE,
+)
 
 
 def test_tool_definitions_have_rich_metadata() -> None:
@@ -130,6 +135,88 @@ def test_prompt_files_have_required_sections_and_no_placeholder_or_legacy_terms(
 
     for path in sorted((repo_root / "data" / "prompts").glob("*.md")):
         assert "placeholder" not in path.read_text(encoding="utf-8").lower(), path
+
+
+def test_response_depth_guidance_prefers_balanced_defaults() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    runtime_paths = [
+        repo_root / "data" / "skills" / "skills.md",
+        repo_root / "data" / "skills" / "general_agent.md",
+        repo_root / "data" / "skills" / "basic_chat.md",
+        repo_root / "data" / "skills" / "rag_agent.md",
+        repo_root / "data" / "skills" / "finalizer_agent.md",
+        repo_root / "data" / "prompts" / "grounded_answer.txt",
+        repo_root / "data" / "prompts" / "rag_synthesis.txt",
+        repo_root / "src" / "agentic_chatbot_next" / "general_agent.py",
+        repo_root / "src" / "agentic_chatbot_next" / "prompt_fallbacks.py",
+        repo_root / "src" / "agentic_chatbot_next" / "prompting.py",
+        repo_root / "src" / "agentic_chatbot_next" / "rag" / "engine.py",
+    ]
+    for path in runtime_paths:
+        text = path.read_text(encoding="utf-8")
+        assert not _TERSE_DEFAULT_TERMS.search(text), path
+
+    shared = (repo_root / "data" / "skills" / "skills.md").read_text(encoding="utf-8")
+    general = (repo_root / "data" / "skills" / "general_agent.md").read_text(encoding="utf-8")
+    grounded = (repo_root / "data" / "prompts" / "grounded_answer.txt").read_text(encoding="utf-8")
+    assert "Default to substantial but not verbose" in shared
+    assert "Default to substantial but not verbose" in general
+    assert "Default to substantial but not verbose" in grounded
+
+
+def test_rag_prompt_templates_and_fallbacks_use_balanced_answer_shapes() -> None:
+    from agentic_chatbot_next.prompt_fallbacks import fallback_prompt_for_key, fallback_shared_prompt
+    from agentic_chatbot_next.prompting import load_grounded_answer_prompt, load_rag_synthesis_prompt
+
+    repo_root = Path(__file__).resolve().parents[1]
+    settings = SimpleNamespace(
+        prompts_backend="local",
+        grounded_answer_prompt_path=repo_root / "data" / "prompts" / "grounded_answer.txt",
+        rag_synthesis_prompt_path=repo_root / "data" / "prompts" / "rag_synthesis.txt",
+        control_panel_prompt_overlays_dir=None,
+    )
+    grounded = load_grounded_answer_prompt(settings)
+    synthesis = load_rag_synthesis_prompt(settings)
+    assert "substantial but not verbose" in grounded
+    assert "do not collapse rich findings into a vague paragraph" in synthesis
+
+    missing_prompt_settings = SimpleNamespace(
+        prompts_backend="local",
+        grounded_answer_prompt_path=Path("missing-grounded.txt"),
+        rag_synthesis_prompt_path=Path("missing-synthesis.txt"),
+        control_panel_prompt_overlays_dir=None,
+    )
+    assert "substantial but not verbose" in load_grounded_answer_prompt(missing_prompt_settings)
+    assert "do not collapse rich findings into a vague paragraph" in load_rag_synthesis_prompt(missing_prompt_settings)
+    assert "substantial but not verbose" in fallback_shared_prompt()
+    for key in ("general_agent", "basic_chat", "rag_agent", "finalizer_agent"):
+        assert not _TERSE_DEFAULT_TERMS.search(fallback_prompt_for_key(key)), key
+
+
+def test_general_agent_recovery_synthesis_asks_for_enough_detail() -> None:
+    from agentic_chatbot_next.general_agent import _synthesize_tool_results
+
+    class CapturingLLM:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def invoke(self, messages, config=None):  # noqa: ANN001, ANN202
+            self.messages = list(messages)
+            return SimpleNamespace(content="Recovered answer.")
+
+    llm = CapturingLLM()
+    text = _synthesize_tool_results(
+        llm,
+        user_text="Summarize the tool result.",
+        tool_results=[{"tool": "example", "result": {"answer": "Useful evidence"}}],
+        callbacks=[],
+        system_prompt="",
+        recovery_reason="unit_test",
+    )
+    assert text == "Recovered answer."
+    system_prompt = llm.messages[0].content
+    assert "enough detail to satisfy the request" in system_prompt
+    assert "clearly and concisely" not in system_prompt
 
 
 def test_runtime_prompt_surfaces_do_not_include_demo_corpus_hints() -> None:

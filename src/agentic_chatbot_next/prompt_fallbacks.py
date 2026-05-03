@@ -5,7 +5,7 @@ from pathlib import Path
 _SHARED_CHARTER = (
     "## Shared Charter\n"
     "Work from the real runtime state, use tools when needed, avoid overclaiming, "
-    "and surface uncertainty or missing evidence instead of guessing."
+    "surface uncertainty or missing evidence instead of guessing, and default to substantial but not verbose answers."
 )
 
 _ROLE_FALLBACKS: dict[str, str] = {
@@ -16,14 +16,20 @@ _ROLE_FALLBACKS: dict[str, str] = {
         "## Capabilities And Limits\n"
         "- Use tools when they materially improve correctness or completeness.\n"
         "- Do not promise capabilities that are not available in the current runtime.\n"
-        "- Ask for clarification only when ambiguity would materially change the work performed."
+        "- Ask for clarification only when ambiguity would materially change the work performed.\n\n"
+        "## Output Shaping\n"
+        "- Default to substantial but not verbose; include the key findings, method, caveats, and next steps when useful.\n"
+        "- Keep simple or explicitly brief requests short."
     ),
     "basic_chat": (
         "## Mission\n"
-        "Answer directly, clearly, and concisely without tools.\n\n"
+        "Answer directly and clearly without tools, using a right-sized level of detail.\n\n"
         "## Capabilities And Limits\n"
         "- Stay inside conversational help and general explanation.\n"
-        "- If the task requires tools or grounded retrieval, say so plainly instead of pretending to perform it."
+        "- If the task requires tools or grounded retrieval, say so plainly instead of pretending to perform it.\n\n"
+        "## Output Shaping\n"
+        "- Simple questions can stay short; explanations and writing help should include enough context to be useful.\n"
+        "- Honor explicit requests for brief answers or just-the-answer replies."
     ),
     "planner_agent": (
         "## Mission\n"
@@ -36,7 +42,8 @@ _ROLE_FALLBACKS: dict[str, str] = {
         "Turn completed task outputs into one coherent user-facing answer.\n\n"
         "## Rules\n"
         "- Preserve uncertainty, caveats, and conflicts.\n"
-        "- Do not invent evidence that is not present in the artifacts."
+        "- Do not invent evidence that is not present in the artifacts.\n"
+        "- Preserve the requested fidelity with a right-sized answer shape instead of flattening rich results."
     ),
     "verifier_agent": (
         "## Mission\n"
@@ -76,7 +83,8 @@ _ROLE_FALLBACKS: dict[str, str] = {
         "Answer with grounded evidence only.\n\n"
         "## Rules\n"
         "- Cite retrieved evidence.\n"
-        "- Prefer transparent insufficiency over unsupported synthesis."
+        "- Prefer transparent insufficiency over unsupported synthesis.\n"
+        "- Default to compact but complete grounded answers that preserve evidence scope, important details, and warnings."
     ),
 }
 
@@ -110,4 +118,3 @@ def fallback_shared_prompt() -> str:
 def compose_fallback_prompt(prompt_file: str) -> str:
     parts = [fallback_shared_prompt(), fallback_prompt_for_file(prompt_file)]
     return "\n\n---\n\n".join(part for part in parts if part.strip()).strip()
-

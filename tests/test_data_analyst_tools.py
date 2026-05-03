@@ -23,6 +23,7 @@ def _make_session(scratchpad=None):
     session = MagicMock()
     session.scratchpad = scratchpad or {}
     session.tenant_id = "test-tenant"
+    session.metadata = {}
     session.workspace = None
     return session
 
@@ -32,6 +33,7 @@ def _make_stores(source_path=None):
     doc = MagicMock()
     doc.source_path = source_path
     doc.source_uri = f"file://{source_path}" if source_path else None
+    doc.collection_id = "default"
     stores.doc_store.get_document.return_value = doc
     return stores
 
@@ -78,6 +80,17 @@ def _write_multisheet_xlsx(path: Path) -> None:
     meta = wb.create_sheet("metadata")
     meta.append(["key", "value"])
     meta.append(["source", "survey"])
+    wb.save(str(path))
+
+
+def _write_status_xlsx(path: Path) -> None:
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Risks"
+    ws.append(["Risk ID", "Risk", "Owner", "Status", "Due Date"])
+    ws.append(["R-1", "Supplier delay", "Pat Lee", "Open", "2028-09-26"])
     wb.save(str(path))
 
 
@@ -214,6 +227,60 @@ class TestLoadDatasetXlsx:
         assert result["source_refs"][0]["cell_range"]
         assert "review" in result["sheets"][0]["columns"]
 
+    def test_status_workbook_tools_profile_and_extract_records(self, tmp_path):
+        pytest.importorskip("openpyxl")
+        xlsx_file = tmp_path / "status.xlsx"
+        _write_status_xlsx(xlsx_file)
+
+        session = _make_session()
+        stores = _make_stores(source_path=str(xlsx_file))
+        settings = _make_settings()
+
+        from agentic_chatbot_next.tools.data_analyst_tools import make_data_analyst_tools
+
+        tools = make_data_analyst_tools(stores, session, settings=settings)
+        profile_tool = next(t for t in tools if t.name == "profile_workbook_status")
+        extract_tool = next(t for t in tools if t.name == "extract_workbook_status")
+
+        profile = json.loads(profile_tool.invoke({"doc_id": "status_doc"}))
+        extracted = json.loads(extract_tool.invoke({"doc_id": "status_doc", "domains_csv": "risk"}))
+
+        assert profile["status"] == "ok"
+        assert "risk" in profile["sheets"][0]["domain_tags"]
+        assert extracted["record_count"] == 1
+        assert extracted["source_refs"][0]["cell_range"] == "A2:E2"
+        assert "HUMAN_REVIEW_REQUIRED_BEFORE_EXTERNAL_SHARING" in extracted["warnings"]
+
+    def test_status_workbook_tools_respect_collection_access_summary(self, tmp_path):
+        pytest.importorskip("openpyxl")
+        xlsx_file = tmp_path / "status.xlsx"
+        _write_status_xlsx(xlsx_file)
+
+        session = _make_session()
+        session.metadata = {
+            "access_summary": {
+                "authz_enabled": True,
+                "session_upload_collection_id": "",
+                "resources": {
+                    "collection": {
+                        "use": ["other-collection"],
+                        "use_all": False,
+                    }
+                },
+            }
+        }
+        stores = _make_stores(source_path=str(xlsx_file))
+        settings = _make_settings()
+
+        from agentic_chatbot_next.tools.data_analyst_tools import make_data_analyst_tools
+
+        tools = make_data_analyst_tools(stores, session, settings=settings)
+        profile_tool = next(t for t in tools if t.name == "profile_workbook_status")
+        result = json.loads(profile_tool.invoke({"doc_id": "status_doc"}))
+
+        assert result["status"] == "error"
+        assert "Access denied" in result["error"]
+
 
 # ---------------------------------------------------------------------------
 # load_dataset — error cases
@@ -283,6 +350,34 @@ class TestLoadDatasetErrors:
         assert "error" not in result
         assert result["doc_id"] == "workspace_data.csv"
         assert result["shape"] == [2, 2]
+
+    def test_manifest_present_text_upload_is_unsupported_not_missing(self, tmp_path):
+        txt_file = tmp_path / "readme.txt"
+        txt_file.write_text("notes", encoding="utf-8")
+
+        session = _make_session()
+        session.metadata = {
+            "last_upload_manifest": {
+                "workspace_copies": ["readme.txt"],
+                "filenames": ["readme.txt"],
+            }
+        }
+        session.workspace = MagicMock()
+        session.workspace.root = tmp_path
+        session.workspace.exists.side_effect = lambda filename: (tmp_path / filename).exists()
+        stores = MagicMock()
+        stores.doc_store.get_document.return_value = None
+        settings = _make_settings()
+
+        from agentic_chatbot_next.tools.data_analyst_tools import make_data_analyst_tools
+
+        tools = make_data_analyst_tools(stores, session, settings=settings)
+        load_tool = next(t for t in tools if t.name == "load_dataset")
+        result = json.loads(load_tool.invoke({"doc_id": "readme.txt"}))
+
+        assert "error" in result
+        assert "unsupported" in result["error"].lower()
+        assert "not found" not in result["error"].lower()
 
     def test_next_runtime_load_dataset_defaults_to_first_workspace_file_when_doc_id_missing(self, tmp_path):
         csv_file = tmp_path / "workspace_data.csv"
@@ -649,7 +744,12 @@ class TestRunNlpColumnTask:
 
         assert result["processed_rows"] == 7
         assert result["unique_text_inputs"] == 6
+        assert result["source_row_count"] == 7
+        assert result["accounted_rows"] == 7
+        assert result["row_accounting_valid"] is True
+        assert result["result_counts"] == {"negative": 2, "neutral": 1, "positive": 4}
         assert result["written_file"] == "reviews__analyst_sentiment.csv"
+        assert result["artifact_row_count_valid"] is True
         assert result["derived_columns"] == ["sentiment_label", "sentiment_score"]
         assert result["preview_columns"] == ["row_index", "reviews", "sentiment_label", "sentiment_score"]
         assert result["preview_rows"][0]["sentiment_label"] == "positive"
@@ -659,6 +759,86 @@ class TestRunNlpColumnTask:
         assert "sentiment_label" in payload
         assert "sentiment_score" in payload
         assert "positive" in payload
+
+    def test_missing_nlp_batch_outputs_are_counted_as_unknown(self, tmp_path):
+        csv_file = tmp_path / "reviews.csv"
+        _write_csv(csv_file, "reviews\nGreat\nBad\nOkay\n")
+
+        session = self._workspace_session(tmp_path)
+        stores = _make_stores(source_path=str(csv_file))
+        settings = _make_settings()
+        chat = _RecordingChatModel(["not json", "still not json"])
+
+        from agentic_chatbot_next.providers import ProviderBundle
+        from agentic_chatbot_next.tools.data_analyst_tools import make_data_analyst_tools
+
+        tools = make_data_analyst_tools(
+            stores,
+            session,
+            settings=settings,
+            providers=ProviderBundle(chat=chat, judge=chat, embeddings=object()),
+        )
+        nlp_tool = next(t for t in tools if t.name == "run_nlp_column_task")
+        result = json.loads(
+            nlp_tool.invoke(
+                {
+                    "doc_id": "reviews_doc",
+                    "column": "reviews",
+                    "task": "sentiment",
+                    "output_mode": "summary_only",
+                    "batch_size": 3,
+                }
+            )
+        )
+
+        assert result["processed_rows"] == 3
+        assert result["accounted_rows"] == 3
+        assert result["row_accounting_valid"] is True
+        assert result["unknown_unique_text_inputs"] == 3
+        assert result["result_counts"] == {"unknown": 3}
+        assert result["failed_batches"]
+
+    @pytest.mark.parametrize("task", ["summarize", "keywords"])
+    def test_missing_non_classification_nlp_outputs_are_reported_incomplete(self, tmp_path, task):
+        csv_file = tmp_path / "reviews.csv"
+        _write_csv(csv_file, "reviews\nGreat experience\nSlow support\n")
+
+        session = self._workspace_session(tmp_path)
+        stores = _make_stores(source_path=str(csv_file))
+        settings = _make_settings()
+        chat = _RecordingChatModel(["not json", "still not json"])
+
+        from agentic_chatbot_next.providers import ProviderBundle
+        from agentic_chatbot_next.tools.data_analyst_tools import make_data_analyst_tools
+
+        tools = make_data_analyst_tools(
+            stores,
+            session,
+            settings=settings,
+            providers=ProviderBundle(chat=chat, judge=chat, embeddings=object()),
+        )
+        nlp_tool = next(t for t in tools if t.name == "run_nlp_column_task")
+        result = json.loads(
+            nlp_tool.invoke(
+                {
+                    "doc_id": "reviews_doc",
+                    "column": "reviews",
+                    "task": task,
+                    "output_mode": "summary_only",
+                    "batch_size": 2,
+                }
+            )
+        )
+
+        assert result["processed_rows"] == 2
+        assert result["accounted_rows"] == 2
+        assert result["row_accounting_valid"] is True
+        assert result["unknown_unique_text_inputs"] == 0
+        assert result["incomplete_unique_text_inputs"] == 2
+        assert result["fallback_unique_text_inputs"] == 2
+        assert result["partial_failure"] is True
+        assert result["failed_batches"]
+        assert any("incomplete" in warning for warning in result["warnings"])
 
     def test_repairs_malformed_json_from_llm(self, tmp_path):
         csv_file = tmp_path / "reviews.csv"

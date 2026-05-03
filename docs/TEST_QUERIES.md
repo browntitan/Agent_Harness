@@ -30,10 +30,14 @@ Current worktree assumptions:
 - `MEMORY_ENABLED=true`
 - `GRAPH_BACKEND=microsoft_graphrag`
 - graph search may be disabled unless graph indexes have been built/imported
+- `RERANK_ENABLED=true` by default with the Ollama mixedbread reranker and heuristic fallback
+- frontend transparency events are enabled by default with `safe_preview` detail
+- context budgeting is available but disabled by default unless `CONTEXT_BUDGET_ENABLED=true`
 - MCP, team mailbox, and executable skill checks require their feature flags to be enabled
 
 If `ENABLE_COORDINATOR_MODE=true`, keep the same prompts but expect AGENT turns to begin in
-`coordinator` even when the matrix below lists `general` or `rag_worker` as the likely start.
+`coordinator` even when the matrix below lists `general`, `research_coordinator`, or
+`rag_worker` as the likely start.
 
 ## Interface Notes
 
@@ -44,6 +48,8 @@ If `ENABLE_COORDINATOR_MODE=true`, keep the same prompts but expect AGENT turns 
   requirements tools, and graph tools.
 - For older API examples and trace docs that use assignment-style notation, this is the same
   override as `metadata.requested_agent=general`.
+- Run the autonomy prompts with `metadata.requested_agent="rag_researcher"`. This is a valid
+  manual override even though `rag_researcher` is not a normal routable fast path.
 - Run the analyst prompts only after uploading:
   - `new_demo_notebook/demo_data/data_analyst/customer_reviews_100.csv`
   - `new_demo_notebook/demo_data/data_analyst/sales_performance.xlsx`
@@ -122,21 +128,21 @@ Minimal API shape for forced `general` starts:
 ## 3. Coordinator And Research Campaign
 
 - `Investigate the major subsystems in this repo and give me a concise architectural walkthrough with citations.`
-  Expected start: `AGENT -> coordinator`
+  Expected start: `AGENT -> research_coordinator`
   Expected path: planner/finalizer/verifier flow with grounded citations from `ARCHITECTURE.md`,
   `C4_ARCHITECTURE.md`, `COMPOSITION.md`, and `NEXT_RUNTIME_FOUNDATION.md`.
 
 - `Identify all documents that discuss routing, agent selection, or requested-agent overrides.`
-  Expected start: `AGENT -> coordinator`
-  Expected path: corpus discovery campaign with likely `rag_worker` subtasks.
+  Expected start: `AGENT -> research_coordinator`
+  Expected path: corpus discovery campaign with likely `rag_worker` or `rag_researcher` subtasks.
 
 - `Compare the architecture, control-flow, and gateway docs and explain where routing decisions are made.`
-  Expected start: `AGENT -> coordinator`
+  Expected start: `AGENT -> research_coordinator`
   Expected path: multi-document comparison campaign across `ARCHITECTURE.md`, `CONTROL_FLOW.md`,
   and `OPENAI_GATEWAY.md`.
 
 - `Identify all documents that describe process flow, typed handoffs, or coordinator execution.`
-  Expected start: `AGENT -> coordinator`
+  Expected start: `AGENT -> research_coordinator`
   Expected path: corpus inventory or campaign using `CONTROL_FLOW.md`, `COMPOSITION.md`,
   `RAG_AGENT_DESIGN.md`, and `AGENT_DEEP_DIVE.md`.
 
@@ -175,7 +181,7 @@ Upload both demo analyst files in the same conversation before issuing these pro
 
 - `Provide sentiment analysis of all of the reviews in the reviews column.`
   Expected start: `AGENT -> data_analyst`
-  Expected tools: `load_dataset`, `inspect_columns`, `run_nlp_column_task`.
+  Expected tools: `load_dataset`, `profile_dataset`, `inspect_columns`, `run_nlp_column_task`.
 
 - `Add sentiment_label and sentiment_score columns and return the file.`
   Expected start: `AGENT -> data_analyst`
@@ -183,11 +189,11 @@ Upload both demo analyst files in the same conversation before issuing these pro
 
 - `Create a new tab that summarizes the correlation between marketing_spend_usd and revenue_usd.`
   Expected start: `AGENT -> data_analyst`
-  Expected tools: `load_dataset`, `inspect_columns`, `execute_code`, `return_file`.
+  Expected tools: `load_dataset`, `profile_dataset`, `inspect_columns`, `execute_code`, `return_file`.
 
 - `Generate a revenue-by-region chart and return the updated workbook.`
   Expected start: `AGENT -> data_analyst`
-  Expected tools: `execute_code`, `return_file`.
+  Expected tools: `profile_dataset`, `execute_code`, `return_file`.
 
 Expected analyst-file behavior:
 
@@ -265,6 +271,8 @@ Prefer one-turn, self-contained prompts.
   - `call out missing or thin evidence`
 - if you want true long-running deep-research behavior, prefer `metadata.long_output` rather than
   expecting the default synchronous chat answer to behave like a research report
+- for explicit exploratory source selection, use `metadata.requested_agent="rag_researcher"`
+  and expect workbench tools before the final `rag_agent_tool`
 
 ### 7.1 Best Corpus Queries
 
@@ -272,7 +280,7 @@ Prefer one-turn, self-contained prompts.
 
 - `Investigate the full lifecycle of an AGENT request in this system, from /v1/chat/completions through routing, kernel execution, query loop execution, coordinator orchestration, worker jobs, persistence, and observability. Search only the default collection, identify the relevant docs first, then synthesize a detailed end-to-end walkthrough with citations grouped by stage.`
 
-- `Across the default collection, identify all documents that describe routing, agent selection, requested-agent overrides, and fallback behavior. Then produce a detailed explanation of how the router decides between BASIC, rag_worker, general, coordinator, and data_analyst, including failure and degraded-routing behavior.`
+- `Across the default collection, identify all documents that describe routing, agent selection, requested-agent overrides, and fallback behavior. Then produce a detailed explanation of how the router decides between BASIC, rag_worker, general, coordinator, research_coordinator, rag_researcher, graph_manager, and data_analyst, including failure and degraded-routing behavior.`
 
 - `Search the default collection and investigate how tools, skills, and RAG cooperate in this runtime. Identify the relevant documents first, then synthesize a detailed explanation of tool groups, skill retrieval, RAG execution hints, and how those pieces influence agent behavior.`
 
@@ -336,7 +344,7 @@ Run these three test types separately:
 - discovery-only:
   `Identify all documents in the default collection that describe routing and coordinator execution. Return only document titles with short grounded justifications.`
 - one-turn deep synthesis:
-  use one of the queries in section `7.1` and expect a `coordinator`-style multi-step campaign
+  use one of the queries in section `7.1` and expect a `research_coordinator`-style multi-step campaign
 - long-form deep research:
   use one of the long-output prompt shapes in section `7.2` with `metadata.long_output`
 
@@ -467,6 +475,36 @@ Expected behavior:
 - streamed progress shows phase milestones such as `phase_start`, `phase_update`, and `phase_end`
 - clients receive progress updates during generation and the final artifact when the run completes
 
+### Requested-agent override smoke checks
+
+Manual researcher override:
+
+```json
+{
+  "metadata": {
+    "requested_agent": "rag_researcher"
+  }
+}
+```
+
+Expected behavior:
+
+- `rag_researcher` is accepted even though it is not in `registry.list_routable()`
+- invalid `metadata.requested_agent` values return `400` with the allowed value list
+- `research_coordinator` appears in the allowed list as a routable broad-research role
+
+### Rerank, frontend, and context checks
+
+- Ask a graph-backed source-planning question after graph indexes exist.
+  Expected behavior: graph/RAG responses include rerank metadata when `RERANK_ENABLED=true`, and
+  fall back to heuristic order if the reranker is unavailable.
+- Stream a normal AGENT turn with frontend events enabled.
+  Expected behavior: progress includes safe `context_trace` or `agentic_audit_item`-style
+  metadata derived from `agent_context_loaded`, without raw prompt dumps.
+- Enable `CONTEXT_BUDGET_ENABLED=true` and run a long multi-turn tool-heavy chat.
+  Expected behavior: runtime events include `context_budget_estimated` and, under pressure,
+  `autocompact_started`, `autocompact_completed`, or `microcompact_created`.
+
 ### Skill API smoke checks
 
 Use the gateway and issue:
@@ -508,6 +546,7 @@ After `python run.py sync-defense-corpus`, run the focused prompt pack in
 Expected behavior:
 
 - direct lookup prompts route to `rag_worker`
-- broad reconciliation prompts route to coordinator or deep RAG
+- broad reconciliation prompts route to `research_coordinator` or deep RAG
+- optional researcher variants accept `metadata.requested_agent="rag_researcher"`
 - requirements prompts use extraction/export tools
 - graph-aware prompts route to `graph_manager` only when graph indexes are available

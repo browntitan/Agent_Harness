@@ -47,6 +47,22 @@ default.
 **How:** `discover_tools` and `call_deferred_tool` expose policy-approved deferred tools only
 after an explicit per-turn search, then recheck policy at invocation time.
 
+## RAG researcher split
+
+**Why:** bounded lookup, exploratory evidence planning, and broad corpus campaigns need
+different latency and coordination tradeoffs.
+
+**How:** `rag_worker` owns direct contract retrieval, `rag_researcher` owns manual/delegated
+ReAct source selection with `rag_workbench`, and `research_coordinator` owns corpus-scale
+campaign orchestration.
+
+## RAG workbench as specialist tools
+
+**Why:** chunk search, section navigation, evidence grading, and controller-hint building are
+useful but too noisy for every general-purpose prompt.
+
+**How:** `rag_workbench` tools are deferred by default and eager for `rag_researcher`.
+
 ## Prebuilt sandbox contract
 
 **Why:** secure offline analyst execution is more reliable when package availability is fixed at
@@ -61,3 +77,11 @@ preflight.
 **Why:** ReAct is useful, but the whole runtime should not be trapped inside a graph.
 
 **How:** only the react executor uses LangGraph; orchestration remains plain Python.
+
+## Context and frontend policy
+
+**Why:** large tool results and long sessions need budget control, while live UI traces need
+safe disclosure boundaries.
+
+**How:** `ContextBudgetManager` compacts history/tool output when enabled, and
+`FrontendEventPolicy` filters streaming `progress` and `agentic_audit_item` payloads.

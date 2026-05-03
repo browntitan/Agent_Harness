@@ -56,6 +56,8 @@ class RetrievalSummary:
     claim_ledger: Dict[str, Any] = field(default_factory=dict)
     verified_hops: List[str] = field(default_factory=list)
     retrieval_verification: Dict[str, Any] = field(default_factory=dict)
+    workbook_profiles: Dict[str, Any] = field(default_factory=dict)
+    status_extractors: Dict[str, Any] = field(default_factory=dict)
     stage_timings_ms: Dict[str, float] = field(default_factory=dict)
     budget_ms: int = 0
     budget_exhausted: bool = False
@@ -95,6 +97,8 @@ class RetrievalSummary:
             claim_ledger=dict(raw.get("claim_ledger") or {}),
             verified_hops=[str(item) for item in (raw.get("verified_hops") or []) if str(item)],
             retrieval_verification=dict(raw.get("retrieval_verification") or {}),
+            workbook_profiles=dict(raw.get("workbook_profiles") or {}),
+            status_extractors=dict(raw.get("status_extractors") or {}),
             stage_timings_ms={
                 str(key): float(value or 0.0)
                 for key, value in dict(raw.get("stage_timings_ms") or {}).items()

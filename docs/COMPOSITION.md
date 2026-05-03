@@ -9,7 +9,8 @@ The live system is composed around `RuntimeService`.
 3. `RuntimeKernel` turns the live session into persisted `SessionState`
 4. `AgentRegistry` selects the active `AgentDefinition`
 5. `QueryLoop` dispatches the selected agent mode and injects shared context
-6. capabilities, authorization, tools, worker jobs, notifications, MCP catalogs, and memory
+6. context budgeting optionally compacts history/tool results before model execution
+7. capabilities, authorization, tools, worker jobs, notifications, MCP catalogs, and memory
    operate inside that runtime context
 
 ## Runtime layers
@@ -24,6 +25,8 @@ Owns:
 - eager workspace open plus upload/workspace copy behavior
 - upload summary kickoff
 - initial agent choice, including requested-agent override application after routing
+- defaulting broad corpus research to `research_coordinator` when router/deep-RAG policy
+  identifies repository-scale grounded work
 - effective capability profile resolution for user-visible agents, tools, collections, skills,
   MCP tools, and fast-path policy
 - FastAPI-facing request scoping for runtime-effective skill CRUD under `/v1/skills`
@@ -40,6 +43,8 @@ Owns:
 - jobs
 - worker scheduling and token-budget admission when `WORKER_SCHEDULER_ENABLED=true`
 - coordinator orchestration, including document-research campaigns
+- `research_coordinator` execution, which reuses coordinator mode with a research-specific
+  worker allow-list
 - coordinator-owned typed handoff artifact validation, persistence, and worker injection
 - notification drain
 - post-turn memory maintenance only when `MEMORY_ENABLED=true`
@@ -56,6 +61,7 @@ Owns:
 
 - prompt construction for prompt-backed modes
 - execution dispatch by mode
+- manual/delegated `rag_researcher` ReAct execution for exploratory RAG research
 - handoff to `general_agent.py` for tool-using `react` execution
 - direct `run_rag_contract(...)` dispatch for `rag_worker`
 - skill-to-hint resolution for direct RAG execution
@@ -65,6 +71,7 @@ Owns:
 - runtime-owned graph-augmented retrieval decisions when GraphRAG is enabled
 - data-analyst workspace handoff into the prebuilt offline sandbox image configured by
   `SANDBOX_DOCKER_IMAGE`
+- context-budget ledgers for prompt sections, autocompaction, and tool-result sidecars
 
 ## Persistence split
 
@@ -74,8 +81,12 @@ Owns:
   requirement statements
 - PostgreSQL: access-control rows, capability profiles, MCP connections/tool catalogs, graph
   indexes/sources/runs/query-cache rows, and canonical entities
+- retrieval reranker state is request metadata only; reranker model residency is managed by the
+  configured provider such as local Ollama
 - managed GraphRAG project artifacts with optional Neo4j compatibility backend
 - `data/runtime`: session/job state, transcripts, events, notifications
+- `data/runtime`: context compaction records and large tool-result sidecars when context
+  budgeting is enabled
 - `data/workspaces`: sandbox-visible files
 - `data/memory`: memory projections and fallback files when `MEMORY_ENABLED=true`
 
@@ -109,3 +120,16 @@ When `TEAM_MAILBOX_ENABLED=true`, planned campaigns can also create a session/jo
 channel. The channel is an async coordination surface for typed status updates, handoffs,
 questions, and operator-owned approval requests. It reuses the runtime transcript/job JSONL
 store and does not change worker permissions, sandbox scope, or allowed-tool policy.
+
+## Research Roles And Frontend Events
+
+The runtime now separates three RAG-oriented patterns:
+
+- `rag_worker`: direct stable-contract retrieval and synthesis
+- `rag_researcher`: ReAct source-selection specialist using `rag_workbench` before final RAG
+  synthesis
+- `research_coordinator`: coordinator-mode manager for broad corpus campaigns
+
+Streaming clients see only policy-filtered frontend events. `FRONTEND_EVENTS_*` settings decide
+whether status, agents, tools, parallel groups, prompt/skill/context metadata, and safe previews
+are forwarded; durable runtime events remain the source of truth.

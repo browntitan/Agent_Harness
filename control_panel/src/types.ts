@@ -55,6 +55,22 @@ export interface ControlPanelCapabilities {
   sections: Record<string, CapabilitySectionStatus>
 }
 
+export type ServiceResetEngine = 'docker' | 'podman'
+
+export interface ServiceResetResult {
+  status: string
+  run_id: string
+  engine: ServiceResetEngine
+  started_at: string
+  actor?: string
+  repo_root?: string
+  log_path: string
+  status_path?: string
+  exit_code?: string
+  pid?: number
+  commands: string[]
+}
+
 export interface AccessPrincipal {
   principal_id: string
   tenant_id: string
@@ -142,6 +158,7 @@ export interface McpConnectionRecord {
   secret_configured: boolean
   owner_user_id: string
   tenant_id: string
+  metadata_json?: Record<string, unknown>
   last_tested_at: string
   last_refreshed_at: string
   tools?: McpToolCatalogRecord[]
@@ -250,6 +267,16 @@ export interface CollectionHealthRecord {
   file_type: string
   doc_structure_type: string
   active: boolean
+  version_ordinal?: number
+  superseded_at?: string
+  parser_chain?: string[]
+  extraction_status?: string
+  extraction_error?: string
+  metadata_confidence?: number
+  lifecycle_phase?: string
+  doc_type?: string
+  program_entities?: string[]
+  signal_summary?: Record<string, unknown>
 }
 
 export interface CollectionHealthGroup {
@@ -266,6 +293,11 @@ export interface CollectionHealthGroup {
   source_exists: boolean
   content_drift: boolean
   duplicate_doc_ids: string[]
+  stale_version_doc_ids?: string[]
+  extraction_failure_doc_ids?: string[]
+  low_confidence_doc_ids?: string[]
+  missing_source_doc_ids?: string[]
+  parser_warnings?: string[]
   status: string
   records: CollectionHealthRecord[]
 }
@@ -282,6 +314,15 @@ export interface CollectionHealthReport {
   missing_sources: string[]
   duplicate_group_count: number
   content_drift_count: number
+  stale_version_count?: number
+  extraction_failure_count?: number
+  low_confidence_metadata_count?: number
+  missing_source_doc_count?: number
+  parser_warning_count?: number
+  parser_counts?: Record<string, number>
+  doc_type_counts?: Record<string, number>
+  lifecycle_counts?: Record<string, number>
+  metadata_confidence_distribution?: Record<string, number>
   duplicate_groups: CollectionHealthGroup[]
   drifted_groups: CollectionHealthGroup[]
   source_groups: CollectionHealthGroup[]
@@ -349,6 +390,10 @@ export interface CollectionOperationFile {
   outcome: string
   error?: string
   doc_ids: string[]
+  extraction_status?: string
+  metadata_confidence?: number
+  parser_provenance?: Record<string, unknown>
+  metadata_summary?: Record<string, unknown>
 }
 
 export interface CollectionOperationSummary {
@@ -596,6 +641,24 @@ export interface CollectionSkillDraftPayload {
   graph_id?: string
   drafts: CollectionSkillDraftRecord[]
   mutated?: boolean
+}
+
+export interface SkillBuildDraftRecord {
+  body_markdown: string
+  name: string
+  agent_scope: string
+  description: string
+  tool_tags: string[]
+  task_tags: string[]
+  when_to_apply: string
+  workflow: string
+  examples: string
+  warnings?: string[]
+}
+
+export interface SkillBuildDraftPayload {
+  object: string
+  draft: SkillBuildDraftRecord
 }
 
 export interface CollectionSkillDraftApplyPayload {

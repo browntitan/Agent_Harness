@@ -1,0 +1,19 @@
+feedback_id,submitted_at,channel,account_segment,severity,csat_score,comment
+F-001,2026-04-01 09:20,email,Enterprise,high,2,The invoice doubled after the discount vanished; support blamed the plan migration.
+F-002,2026-04-01 10:14,app,Mid-Market,critical,1,"Great, another midnight outage during our renewal week."
+F-003,2026-04-02 08:02,web,SMB,medium,3,"The dashboard is cleaner, but exporting filtered rows still takes ages."
+F-004,2026-04-02 11:45,chat,Enterprise,low,5,Maria solved the SSO issue in 10 minutes. Super helpful.
+F-005,2026-04-03 13:18,email,SMB,medium,2,Why does the basic plan cost more than last quarter with fewer included reports?
+F-006,2026-04-04 15:33,app,Mid-Market,high,2,"Sync says complete, yet half of the records are missing."
+F-007,2026-04-05 09:03,web,Enterprise,low,4,The new keyboard shortcuts are fast once you find the settings page.
+F-008,2026-04-06 16:21,chat,SMB,high,1,I waited 47 minutes and the agent pasted the same help article twice.
+F-009,2026-04-07 12:40,email,Enterprise,medium,3,"The renewal quote is probably fine, but I cannot reconcile the tax line."
+F-010,2026-04-08 17:06,app,Mid-Market,critical,1,Export failed again after saying success. That is a fun definition of success.
+F-011,2026-04-09 10:58,web,SMB,low,4,"Gracias, the billing specialist fixed the tax exemption quickly."
+F-012,2026-04-09 14:31,chat,Enterprise,medium,3,"The page loads, then jumps around while I am editing a workflow."
+F-013,2026-04-10 07:29,email,Mid-Market,high,2,API latency spiked every afternoon this week.
+F-014,2026-04-10 18:15,app,SMB,medium,3,"The product is okay, but the price jump is hard to justify."
+F-015,2026-04-11 08:52,web,Enterprise,low,5,Onboarding was smooth and the support rep anticipated our questions.
+F-016,2026-04-11 13:12,chat,Mid-Market,medium,,
+F-017,2026-04-12 09:42,email,Enterprise,high,2,Two admins cannot log in after the role migration.
+F-018,2026-04-12 16:48,app,SMB,medium,3,"I like the reports, I do not like needing five clicks to schedule one."

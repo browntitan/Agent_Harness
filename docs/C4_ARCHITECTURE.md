@@ -35,6 +35,8 @@ flowchart TD
     loop["QueryLoop"]
     react["general_agent.py"]
     registry["AgentRegistry"]
+    researcher["rag_researcher / rag_workbench"]
+    research_coord["research_coordinator"]
     skills["/v1/skills control plane"]
     mcp_api["/v1/mcp + MCP catalog"]
     capabilities["capability profiles + RBAC"]
@@ -42,7 +44,10 @@ flowchart TD
     scheduler["WorkerScheduler"]
     team["Team mailbox"]
     progress["LiveProgressSink / SSE progress"]
-    tools["Tools / Skills / managed Memory / RAG / GraphRAG / MCP / analyst sandbox image"]
+    tools["Tools / Skills / managed Memory / RAG / RAG workbench / GraphRAG / MCP / analyst sandbox image"]
+    context_budget["ContextBudgetManager"]
+    frontend_policy["FrontendEventPolicy"]
+    reranker["Ollama reranker"]
 
     gateway --> service
     gateway --> skills
@@ -55,6 +60,7 @@ flowchart TD
     mcp_api --> tools
     capabilities --> tools
     kernel --> registry
+    kernel --> research_coord
     kernel --> kernel_events
     kernel --> kernel_providers
     kernel --> kernel_coordinator
@@ -66,7 +72,11 @@ flowchart TD
     loop --> react
     loop --> tools
     loop --> progress
+    loop --> context_budget
     react --> tools
+    react --> researcher
+    progress --> frontend_policy
+    tools --> reranker
     jobs --> progress
 ```
 
@@ -99,9 +109,20 @@ flowchart TD
   workers and mailboxes
 - `general_agent.py` is the live react executor for tool-using `react` agents
 - `AgentRegistry` loads markdown-defined roles from `data/agents/*.md`, including
-  `graph_manager` as a `top_level_or_worker` graph specialist
+  `graph_manager` as a `top_level_or_worker` graph specialist, `research_coordinator` as the
+  routed research campaign manager, and `rag_researcher` as a manual/delegated ReAct RAG
+  researcher
+- `rag_researcher` uses deferred `rag_workbench` tools for query planning, chunk/section
+  search, evidence grading/pruning, evidence-plan validation, and final RAG controller hint
+  construction
 - `RuntimeJobManager` owns durable workers and mailboxes for both coordinator-owned
   research campaigns and internal RAG evidence jobs
+- `ContextBudgetManager` owns optional autocompaction, current-turn tool-result
+  microcompaction, and restore snapshots when `CONTEXT_BUDGET_ENABLED=true`
+- `FrontendEventPolicy` filters what the streaming progress layer forwards, including safe
+  context/audit events such as `agent_context_loaded`
+- the optional Ollama reranker is part of retrieval candidate ordering for graph and RAG
+  evidence when `RERANK_ENABLED=true`
 - feature-flagged team mailbox channels layer typed peer status, handoff, and question
   messages on the same job/transcript JSONL backing store
 - managed GraphRAG is the default graph backend, with Neo4j compatibility available as an

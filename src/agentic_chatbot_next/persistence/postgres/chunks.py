@@ -195,6 +195,7 @@ class ChunkStore:
                           AND d.tenant_id = %s
                           AND c.collection_id = %s
                           AND d.collection_id = %s
+                          AND d.active = TRUE
                         ORDER BY c.embedding <=> %s::vector
                         LIMIT %s
                         """,
@@ -208,6 +209,7 @@ class ChunkStore:
                         FROM chunks c
                         JOIN documents d USING (doc_id)
                         WHERE c.tenant_id = %s AND d.tenant_id = %s
+                          AND d.active = TRUE
                         ORDER BY c.embedding <=> %s::vector
                         LIMIT %s
                         """,
@@ -260,6 +262,7 @@ class ChunkStore:
                           AND d.tenant_id = %s
                           AND c.collection_id = %s
                           AND d.collection_id = %s
+                          AND d.active = TRUE
                         ORDER BY score DESC
                         LIMIT %s
                         """,
@@ -275,6 +278,7 @@ class ChunkStore:
                         WHERE c.ts @@ plainto_tsquery('english', %s)
                           AND c.tenant_id = %s
                           AND d.tenant_id = %s
+                          AND d.active = TRUE
                         ORDER BY score DESC
                         LIMIT %s
                         """,

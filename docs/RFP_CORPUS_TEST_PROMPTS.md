@@ -23,7 +23,7 @@ should be tested as collection `requirements-extraction-pack`.
   Expected path: inventory-first metadata answer; no fabricated citations.
 
 - `Which documents in rfp-corpus mention Ember Reach? Return document titles only with short grounded justifications.`
-  Expected path: coordinator or RAG corpus-discovery path with citations.
+  Expected path: `research_coordinator` or RAG corpus-discovery path with citations.
 
 ## Direct Grounded Lookup
 
@@ -42,19 +42,36 @@ should be tested as collection `requirements-extraction-pack`.
 ## Multi-Document Reconciliation
 
 - `Explain why Asterion CDR moved and identify the documents that show both the emerging problem and the final approved answer.`
-  Expected path: coordinator or deep RAG campaign across Asterion draft/status/ECP documents.
+  Expected path: `research_coordinator` or deep RAG campaign across Asterion draft/status/ECP documents.
 
 - `Why is it inaccurate to describe the Iron Vale endurance miss as only a software problem?`
-  Expected path: grounded synthesis across the ground test plan, endurance summary, proposal, and risk workbook.
+  Expected path: `research_coordinator` grounded synthesis across the ground test plan,
+  endurance summary, proposal, and risk workbook.
 
 - `If someone says Blue Mica Wave 2 slipped because the hardware was bad, what is the better evidence-based answer?`
-  Expected path: compare compliance summary, refresh plan, after-action notes, and staffing/spares workbook.
+  Expected path: `research_coordinator` comparison across compliance summary, refresh plan,
+  after-action notes, and staffing/spares workbook.
 
 - `Differentiate North Coast Systems LLC from Northcoast Signal Labs and name the program each one supports.`
-  Expected path: entity disambiguation with citations from the relevant program documents.
+  Expected path: entity disambiguation with citations from the relevant program documents;
+  `research_coordinator` should win when the router treats this as broad corpus reconciliation.
 
 - `Differentiate Halcyon Foundry from Halcyon Microdevices and explain which one had manufacturing void issues versus procurement scoring.`
-  Expected path: entity disambiguation across Trident Echo and Ember Reach evidence.
+  Expected path: entity disambiguation across Trident Echo and Ember Reach evidence;
+  `research_coordinator` or `rag_researcher` are both valid test paths depending on override.
+
+## RAG Researcher Variants
+
+Run these with `metadata.requested_agent="rag_researcher"` when you want to test the manual
+RAG researcher loop directly. Expected tool shape: `plan_rag_queries`, chunk/section or
+metadata search, evidence grading/pruning, `validate_evidence_plan`,
+`build_rag_controller_hints`, then final `rag_agent_tool`.
+
+- `Use rag_researcher. Which Asterion documents should be treated as authoritative for updated dates, rather than the early draft planning note? Cite each source.`
+
+- `Use rag_researcher. Differentiate North Coast Systems LLC from Northcoast Signal Labs and name the program each one supports.`
+
+- `Use rag_researcher. Search rfp-corpus for spreadsheet evidence about Iron Vale risks, profile the relevant workbook evidence if needed, and answer with citations.`
 
 ## Requirements Extraction Pack
 

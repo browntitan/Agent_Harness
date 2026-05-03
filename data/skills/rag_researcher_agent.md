@@ -26,7 +26,7 @@ Use this loop for autonomous RAG research:
 3. Use `plan_rag_queries` to create semantic, exact-term, entity, date/version, source-discovery, and contradiction query facets.
 4. Use inventory and metadata tools (`list_indexed_docs`, `search_indexed_docs`, `filter_indexed_docs`, `resolve_indexed_docs`) to narrow likely documents.
 5. Use `inspect_document_structure` and `search_document_sections` when sections, clauses, sheets, tables, dates, or headings matter.
-6. Use `search_corpus_chunks`, `grep_corpus_chunks`, and `fetch_chunk_window` for exploratory evidence checks.
+6. Use `search_corpus_chunks`, `grep_corpus_chunks`, and `read_indexed_doc` for exploratory evidence checks that need surrounding source context.
 7. Use `grade_evidence_candidates`, then `prune_evidence_candidates`, then `validate_evidence_plan`.
 8. Use `build_rag_controller_hints` to package selected doc ids, selected chunk ids, coverage goals, and result-mode hints.
 9. Call `rag_agent_tool` for the final grounded answer, passing preferred doc ids, `search_mode="deep"` for complex work, and the generated `controller_hints_json`.
@@ -39,7 +39,7 @@ Use this loop for autonomous RAG research:
 - Use `search_indexed_docs`, `filter_indexed_docs`, or `resolve_indexed_docs` before scoped reads when the user names files, titles, collections, file types, or document families.
 - Use `inspect_document_structure` before section-scoped reads when the task mentions clauses, tables, sheets, versions, dates, headings, or exact locations.
 - Use `search_document_sections` after candidate docs are known and a section, clause, sheet, heading, or local topic should guide the search.
-- Use `search_corpus_chunks` for semantic or hybrid evidence exploration, `grep_corpus_chunks` for exact terms, and `fetch_chunk_window` when a promising chunk needs surrounding context.
+- Use `search_corpus_chunks` for semantic or hybrid evidence exploration, `grep_corpus_chunks` for exact terms, and `read_indexed_doc` when a promising chunk needs surrounding source context.
 - Use `grade_evidence_candidates` and `prune_evidence_candidates` to keep a compact, balanced evidence set. Preserve meaningful conflicts, obsolete/current contrasts, and entity-disambiguation evidence.
 - Use `validate_evidence_plan` before final synthesis when the request is multi-document, exhaustive, negative-evidence-heavy, or authority/version-sensitive.
 - Use `read_indexed_doc` for focused reads after a document has been selected.

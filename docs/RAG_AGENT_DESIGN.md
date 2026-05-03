@@ -27,6 +27,7 @@ public contract:
 - `coverage_goal`
 - `result_mode`
 - `controller_hints`
+- `skill_context`
 
 Coordinator-owned worker handoffs can also seed the live RAG path without changing the
 public contract:
@@ -44,7 +45,9 @@ The live next runtime uses the RAG contract flow in:
 
 1. `rag_worker`
 2. `rag_agent_tool` exposed to `general` and `verifier`
-3. upload-summary kickoff from `RuntimeService.ingest_and_summarize_uploads(...)`
+3. `rag_researcher`, which explores the corpus with workbench tools and then calls
+   `rag_agent_tool`
+4. upload-summary kickoff from `RuntimeService.ingest_and_summarize_uploads(...)`
 
 In normal routing, bounded grounded lookups often start directly in `rag_worker`. The delegated
 tool path remains live for `general` and `verifier`, and notebook/API demos can explicitly pin
@@ -54,6 +57,10 @@ that path with `metadata.requested_agent=general` when they want to show tool tr
 
 - normal answer mode, which returns the stable RAG contract
 - evidence-only worker mode, used internally by deep retrieval fan-out jobs
+
+`rag_researcher` is different from `rag_worker`: it is a prompt-backed ReAct researcher with
+manual/delegated entry, not a router-selected direct RAG path. It narrows sources, builds
+controller hints, and then lets the stable RAG contract perform final synthesis.
 
 ## Two grounded-answer shapes
 
@@ -88,13 +95,17 @@ The next-owned RAG flow is:
 6. accumulate evidence in an internal ledger with round summaries and unresolved items
 7. optionally request internal `rag_worker` evidence jobs through `RagRuntimeBridge`
 8. merge worker evidence back into one ledger, re-grade, and choose bounded evidence docs
-9. choose the answer style from the structured hints:
+9. optionally request tabular evidence from `data_analyst` when spreadsheet or CSV evidence
+   requires profiling, lookup, filtering, aggregation, or comparison
+10. rerank graph/RAG candidates when reranking is enabled, falling back to deterministic
+   heuristics when the reranker is unavailable
+11. choose the answer style from the structured hints:
    - normal grounded synthesis
    - per-document inventory output
    - explicit negative-evidence reporting for exhaustive or corpus-wide searches
-10. build grounded citations
-11. synthesize one final answer from the merged evidence set
-12. coerce the result into the stable contract
+12. build grounded citations
+13. synthesize one final answer from the merged evidence set
+14. coerce the result into the stable contract
 
 Implementation notes:
 
@@ -117,6 +128,18 @@ Implementation notes:
   - `export_requirement_statements`
 - those tools share the same database-backed corpus and collection scoping as the adaptive
   controller; they are not a separate filesystem search path
+- the `rag_workbench` tools are also bound for `rag_researcher`:
+  - `plan_rag_queries`
+  - `search_corpus_chunks`
+  - `grep_corpus_chunks`
+  - `fetch_chunk_window`
+  - `inspect_document_structure`
+  - `search_document_sections`
+  - `filter_indexed_docs`
+  - `grade_evidence_candidates`
+  - `prune_evidence_candidates`
+  - `validate_evidence_plan`
+  - `build_rag_controller_hints`
 - internal fan-out is bounded and non-recursive: evidence-only workers run with
   `allow_internal_fanout=false`
 
@@ -160,6 +183,12 @@ The controller is accuracy-first by default, but it now avoids avoidable repeate
 - `RAG_HEURISTIC_GRADING_ENABLED` allows deterministic pre-grading to skip slow judge grading when evidence is already decisive
 - `RAG_JUDGE_GRADE_MAX_CHUNKS` caps the uncertain candidate window sent to the judge model
 - `RAG_EXTRACTIVE_FALLBACK_ENABLED` allows a concise cited extractive answer when the budget is exhausted before synthesis
+- `RERANK_ENABLED=true` enables candidate reranking by default
+- `RERANK_PROVIDER=ollama`
+- `RERANK_MODEL=rjmalagon/mxbai-rerank-large-v2:1.5b-fp16`
+- `RERANK_TOP_N=12`
+- `RERANK_TIMEOUT_SECONDS=30`
+- `RERANK_FALLBACK_TO_HEURISTICS=true`
 
 For local Ollama-heavy runs, keep model-provider tuning outside the retrieval contract:
 increase Ollama keep-alive, tune provider parallelism to available memory, and avoid loading
@@ -193,15 +222,15 @@ Coordinator handoffs are merged into the same hint-resolution flow. For example:
 The runtime now uses two different multi-step patterns for document work:
 
 - direct `rag_worker` execution for small grounded lookups
-- coordinator-owned document research campaigns for broad corpus discovery, inventories,
+- `research_coordinator`-owned document research campaigns for broad corpus discovery, inventories,
   exhaustive searches, and multi-document comparison
 
 In the campaign path:
 
-1. the router prefers `coordinator` for corpus-scale research asks
-2. `planner` emits one or more `rag_worker` tasks with `doc_scope`, `skill_queries`, and
-   structured RAG hint fields
-3. `coordinator` launches durable workers, tracks progress, then hands results to
+1. the router prefers `research_coordinator` for corpus-scale research asks
+2. `planner` emits one or more `rag_worker` or `rag_researcher` tasks with `doc_scope`,
+   `skill_queries`, and structured RAG hint fields
+3. `research_coordinator` launches durable workers, tracks progress, then hands results to
    `finalizer`
 4. `verifier` checks citation sufficiency and overclaim risk for corpus-wide conclusions
 
@@ -212,6 +241,10 @@ The live direct path may now queue one bounded async peer follow-up through the 
 manager when a judge-model decision says a specialist continuation is better than answering
 immediately. That keeps `rag_worker` non-ReAct while still allowing same-session escalation
 to roles such as `data_analyst`, `utility`, or `general`.
+
+Tabular handoff uses that same runtime bridge shape. The RAG path can ask a bounded
+`data_analyst` worker to profile and inspect spreadsheet evidence, then merge the returned
+structured JSON into the evidence ledger before final citation-safe synthesis.
 
 ## Optional GraphRAG augmentation
 
@@ -243,6 +276,7 @@ The main RAG-oriented packs live under `data/skill_packs/rag/`:
 - `clause_extraction`
 - `collection_scoping`
 - `comparison_campaign`
+- `authority_and_version_resolution`
 - `autonomous_query_planning`
 - `corpus_discovery`
 - `coverage_sufficiency_audit`

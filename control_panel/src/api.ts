@@ -26,6 +26,9 @@ import type {
   McpConnectionRecord,
   McpToolCatalogRecord,
   RegisteredSource,
+  ServiceResetEngine,
+  ServiceResetResult,
+  SkillBuildDraftPayload,
   SourceRefreshRun,
   SourceScanPayload,
   UploadedFileSummary,
@@ -52,10 +55,10 @@ const SECTION_ROUTE_MAP = {
   collections: ['/v1/admin/collections'],
   uploads: ['/v1/admin/uploads'],
   graphs: ['/v1/admin/graphs', '/v1/admin/graphs/{graph_id}'],
-  skills: ['/v1/skills'],
+  skills: ['/v1/skills', '/v1/skills/build-draft'],
   access: ['/v1/admin/access/principals', '/v1/admin/access/roles', '/v1/admin/access/effective-access'],
-  mcp: ['/v1/admin/mcp/connections'],
-  operations: ['/v1/admin/operations'],
+  mcp: ['/v1/admin/mcp/connections', '/v1/admin/mcp/connections/{connection_id}/restart'],
+  operations: ['/v1/admin/operations', '/v1/admin/services/reset-full'],
 } as const
 
 export type CompatibilitySource = 'capabilities' | 'openapi'
@@ -177,6 +180,13 @@ export const api = {
   getOperations(token: string) {
     return apiFetch<Record<string, unknown>>('/v1/admin/operations', token)
   },
+  resetServiceFull(token: string, engine: ServiceResetEngine) {
+    return apiFetch<ServiceResetResult>('/v1/admin/services/reset-full', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ engine, confirmation: 'reset-service-full' }),
+    })
+  },
   getCapabilities(token: string) {
     return apiFetch<ControlPanelCapabilities>('/v1/admin/capabilities', token)
   },
@@ -238,6 +248,13 @@ export const api = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+    })
+  },
+  updateAgentSkills(token: string, agentName: string, preloadSkillPacks: string[]) {
+    return apiFetch<Record<string, unknown>>(`/v1/admin/agents/${agentName}/skills`, token, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preload_skill_packs: preloadSkillPacks }),
     })
   },
   reloadAgents(token: string) {
@@ -380,6 +397,12 @@ export const api = {
   getCollectionDocument(token: string, collectionId: string, docId: string) {
     return apiFetch<Record<string, unknown>>(
       `/v1/admin/collections/${collectionId}/documents/${docId}`,
+      token,
+    )
+  },
+  getCollectionDocumentVersions(token: string, collectionId: string, docId: string) {
+    return apiFetch<{ versions: Array<Record<string, unknown>> }>(
+      `/v1/admin/collections/${collectionId}/documents/${docId}/versions`,
       token,
     )
   },
@@ -641,6 +664,13 @@ export const api = {
       body: JSON.stringify(payload),
     })
   },
+  buildSkillDraft(token: string, payload: Record<string, unknown>) {
+    return apiFetch<SkillBuildDraftPayload>('/v1/skills/build-draft', token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
   activateSkill(token: string, skillId: string) {
     return apiFetch<Record<string, unknown>>(`/v1/skills/${skillId}/activate`, token, { method: 'POST' })
   },
@@ -760,6 +790,13 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ changes: {} }),
+    })
+  },
+  restartMcpConnectionServer(token: string, connectionId: string) {
+    return apiFetch<{ restart: Record<string, unknown> }>(`/v1/admin/mcp/connections/${connectionId}/restart`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ engine: 'docker', confirmation: 'restart-mcp-server' }),
     })
   },
   refreshMcpTools(token: string, connectionId: string) {

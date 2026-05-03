@@ -666,6 +666,7 @@ class RuntimeKernel:
                 "user_text": user_text[:500],
                 "effective_user_text": resolved_turn_intent.effective_user_text[:500],
                 "answer_contract": resolved_turn_intent.answer_contract.to_dict(),
+                "presentation_preferences": resolved_turn_intent.presentation_preferences.to_dict(),
             },
         )
         coverage_profile = str(getattr(resolved_turn_intent.answer_contract, "coverage_profile", "") or "").strip()

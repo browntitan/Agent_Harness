@@ -204,7 +204,18 @@ CREATE TABLE IF NOT EXISTS documents (
     source_object_key  TEXT DEFAULT '',
     source_etag        TEXT DEFAULT '',
     source_size_bytes  BIGINT DEFAULT 0,
-    source_content_type TEXT DEFAULT ''
+    source_content_type TEXT DEFAULT '',
+    active             BOOLEAN NOT NULL DEFAULT TRUE,
+    version_ordinal    INTEGER NOT NULL DEFAULT 1,
+    superseded_at      TIMESTAMPTZ,
+    parser_provenance  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    extraction_status  TEXT NOT NULL DEFAULT 'success',
+    extraction_error   TEXT NOT NULL DEFAULT '',
+    metadata_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+    lifecycle_phase    TEXT NOT NULL DEFAULT '',
+    doc_type           TEXT NOT NULL DEFAULT '',
+    program_entities   JSONB NOT NULL DEFAULT '[]'::jsonb,
+    signal_summary     JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
 -- Backfill / migrate existing databases created before tenant_id.
@@ -252,6 +263,47 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_object_key TEXT DEFAULT ''
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_etag TEXT DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_size_bytes BIGINT DEFAULT 0;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_content_type TEXT DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
+UPDATE documents SET active = TRUE WHERE active IS NULL;
+ALTER TABLE documents ALTER COLUMN active SET DEFAULT TRUE;
+ALTER TABLE documents ALTER COLUMN active SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS version_ordinal INTEGER DEFAULT 1;
+UPDATE documents SET version_ordinal = 1 WHERE version_ordinal IS NULL OR version_ordinal < 1;
+ALTER TABLE documents ALTER COLUMN version_ordinal SET DEFAULT 1;
+ALTER TABLE documents ALTER COLUMN version_ordinal SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS parser_provenance JSONB;
+UPDATE documents SET parser_provenance = '{}'::jsonb WHERE parser_provenance IS NULL;
+ALTER TABLE documents ALTER COLUMN parser_provenance SET DEFAULT '{}'::jsonb;
+ALTER TABLE documents ALTER COLUMN parser_provenance SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_status TEXT DEFAULT 'success';
+UPDATE documents SET extraction_status = 'success' WHERE extraction_status IS NULL OR extraction_status = '';
+ALTER TABLE documents ALTER COLUMN extraction_status SET DEFAULT 'success';
+ALTER TABLE documents ALTER COLUMN extraction_status SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_error TEXT DEFAULT '';
+UPDATE documents SET extraction_error = '' WHERE extraction_error IS NULL;
+ALTER TABLE documents ALTER COLUMN extraction_error SET DEFAULT '';
+ALTER TABLE documents ALTER COLUMN extraction_error SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS metadata_confidence DOUBLE PRECISION DEFAULT 0.5;
+UPDATE documents SET metadata_confidence = 0.5 WHERE metadata_confidence IS NULL;
+ALTER TABLE documents ALTER COLUMN metadata_confidence SET DEFAULT 0.5;
+ALTER TABLE documents ALTER COLUMN metadata_confidence SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS lifecycle_phase TEXT DEFAULT '';
+UPDATE documents SET lifecycle_phase = '' WHERE lifecycle_phase IS NULL;
+ALTER TABLE documents ALTER COLUMN lifecycle_phase SET DEFAULT '';
+ALTER TABLE documents ALTER COLUMN lifecycle_phase SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_type TEXT DEFAULT '';
+UPDATE documents SET doc_type = '' WHERE doc_type IS NULL;
+ALTER TABLE documents ALTER COLUMN doc_type SET DEFAULT '';
+ALTER TABLE documents ALTER COLUMN doc_type SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS program_entities JSONB;
+UPDATE documents SET program_entities = '[]'::jsonb WHERE program_entities IS NULL;
+ALTER TABLE documents ALTER COLUMN program_entities SET DEFAULT '[]'::jsonb;
+ALTER TABLE documents ALTER COLUMN program_entities SET NOT NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS signal_summary JSONB;
+UPDATE documents SET signal_summary = '{}'::jsonb WHERE signal_summary IS NULL;
+ALTER TABLE documents ALTER COLUMN signal_summary SET DEFAULT '{}'::jsonb;
+ALTER TABLE documents ALTER COLUMN signal_summary SET NOT NULL;
 
 ALTER TABLE collections ADD COLUMN IF NOT EXISTS maintenance_policy TEXT;
 UPDATE collections
@@ -294,6 +346,9 @@ CREATE INDEX IF NOT EXISTS documents_tenant_collection_idx
 
 CREATE INDEX IF NOT EXISTS documents_tenant_collection_source_identity_idx
     ON documents(tenant_id, collection_id, source_identity);
+
+CREATE INDEX IF NOT EXISTS documents_tenant_collection_active_source_identity_idx
+    ON documents(tenant_id, collection_id, active, source_identity);
 
 INSERT INTO collections (tenant_id, collection_id, maintenance_policy, created_at, updated_at)
 SELECT

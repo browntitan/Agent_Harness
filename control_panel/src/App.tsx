@@ -72,6 +72,9 @@ import type {
   LangGraphExport,
   McpConnectionRecord,
   RegisteredSource,
+  ServiceResetEngine,
+  ServiceResetResult,
+  SkillBuildDraftRecord,
   SourceRefreshRun,
   SourceScanPayload,
   UploadedFileSummary,
@@ -99,9 +102,18 @@ function HelpCue({ content }: { content: ReactNode }) {
   )
 }
 
-const NEW_SKILL_TEMPLATE = `# New Skill
+const NEW_SKILL_TEMPLATE = `---
+name: New Skill
 agent_scope: general
+tool_tags: search_skills
+task_tags: workflow
+version: 1
+enabled: true
 description: Temporary skill created from the control panel.
+when_to_apply: Use when this reusable workflow fits the user's task.
+kind: retrievable
+---
+# New Skill
 
 ## Workflow
 
@@ -114,7 +126,6 @@ const AGENT_EDITOR_FIELDS = [
   'skill_scope',
   'allowed_tools',
   'allowed_worker_agents',
-  'preload_skill_packs',
   'memory_scopes',
   'max_steps',
   'max_tool_calls',
@@ -138,6 +149,7 @@ type GraphSourceMode = 'collection' | 'manual'
 type WizardCollectionMode = 'existing' | 'new'
 type KnowledgeSourceKind = 'local_folder' | 'local_repo'
 type SkillsTab = 'editor' | 'preview'
+type SkillEditorMode = 'builder' | 'source'
 type AccessResourceType = 'agent' | 'agent_group' | 'collection' | 'graph' | 'skill' | 'skill_family' | 'tool' | 'tool_group' | 'worker_request'
 type AccessAction = 'use' | 'manage' | 'approve' | 'delete'
 type AccessTab = 'overview' | 'users' | 'groups' | 'roles' | 'grants' | 'effective' | 'advanced'
@@ -194,7 +206,7 @@ const ACCESS_PRESETS: Array<{
   { id: 'approval_manager', label: 'Approval Manager', description: 'Approve worker-request queues.', resourceType: 'worker_request', actions: ['approve'] },
   { id: 'custom', label: 'Custom', description: 'Choose resource type, actions, and selectors manually.', resourceType: 'collection', actions: ['use'] },
 ]
-const SUPPORTED_DOCUMENT_TYPES = ['.txt', '.md', '.csv', '.pdf', '.docx', '.xls', '.xlsx', 'OCR images'] as const
+const SUPPORTED_DOCUMENT_TYPES = ['.txt', '.md', '.csv', '.pdf', '.docx', '.pptx', '.xls', '.xlsx', 'OCR images'] as const
 const GRAPH_RESEARCH_TUNE_TARGETS = [
   'extract_graph.txt',
   'summarize_descriptions.txt',
@@ -347,7 +359,7 @@ function formatWholeNumber(value: unknown): string {
 function toneForStatus(value: unknown): 'neutral' | 'ok' | 'warning' | 'danger' | 'accent' {
   const normalized = asString(value).toLowerCase()
   if (['ok', 'active', 'success', 'configured', 'ready'].includes(normalized)) return 'ok'
-  if (['warning', 'pending', 'runtime_swap', 'insufficient_data', 'partial'].includes(normalized)) return 'warning'
+  if (['warning', 'pending', 'started', 'runtime_swap', 'insufficient_data', 'partial'].includes(normalized)) return 'warning'
   if (['failed', 'error', 'archived', 'disabled', 'blocked', 'flagged'].includes(normalized)) return 'danger'
   if (['overlay active', 'overlay', 'live', 'preview'].includes(normalized)) return 'accent'
   return 'neutral'
@@ -379,6 +391,137 @@ function shortId(value: string): string {
 
 function uniqueList(items: string[]): string[] {
   return Array.from(new Set(items.filter(Boolean)))
+}
+
+function csvList(value: string): string[] {
+  return uniqueList(value.split(',').map(item => item.trim()).filter(Boolean))
+}
+
+function parseEnvironmentDraft(value: string): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const rawLine of value.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const index = line.indexOf('=')
+    const key = (index >= 0 ? line.slice(0, index) : line).trim()
+    const parsedValue = index >= 0 ? line.slice(index + 1) : ''
+    if (key) env[key] = parsedValue
+  }
+  return env
+}
+
+function managedServiceFromUrl(value: string): string {
+  try {
+    const host = new URL(value).hostname.trim()
+    if (['sam-gov-mcp', 'sam-mcp-smoke'].includes(host)) return host
+  } catch {
+    return ''
+  }
+  return ''
+}
+
+function metadataWithManagedMcpRuntime(metadata: Record<string, unknown>, service: string): Record<string, unknown> {
+  const next = { ...metadata }
+  delete next.server_environment
+  if (service.trim()) {
+    next.server_runtime = {
+      kind: 'docker_compose_service',
+      service: service.trim(),
+      restart_supported: true,
+      restart_engine: 'docker',
+    }
+  } else {
+    delete next.server_runtime
+  }
+  return next
+}
+
+function skillFamilyId(skill: Record<string, unknown> | null | undefined): string {
+  return asString(skill?.version_parent || skill?.skill_id)
+}
+
+function isActiveSkill(skill: Record<string, unknown> | null | undefined): boolean {
+  return Boolean(skill?.enabled) && asString(skill?.status).toLowerCase() === 'active'
+}
+
+function parseSkillBodySection(markdown: string, heading: string): string {
+  const marker = `## ${heading}`
+  const index = markdown.indexOf(marker)
+  if (index < 0) return ''
+  const after = markdown.slice(index + marker.length)
+  const nextHeading = after.search(/\n##\s+/)
+  return (nextHeading >= 0 ? after.slice(0, nextHeading) : after).trim()
+}
+
+function parseSkillFrontmatter(markdown: string): Record<string, string> {
+  const lines = markdown.split(/\r?\n/)
+  if (lines[0]?.trim() !== '---') return {}
+  const metadata: Record<string, string> = {}
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (line.trim() === '---') break
+    const match = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/)
+    if (match) metadata[match[1].trim().toLowerCase().replace(/-/g, '_')] = match[2].trim()
+  }
+  return metadata
+}
+
+function buildSkillMarkdown(options: {
+  name: string
+  agentScope: string
+  description: string
+  toolTags: string
+  taskTags: string
+  whenToApply: string
+  workflow: string
+  examples?: string
+}): string {
+  const name = options.name.trim() || 'New Skill'
+  const agentScope = options.agentScope.trim() || 'general'
+  const description = options.description.trim() || `User-defined ${agentScope.replace(/_/g, ' ')} skill.`
+  const toolTags = options.toolTags.trim() || 'search_skills'
+  const taskTags = options.taskTags.trim() || 'workflow'
+  const whenToApply = options.whenToApply.trim() || 'Use when this reusable workflow fits the user task.'
+  const workflow = options.workflow.trim() || '- Describe the reusable steps here.'
+  const examples = (options.examples ?? '').trim()
+  const lines = [
+    '---',
+    `name: ${name}`,
+    `agent_scope: ${agentScope}`,
+    `tool_tags: ${toolTags}`,
+    `task_tags: ${taskTags}`,
+    'version: 1',
+    'enabled: true',
+    `description: ${description}`,
+    `when_to_apply: ${whenToApply}`,
+    'kind: retrievable',
+    '---',
+    `# ${name}`,
+    '',
+    '## Workflow',
+    '',
+    workflow,
+    '',
+  ]
+  if (examples) {
+    lines.push('## Examples', '', examples, '')
+  }
+  return lines.join('\n')
+}
+
+function deriveSkillDraft(detail: Record<string, unknown> | null, fallbackMarkdown: string) {
+  const markdown = asString(detail?.body_markdown, fallbackMarkdown)
+  const frontmatter = parseSkillFrontmatter(markdown)
+  return {
+    name: asString(detail?.name) || frontmatter.name || markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || 'New Skill',
+    agentScope: asString(detail?.agent_scope) || frontmatter.agent_scope || 'general',
+    description: asString(detail?.description) || frontmatter.description || '',
+    toolTags: asArray<string>(detail?.tool_tags).join(', ') || frontmatter.tool_tags || 'search_skills',
+    taskTags: asArray<string>(detail?.task_tags).join(', ') || frontmatter.task_tags || 'workflow',
+    whenToApply: asString(detail?.when_to_apply) || asString(asRecord(detail?.controller_hints)?.when_to_apply) || frontmatter.when_to_apply || '',
+    workflow: parseSkillBodySection(markdown, 'Workflow') || '- Describe the reusable steps here.',
+    examples: parseSkillBodySection(markdown, 'Examples') || frontmatter.examples || '',
+  }
 }
 
 function normalizeToolTag(value: unknown): string {
@@ -757,6 +900,8 @@ export default function App() {
   const [compatibilitySource, setCompatibilitySource] = useState<'capabilities' | 'openapi' | null>(null)
   const [overview, setOverview] = useState<AdminOverview | null>(null)
   const [operations, setOperations] = useState<Record<string, unknown> | null>(null)
+  const [serviceResetResult, setServiceResetResult] = useState<ServiceResetResult | null>(null)
+  const [serviceResetBusy, setServiceResetBusy] = useState(false)
   const [architecture, setArchitecture] = useState<ArchitectureSnapshot | null>(null)
   const [architectureActivity, setArchitectureActivity] = useState<ArchitectureActivity | null>(null)
   const [architectureRefreshing, setArchitectureRefreshing] = useState(false)
@@ -861,10 +1006,24 @@ export default function App() {
   const [skillSearch, setSkillSearch] = useSessionStringState<string>('control-panel-ui-skill-search', '')
   const [skillDetail, setSkillDetail] = useState<Record<string, unknown> | null>(null)
   const [skillEditor, setSkillEditor] = useState('')
+  const [skillEditorMode, setSkillEditorMode] = useSessionStringState<SkillEditorMode>('control-panel-ui-skill-editor-mode', 'builder')
+  const [skillDraftName, setSkillDraftName] = useState('New Skill')
+  const [skillDraftAgent, setSkillDraftAgent] = useState('')
+  const [skillDraftScope, setSkillDraftScope] = useState('general')
+  const [skillDraftDescription, setSkillDraftDescription] = useState('Temporary skill created from the control panel.')
+  const [skillDraftToolTags, setSkillDraftToolTags] = useState('search_skills')
+  const [skillDraftTaskTags, setSkillDraftTaskTags] = useState('workflow')
+  const [skillDraftWhenToApply, setSkillDraftWhenToApply] = useState('Use when this reusable workflow fits the user task.')
+  const [skillDraftWorkflow, setSkillDraftWorkflow] = useState('- Describe the reusable steps here.')
+  const [skillDraftExamples, setSkillDraftExamples] = useState('')
+  const [skillBuilderContext, setSkillBuilderContext] = useState('')
+  const [skillBuilderRunning, setSkillBuilderRunning] = useState(false)
   const [skillPreviewQuery, setSkillPreviewQuery] = useState('')
   const [skillPreviewResult, setSkillPreviewResult] = useState<Record<string, unknown> | null>(null)
   const [creatingSkill, setCreatingSkill] = useState(false)
   const [skillActionDetail, setSkillActionDetail] = useState<Record<string, unknown> | null>(null)
+  const [agentSkillSearch, setAgentSkillSearch] = useSessionStringState<string>('control-panel-ui-agent-skill-search', '')
+  const [agentSkillsPendingReload, setAgentSkillsPendingReload] = useState(false)
   const [accessPrincipals, setAccessPrincipals] = useState<AccessPrincipal[]>([])
   const [accessMemberships, setAccessMemberships] = useState<AccessMembership[]>([])
   const [accessRoles, setAccessRoles] = useState<AccessRole[]>([])
@@ -880,7 +1039,13 @@ export default function App() {
   const [mcpDraftUrl, setMcpDraftUrl] = useState('')
   const [mcpDraftSecret, setMcpDraftSecret] = useState('')
   const [mcpDraftAgents, setMcpDraftAgents] = useState('general')
-  const [mcpDraftVisibility, setMcpDraftVisibility] = useState('private')
+  const [mcpDraftVisibility, setMcpDraftVisibility] = useState('tenant')
+  const [mcpDraftEnvironment, setMcpDraftEnvironment] = useState('')
+  const [mcpDraftManagedService, setMcpDraftManagedService] = useState('')
+  const [mcpEnvironmentDraft, setMcpEnvironmentDraft] = useState('')
+  const [mcpManagedServiceDraft, setMcpManagedServiceDraft] = useState('')
+  const [mcpEnvironmentSaving, setMcpEnvironmentSaving] = useState(false)
+  const [mcpRestartBusy, setMcpRestartBusy] = useState(false)
   const [principalDraftType, setPrincipalDraftType] = useState<'user' | 'group'>('user')
   const [principalDraftValue, setPrincipalDraftValue] = useState('')
   const [principalDraftProvider, setPrincipalDraftProvider] = useState('email')
@@ -1028,6 +1193,7 @@ export default function App() {
   const lastReload = (operations?.last_reload as Record<string, unknown> | undefined)
     ?? (overview?.last_reload as Record<string, unknown> | undefined)
     ?? null
+  const lastServiceReset = serviceResetResult ?? (asRecord(operations?.last_service_reset) as ServiceResetResult | null)
   const environmentLabel = (import.meta.env.VITE_ENVIRONMENT as string | undefined)?.toLowerCase() || 'local'
   const environmentTone: 'neutral' | 'info' | 'warn' | 'danger' =
     environmentLabel === 'prod' || environmentLabel === 'production' ? 'danger'
@@ -1056,11 +1222,20 @@ export default function App() {
   const selectedCollectionStorage = collectionStorageProfile(selectedCollectionMeta)
   const duplicateGroups = collectionHealth?.duplicate_groups ?? []
   const driftedGroups = collectionHealth?.drifted_groups ?? []
+  const staleVersionCount = asNumber(collectionHealth?.stale_version_count) ?? 0
+  const extractionFailureCount = asNumber(collectionHealth?.extraction_failure_count) ?? 0
+  const lowConfidenceMetadataCount = asNumber(collectionHealth?.low_confidence_metadata_count) ?? 0
+  const missingSourceDocCount = asNumber(collectionHealth?.missing_source_doc_count) ?? 0
   const promptOverlayActive = Boolean(promptDetail?.overlay_active)
   const documentRecord = (docDetail?.document as Record<string, unknown> | undefined) ?? null
   const extractedContent = asString((docDetail?.extracted_content as Record<string, unknown> | undefined)?.content)
   const rawContent = asString((docDetail?.raw_source as Record<string, unknown> | undefined)?.content)
   const docMetadataSummary = asRecord(docDetail?.metadata_summary) ?? {}
+  const docSourceMetadata = asRecord(documentRecord?.source_metadata) ?? {}
+  const docCorpusMetadata = asRecord(docSourceMetadata.corpus_metadata) ?? {}
+  const docParserProvenance = asRecord(documentRecord?.parser_provenance) ?? asRecord(docSourceMetadata.parser_provenance) ?? {}
+  const docSignalSummary = asRecord(documentRecord?.signal_summary) ?? asRecord(docSourceMetadata.signal_summary) ?? asRecord(docCorpusMetadata.signal_summary) ?? {}
+  const docVersions = asArray<Record<string, unknown>>(docDetail?.versions)
   const uploadDocumentRecord = (uploadDocDetail?.document as Record<string, unknown> | undefined) ?? null
   const uploadExtractedContent = asString((uploadDocDetail?.extracted_content as Record<string, unknown> | undefined)?.content)
   const uploadRawContent = asString((uploadDocDetail?.raw_source as Record<string, unknown> | undefined)?.content)
@@ -1078,6 +1253,24 @@ export default function App() {
       return matchesSearch && matchesSource
     })
   }, [collectionDocs, documentSearch, documentSourceFilter])
+  const agentRecords = asArray<Record<string, unknown>>(agentsPayload?.agents)
+  const agentByName = useMemo(() => new Map(agentRecords.map(agent => [asString(agent.name), agent])), [agentRecords])
+  const skillAssignedAgentNames = useMemo(() => {
+    const assignments = new Map<string, string[]>()
+    for (const agent of agentRecords) {
+      const agentName = asString(agent.name)
+      const assignedSkillIds = [
+        ...asArray<string>(agent.preload_skill_packs),
+        ...asArray<Record<string, unknown>>(agent.pinned_skills).map(skill => skillFamilyId(skill)),
+      ]
+      for (const skillId of assignedSkillIds) {
+        const names = assignments.get(skillId) ?? []
+        names.push(agentName)
+        assignments.set(skillId, uniqueList(names))
+      }
+    }
+    return assignments
+  }, [agentRecords])
   const filteredAgents = useMemo(() => {
     return (agentsPayload?.agents ?? []).filter(agent => matchesTextQuery(
       agentSearch,
@@ -1140,8 +1333,9 @@ export default function App() {
       skill.description,
       skill.status,
       skill.agent_scope,
+      skillAssignedAgentNames.get(skillFamilyId(skill))?.join(', '),
     ))
-  }, [skills, skillSearch])
+  }, [skills, skillSearch, skillAssignedAgentNames])
   const filteredMcpConnections = useMemo(() => {
     return mcpConnections.filter(connection => matchesTextQuery(
       mcpSearch,
@@ -1221,6 +1415,16 @@ export default function App() {
   const skillDependencyValidation = asRecord(skillDetail?.dependency_validation)
   const skillHealth = asRecord(skillDetail?.skill_health)
   const skillActionValidation = asRecord(skillActionDetail?.dependency_validation)
+  const selectedAgentSkillIds = csvList(asString(agentForm.preload_skill_packs))
+  const selectedAgentSkillScope = asString(agentForm.skill_scope || agentDetail?.skill_scope)
+  const compatibleAgentSkills = useMemo(() => {
+    return skills
+      .filter(skill => isActiveSkill(skill))
+      .filter(skill => !selectedAgentSkillScope || asString(skill.agent_scope) === selectedAgentSkillScope)
+      .filter(skill => matchesTextQuery(agentSkillSearch, skill.name, skill.skill_id, skill.description, skill.version_parent))
+  }, [skills, selectedAgentSkillScope, agentSkillSearch])
+  const selectedSkillFamilyId = skillFamilyId(skillDetail ?? (selectedSkill ? skills.find(skill => asString(skill.skill_id) === selectedSkill) : null))
+  const selectedSkillAssignedAgents = selectedSkillFamilyId ? skillAssignedAgentNames.get(selectedSkillFamilyId) ?? [] : []
   const selectedCollectionGrantSummary = useMemo(() => {
     return computeResourceGrantSummary({
       resourceType: 'collection',
@@ -1446,6 +1650,22 @@ export default function App() {
     })
   }, [effectiveAccess, accessPermissions, accessRoleById, accessResourceLabelByTypeAndId])
   const selectedMcpRecord = mcpConnections.find(connection => connection.connection_id === selectedMcpConnection) ?? null
+  const selectedMcpMetadata = asRecord(selectedMcpRecord?.metadata_json) ?? {}
+  const selectedMcpEnvironmentMetadata = asRecord(selectedMcpMetadata.server_environment) ?? {}
+  const selectedMcpRuntimeMetadata = asRecord(selectedMcpMetadata.server_runtime) ?? {}
+  const selectedMcpEnvironmentKeys = asArray<string>(selectedMcpEnvironmentMetadata.configured_keys)
+  const selectedMcpRestartSupported = Boolean(selectedMcpRuntimeMetadata.restart_supported) && Boolean(asString(selectedMcpRuntimeMetadata.service))
+  useEffect(() => {
+    if (!selectedMcpRecord) {
+      setMcpEnvironmentDraft('')
+      setMcpManagedServiceDraft('')
+      return
+    }
+    const metadata = asRecord(selectedMcpRecord.metadata_json) ?? {}
+    const serverRuntime = asRecord(metadata.server_runtime) ?? {}
+    setMcpEnvironmentDraft('')
+    setMcpManagedServiceDraft(asString(serverRuntime.service) || managedServiceFromUrl(selectedMcpRecord.server_url))
+  }, [selectedMcpRecord?.connection_id, selectedMcpRecord?.metadata_json, selectedMcpRecord?.server_url])
   const architectureSupported = compatibility?.sections?.architecture?.supported ?? true
   const architectureMapLayout = useMemo(() => {
     return buildArchitectureMapLayout({
@@ -1657,13 +1877,47 @@ export default function App() {
     setGraphSkillIdsDraft(asArray<string>(graph.graph_skill_ids).join(', '))
   }
 
+  function hydrateSkillDraft(detail: Record<string, unknown> | null, fallbackMarkdown = NEW_SKILL_TEMPLATE) {
+    const draft = deriveSkillDraft(detail, fallbackMarkdown)
+    setSkillDraftName(draft.name)
+    setSkillDraftScope(draft.agentScope)
+    setSkillDraftDescription(draft.description)
+    setSkillDraftToolTags(draft.toolTags)
+    setSkillDraftTaskTags(draft.taskTags)
+    setSkillDraftWhenToApply(draft.whenToApply)
+    setSkillDraftWorkflow(draft.workflow)
+    setSkillDraftExamples(draft.examples)
+  }
+
   function startNewSkillDraft() {
     setCreatingSkill(true)
     setSelectedSkill('')
     setSkillDetail(null)
     setSkillPreviewResult(null)
     setSkillActionDetail(null)
-    setSkillEditor(NEW_SKILL_TEMPLATE)
+    const firstAgent = (agentsPayload?.agents ?? []).find(agent => asString(agent.skill_scope)) ?? (agentsPayload?.agents ?? [])[0]
+    const nextScope = asString(firstAgent?.skill_scope, 'general')
+    setSkillDraftAgent(asString(firstAgent?.name))
+    setSkillDraftScope(nextScope)
+    setSkillDraftName('New Skill')
+    setSkillDraftDescription('Temporary skill created from the control panel.')
+    setSkillDraftToolTags('search_skills')
+    setSkillDraftTaskTags('workflow')
+    setSkillDraftWhenToApply('Use when this reusable workflow fits the user task.')
+    setSkillDraftWorkflow('- Describe the reusable steps here.')
+    setSkillDraftExamples('')
+    setSkillBuilderContext('')
+    setSkillEditor(buildSkillMarkdown({
+      name: 'New Skill',
+      agentScope: nextScope,
+      description: 'Temporary skill created from the control panel.',
+      toolTags: 'search_skills',
+      taskTags: 'workflow',
+      whenToApply: 'Use when this reusable workflow fits the user task.',
+      workflow: '- Describe the reusable steps here.',
+      examples: '',
+    }))
+    setSkillEditorMode('builder')
   }
 
   function applyArchitectureSnapshot(snapshot: ArchitectureSnapshot) {
@@ -1831,10 +2085,11 @@ export default function App() {
         .catch(err => setError(getMessage(err)))
     }
     if (active === 'agents') {
-      void api.listAgents(token).then(payload => {
-        setAgentsPayload(payload)
-        const keepSelected = payload.agents.some(agent => asString(agent.name) === selectedAgent)
-        const first = asString(payload.agents[0]?.name)
+      void Promise.all([api.listAgents(token), api.listSkills(token)]).then(([agents, skillPayload]) => {
+        setAgentsPayload(agents)
+        setSkills(skillPayload.data)
+        const keepSelected = agents.agents.some(agent => asString(agent.name) === selectedAgent)
+        const first = asString(agents.agents[0]?.name)
         setSelectedAgent(keepSelected ? selectedAgent : first)
       }).catch(err => setError(getMessage(err)))
     }
@@ -1880,8 +2135,9 @@ export default function App() {
         .catch(err => setError(getMessage(err)))
     }
     if (active === 'skills') {
-      void api.listSkills(token).then(payload => {
+      void Promise.all([api.listSkills(token), api.listAgents(token)]).then(([payload, agents]) => {
         setSkills(payload.data)
+        setAgentsPayload(agents)
         if (creatingSkill) return
         const keepSelected = payload.data.some(skill => asString(skill.skill_id) === selectedSkill)
         const first = asString(payload.data[0]?.skill_id)
@@ -1910,6 +2166,7 @@ export default function App() {
     if (!token || active !== 'agents' || !selectedAgent) return
     void api.getAgent(token, selectedAgent).then(detail => {
       setAgentDetail(detail)
+      setAgentSkillsPendingReload(false)
       setAgentForm({
         description: detail.description ?? '',
         prompt_file: detail.prompt_file ?? '',
@@ -1977,6 +2234,8 @@ export default function App() {
     void api.getSkill(token, selectedSkill).then(detail => {
       setSkillDetail(detail)
       setSkillEditor(asString(detail.body_markdown))
+      hydrateSkillDraft(detail, asString(detail.body_markdown))
+      setSkillDraftAgent('')
       setCreatingSkill(false)
     }).catch(err => setError(getMessage(err)))
   }, [active, selectedSkill, token])
@@ -2126,6 +2385,37 @@ export default function App() {
     }
   }
 
+  function toggleAgentSkillAssignment(skillId: string) {
+    setAgentForm(current => {
+      const existing = csvList(asString(current.preload_skill_packs))
+      const next = existing.includes(skillId)
+        ? existing.filter(item => item !== skillId)
+        : [...existing, skillId]
+      return { ...current, preload_skill_packs: next.join(', ') }
+    })
+  }
+
+  async function handleAgentSkillSave() {
+    if (!selectedAgent) return
+    try {
+      const result = await api.updateAgentSkills(token, selectedAgent, selectedAgentSkillIds)
+      const detail = asRecord(result.agent) ?? await api.getAgent(token, selectedAgent)
+      setAgentDetail(detail)
+      setAgentForm(current => ({
+        ...current,
+        preload_skill_packs: asArray<string>(detail.preload_skill_packs).join(', '),
+      }))
+      const agents = await api.listAgents(token)
+      setAgentsPayload(agents)
+      setAgentSkillsPendingReload(Boolean(result.pending_reload))
+      setError('')
+      notifyOk('Skill assignments saved', selectedAgent)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Skill assignment failed', err)
+    }
+  }
+
   async function handleAgentReload() {
     try {
       const result = await api.reloadAgents(token)
@@ -2134,6 +2424,7 @@ export default function App() {
       setOverview(refreshedOverview)
       const detail = await api.getAgent(token, selectedAgent)
       setAgentDetail(detail)
+      setAgentSkillsPendingReload(false)
       const nextCompatibility = await refreshCompatibility()
       if (nextCompatibility.capabilities.sections.architecture?.supported ?? true) {
         await refreshArchitectureSnapshot()
@@ -2143,6 +2434,25 @@ export default function App() {
     } catch (err) {
       setError(getMessage(err))
       notifyError('Reload failed', err)
+    }
+  }
+
+  async function handleServiceReset(engine: ServiceResetEngine) {
+    setServiceResetBusy(true)
+    try {
+      const result = await api.resetServiceFull(token, engine)
+      setServiceResetResult(result)
+      setOperations(current => ({ ...(current ?? {}), last_service_reset: result }))
+      setError('')
+      notifyOk(
+        `${engine === 'docker' ? 'Docker' : 'Podman'} reset started`,
+        `Run ${shortId(result.run_id)} is writing to ${result.log_path}.`,
+      )
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Service reset failed', err)
+    } finally {
+      setServiceResetBusy(false)
     }
   }
 
@@ -3429,17 +3739,81 @@ export default function App() {
     }
   }
 
-  async function handleSkillSave() {
+  function currentSkillMarkdown(): string {
+    if (skillEditorMode === 'source') return skillEditor
+    return buildSkillMarkdown({
+      name: skillDraftName,
+      agentScope: skillDraftScope,
+      description: skillDraftDescription,
+      toolTags: skillDraftToolTags,
+      taskTags: skillDraftTaskTags,
+      whenToApply: skillDraftWhenToApply,
+      workflow: skillDraftWorkflow,
+      examples: skillDraftExamples,
+    })
+  }
+
+  async function handleSkillAutoBuild() {
+    setSkillBuilderRunning(true)
     try {
+      const result = await api.buildSkillDraft(token, {
+        context: skillBuilderContext,
+        examples: skillDraftExamples,
+        name: skillDraftName,
+        agent_scope: skillDraftScope,
+        target_agent: skillDraftAgent,
+        tool_tags: csvList(skillDraftToolTags),
+        task_tags: csvList(skillDraftTaskTags),
+        description: skillDraftDescription,
+        when_to_apply: skillDraftWhenToApply,
+      })
+      const draft = result.draft as SkillBuildDraftRecord
+      const draftRecord: Record<string, unknown> = {
+        body_markdown: draft.body_markdown,
+        name: draft.name,
+        agent_scope: draft.agent_scope,
+        description: draft.description,
+        tool_tags: draft.tool_tags,
+        task_tags: draft.task_tags,
+        when_to_apply: draft.when_to_apply,
+      }
+      setSkillEditor(asString(draft.body_markdown))
+      hydrateSkillDraft(draftRecord, asString(draft.body_markdown))
+      setSkillEditorMode('builder')
+      setError('')
+      notifyOk('Skill draft built', 'Review before saving')
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Skill auto-build failed', err)
+    } finally {
+      setSkillBuilderRunning(false)
+    }
+  }
+
+  async function handleSkillSave(status: 'draft' | 'active' = selectedSkillStatus === 'active' ? 'active' : 'draft') {
+    try {
+      const bodyMarkdown = currentSkillMarkdown()
+      const payload = {
+        body_markdown: bodyMarkdown,
+        name: skillDraftName,
+        agent_scope: skillDraftScope,
+        description: skillDraftDescription,
+        tool_tags: csvList(skillDraftToolTags),
+        task_tags: csvList(skillDraftTaskTags),
+        status,
+        enabled: status === 'active',
+        kind: 'retrievable',
+      }
       const response = selectedSkill
-        ? await api.updateSkill(token, selectedSkill, { body_markdown: skillEditor })
-        : await api.createSkill(token, { body_markdown: skillEditor, agent_scope: 'general' })
+        ? await api.updateSkill(token, selectedSkill, payload)
+        : await api.createSkill(token, payload)
       const savedSkill = response.data as Record<string, unknown> | undefined
       const savedSkillId = asString(savedSkill?.skill_id)
       if (savedSkillId) {
         const detail = await api.getSkill(token, savedSkillId)
         setSkillDetail(detail)
         setSkillEditor(asString(detail.body_markdown))
+        hydrateSkillDraft(detail, asString(detail.body_markdown))
         setSelectedSkill(savedSkillId)
       }
       setCreatingSkill(false)
@@ -3447,7 +3821,7 @@ export default function App() {
       const list = await api.listSkills(token)
       setSkills(list.data)
       setError('')
-      notifyOk(selectedSkill ? 'Skill updated' : 'Skill created')
+      notifyOk(selectedSkill ? 'Skill updated' : 'Skill created', status === 'active' ? 'Active' : 'Draft')
     } catch (err) {
       setSkillActionDetail(extractSkillDependencyError(err))
       setError(getMessage(err))
@@ -3465,6 +3839,7 @@ export default function App() {
       }
       const detail = await api.getSkill(token, selectedSkill)
       setSkillDetail(detail)
+      hydrateSkillDraft(detail, asString(detail.body_markdown))
       const list = await api.listSkills(token)
       setSkills(list.data)
       setSkillActionDetail(null)
@@ -3484,6 +3859,36 @@ export default function App() {
       setError('')
     } catch (err) {
       setError(getMessage(err))
+    }
+  }
+
+  async function handlePinSkillToAgent() {
+    const targetAgent = skillDraftAgent || selectedAgent || asString(agentRecords[0]?.name)
+    const activeSkillId = selectedSkillFamilyId || selectedSkill
+    if (!targetAgent || !activeSkillId) {
+      setError('Choose an active skill and target agent before pinning.')
+      return
+    }
+    if (!isActiveSkill(skillDetail)) {
+      setError('Activate the skill before pinning it to an agent.')
+      return
+    }
+    const target = agentRecords.find(agent => asString(agent.name) === targetAgent)
+    const nextIds = uniqueList([
+      ...asArray<string>(target?.preload_skill_packs),
+      activeSkillId,
+    ])
+    try {
+      await api.updateAgentSkills(token, targetAgent, nextIds)
+      const [agents, list] = await Promise.all([api.listAgents(token), api.listSkills(token)])
+      setAgentsPayload(agents)
+      setSkills(list.data)
+      setAgentSkillsPendingReload(true)
+      setError('')
+      notifyOk('Skill pinned to agent', targetAgent)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('Pin skill failed', err)
     }
   }
 
@@ -3859,6 +4264,7 @@ export default function App() {
       return
     }
     try {
+      const managedService = mcpDraftManagedService.trim() || managedServiceFromUrl(mcpDraftUrl.trim())
       const payload = await api.createMcpConnection(token, {
         display_name: mcpDraftName.trim(),
         server_url: mcpDraftUrl.trim(),
@@ -3866,10 +4272,14 @@ export default function App() {
         secret: mcpDraftSecret,
         allowed_agents: uniqueList(mcpDraftAgents.split(',').map(item => item.trim())).filter(Boolean),
         visibility: mcpDraftVisibility,
+        server_environment: parseEnvironmentDraft(mcpDraftEnvironment),
+        metadata_json: metadataWithManagedMcpRuntime({}, managedService),
       })
       setMcpDraftName('')
       setMcpDraftUrl('')
       setMcpDraftSecret('')
+      setMcpDraftEnvironment('')
+      setMcpDraftManagedService('')
       const nextId = payload.connection.connection_id
       await refreshMcpData(nextId)
       setError('')
@@ -3901,6 +4311,46 @@ export default function App() {
     } catch (err) {
       setError(getMessage(err))
       notifyError('MCP refresh failed', err)
+    }
+  }
+
+  async function handleSaveMcpServerSettings(connection: McpConnectionRecord) {
+    setMcpEnvironmentSaving(true)
+    try {
+      const metadata = asRecord(connection.metadata_json) ?? {}
+      const updatePayload: Record<string, unknown> = {
+        metadata_json: metadataWithManagedMcpRuntime(metadata, mcpManagedServiceDraft),
+      }
+      if (mcpEnvironmentDraft.trim()) {
+        updatePayload.server_environment = parseEnvironmentDraft(mcpEnvironmentDraft)
+      }
+      const payload = await api.updateMcpConnection(token, connection.connection_id, {
+        ...updatePayload,
+      })
+      await refreshMcpData(payload.connection.connection_id)
+      setMcpEnvironmentDraft('')
+      setError('')
+      notifyOk('MCP server settings saved', connection.display_name)
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('MCP server settings failed', err)
+    } finally {
+      setMcpEnvironmentSaving(false)
+    }
+  }
+
+  async function handleRestartMcpServer(connection: McpConnectionRecord) {
+    setMcpRestartBusy(true)
+    try {
+      const payload = await api.restartMcpConnectionServer(token, connection.connection_id)
+      await refreshMcpData(connection.connection_id)
+      setError('')
+      notifyOk('MCP server restart started', asString(payload.restart.service, connection.display_name))
+    } catch (err) {
+      setError(getMessage(err))
+      notifyError('MCP server restart failed', err)
+    } finally {
+      setMcpRestartBusy(false)
     }
   }
 
@@ -5457,6 +5907,41 @@ export default function App() {
                       </label>
                     ))}
                   </div>
+                  <div className="assignment-panel">
+                    <div className="assignment-panel-head">
+                      <div>
+                        <strong>Pinned Skills</strong>
+                        <p>Active skills in the agent scope are injected as pinned guidance after the next agent reload.</p>
+                      </div>
+                      {agentSkillsPendingReload && <StatusBadge tone="warning">Pending reload</StatusBadge>}
+                    </div>
+                    <ResourceSearch value={agentSkillSearch} onChange={setAgentSkillSearch} placeholder="Search assignable skills" />
+                    <div className="checkbox-list skill-assignment-list">
+                      {compatibleAgentSkills.length > 0 ? compatibleAgentSkills.map(skill => {
+                        const familyId = skillFamilyId(skill)
+                        const checked = selectedAgentSkillIds.includes(familyId)
+                        return (
+                          <label key={familyId} className={checked ? 'checkbox-card checkbox-card-active' : 'checkbox-card'}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleAgentSkillAssignment(familyId)}
+                            />
+                            <span className="checkbox-copy">
+                              <strong>{asString(skill.name, familyId)}</strong>
+                              <span>{familyId}</span>
+                              <span>{asString(skill.description, 'No description')}</span>
+                            </span>
+                          </label>
+                        )
+                      }) : (
+                        <EmptyState title="No compatible active skills" body={`Create or activate a skill with scope "${selectedAgentSkillScope || 'general'}" before assigning it here.`} />
+                      )}
+                    </div>
+                    <ActionBar>
+                      <ActionButton tone="secondary" onClick={() => void handleAgentSkillSave()}>Save Skill Assignments</ActionButton>
+                    </ActionBar>
+                  </div>
                   <div className="field-stack">
                     <label className="field">
                       <span>Body</span>
@@ -5504,8 +5989,18 @@ export default function App() {
                       </div>
                       <div className="summary-row">
                         <span>Pinned Skills</span>
-                        <strong>{shortList(asArray<string>(agentDetail.preload_skill_packs))}</strong>
+                        <strong>
+                          {asArray<Record<string, unknown>>(agentDetail.pinned_skills).length > 0
+                            ? shortList(asArray<Record<string, unknown>>(agentDetail.pinned_skills).map(skill => asString(skill.name, asString(skill.skill_id))))
+                            : shortList(asArray<string>(agentDetail.preload_skill_packs))}
+                        </strong>
                       </div>
+                      {asArray<string>(agentDetail.pinned_skill_warnings).length > 0 && (
+                        <div className="summary-row">
+                          <span>Skill Warnings</span>
+                          <strong>{shortList(asArray<string>(agentDetail.pinned_skill_warnings))}</strong>
+                        </div>
+                      )}
                       <div className="summary-row">
                         <span>Tool Access</span>
                         <strong>{shortList(asArray<string>(agentDetail.allowed_tools))}</strong>
@@ -6418,6 +6913,18 @@ export default function App() {
                       <span>Chunk Count</span>
                       <strong>{asString((docDetail.extracted_content as Record<string, unknown> | undefined)?.chunk_count, '0')}</strong>
                     </div>
+                    <div className="summary-row">
+                      <span>Version</span>
+                      <strong>{asString(documentRecord.version_ordinal, '1')} {documentRecord.active === false ? 'inactive' : 'active'}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Extraction</span>
+                      <strong>{humanizeKey(asString(documentRecord.extraction_status, 'success'))}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Metadata Confidence</span>
+                      <strong>{formatPercent(documentRecord.metadata_confidence)}</strong>
+                    </div>
                   </div>
                   <DetailTabs
                     key={selectedDoc}
@@ -6453,6 +6960,34 @@ export default function App() {
                               <span>Structure Type</span>
                               <strong>{asString(documentRecord.doc_structure_type, 'Unknown')}</strong>
                             </div>
+                            <div className="summary-row">
+                              <span>Document Type</span>
+                              <strong>{humanizeKey(asString(documentRecord.doc_type || docCorpusMetadata.doc_type, 'unknown'))}</strong>
+                            </div>
+                            <div className="summary-row">
+                              <span>Lifecycle</span>
+                              <strong>{humanizeKey(asString(documentRecord.lifecycle_phase || docCorpusMetadata.lifecycle_phase, 'unknown'))}</strong>
+                            </div>
+                            <div className="summary-row">
+                              <span>Program Tags</span>
+                              <strong>{asArray<string>(documentRecord.program_entities || docCorpusMetadata.program_entities).slice(0, 8).join(', ') || 'None'}</strong>
+                            </div>
+                            <div className="summary-row">
+                              <span>Authors</span>
+                              <strong>{asArray<string>(docCorpusMetadata.authors).slice(0, 6).join(', ') || 'Unknown'}</strong>
+                            </div>
+                            <div className="summary-row">
+                              <span>Revision</span>
+                              <strong>{asString(docCorpusMetadata.revision, 'Unknown')}</strong>
+                            </div>
+                            <div className="summary-row">
+                              <span>Signals</span>
+                              <strong>
+                                {Object.keys(docSignalSummary).length > 0
+                                  ? Object.entries(docSignalSummary).map(([key, value]) => `${humanizeKey(key)}: ${asString(asRecord(value)?.count, '0')}`).join(', ')
+                                  : 'None'}
+                              </strong>
+                            </div>
                             {Object.keys(docMetadataSummary).length > 0 && (
                               <div className="summary-row">
                                 <span>Indexing Profile</span>
@@ -6471,6 +7006,30 @@ export default function App() {
                             </div>
                           </div>
                         ),
+                      },
+                      {
+                        id: 'versions',
+                        label: 'Versions',
+                        content: (
+                          <div className="summary-list">
+                            {docVersions.length > 0 ? docVersions.map(version => (
+                              <div className="summary-row" key={asString(version.doc_id)}>
+                                <span>{asString(version.version_ordinal, '1')} - {version.active === false ? 'Inactive' : 'Active'}</span>
+                                <strong>{formatTimestamp(version.ingested_at)} - {asString(version.extraction_status, 'success')}</strong>
+                              </div>
+                            )) : (
+                              <div className="summary-row">
+                                <span>Versions</span>
+                                <strong>No version history available.</strong>
+                              </div>
+                            )}
+                          </div>
+                        ),
+                      },
+                      {
+                        id: 'provenance',
+                        label: 'Parser Provenance',
+                        content: <JsonInspector label="Parser provenance" value={docParserProvenance} />,
                       },
                     ]}
                   />
@@ -6503,10 +7062,21 @@ export default function App() {
                     <StatusBadge tone={driftedGroups.length > 0 ? 'warning' : 'ok'}>
                       {driftedGroups.length} drifted group{driftedGroups.length === 1 ? '' : 's'}
                     </StatusBadge>
+                    <StatusBadge tone={extractionFailureCount > 0 ? 'danger' : 'ok'}>
+                      {extractionFailureCount} extraction failure{extractionFailureCount === 1 ? '' : 's'}
+                    </StatusBadge>
+                    <StatusBadge tone={lowConfidenceMetadataCount > 0 ? 'warning' : 'ok'}>
+                      {lowConfidenceMetadataCount} low-confidence
+                    </StatusBadge>
+                    <StatusBadge tone={missingSourceDocCount > 0 ? 'warning' : 'ok'}>
+                      {missingSourceDocCount} missing source
+                    </StatusBadge>
                   </div>
                   <div className="stats-grid">
                     <StatCard label="Active Docs" value={collectionHealth.active_doc_count} caption="Winning indexed copies used for retrieval." />
                     <StatCard label="Indexed Docs" value={collectionHealth.indexed_doc_count} caption="All document rows currently stored." />
+                    <StatCard label="Stale Versions" value={staleVersionCount} caption="Inactive history retained for audit." />
+                    <StatCard label="Metadata Flags" value={lowConfidenceMetadataCount} caption="Documents below confidence threshold." />
                     <StatCard label="Missing Files" value={collectionHealth.missing_sources.length} caption="Configured KB files not present here." />
                     <StatCard label="Suggested Fix" value={collectionHealth.reason === 'ready' ? 'None' : 'Repair'} caption={collectionHealth.suggested_fix || 'No repair needed.'} />
                   </div>
@@ -6523,12 +7093,15 @@ export default function App() {
                           <StatusBadge tone={asString(group.status) === 'duplicate' ? 'danger' : 'warning'}>
                             {humanizeKey(asString(group.status))}
                           </StatusBadge>
-                          {asArray<string>(group.duplicate_doc_ids).length > 0 && <span>{asArray<string>(group.duplicate_doc_ids).length} stale</span>}
+                          {asArray<string>(group.duplicate_doc_ids).length > 0 && <span>{asArray<string>(group.duplicate_doc_ids).length} duplicate</span>}
+                          {asArray<string>(group.stale_version_doc_ids).length > 0 && <span>{asArray<string>(group.stale_version_doc_ids).length} stale</span>}
+                          {asArray<string>(group.extraction_failure_doc_ids).length > 0 && <span>{asArray<string>(group.extraction_failure_doc_ids).length} failed</span>}
+                          {asArray<string>(group.missing_source_doc_ids).length > 0 && <span>{asArray<string>(group.missing_source_doc_ids).length} missing source</span>}
                         </>
                       )}
                     />
                   ) : (
-                    <EmptyState title="No duplicate or drift issues" body="This collection currently has clean coverage for the sources it tracks." />
+                    <EmptyState title="No duplicate or drift issues" body="This collection currently has clean coverage and usable metadata for the sources it tracks." />
                   )}
                   <JsonInspector label="Health payload" value={collectionHealth} />
                 </>
@@ -6913,7 +7486,12 @@ export default function App() {
                   getLabel={skill => asString(skill.name, asString(skill.skill_id))}
                   getDescription={skill => asString(skill.skill_id)}
                   getMeta={skill => (
-                    <StatusBadge tone={toneForStatus(skill.status)}>{asString(skill.status, 'unknown')}</StatusBadge>
+                    <>
+                      <StatusBadge tone={toneForStatus(skill.status)}>{asString(skill.status, 'unknown')}</StatusBadge>
+                      {(skillAssignedAgentNames.get(skillFamilyId(skill)) ?? []).length > 0 && (
+                        <StatusBadge tone="accent">{shortList(skillAssignedAgentNames.get(skillFamilyId(skill)) ?? [])}</StatusBadge>
+                      )}
+                    </>
                   )}
                   onSelect={skill => {
                     setCreatingSkill(false)
@@ -6971,6 +7549,10 @@ export default function App() {
                           <div className="summary-row">
                             <span>Family</span>
                             <strong>{asString(skillDetail?.version_parent, asString(skillDetail?.skill_id))}</strong>
+                          </div>
+                          <div className="summary-row">
+                            <span>Assigned Agents</span>
+                            <strong>{selectedSkillAssignedAgents.length > 0 ? shortList(selectedSkillAssignedAgents) : 'No pinned agents'}</strong>
                           </div>
                           <div className="summary-row">
                             <span>Depends On</span>
@@ -7059,24 +7641,121 @@ export default function App() {
                 )}
               </CollapsibleSurfaceCard>
 
-              <SurfaceCard className="editor-pane skill-editor-pane" title="Skill Editor" subtitle="Edit markdown, then create or update the selected skill. Activation status is surfaced separately for clarity.">
+              <SurfaceCard className="editor-pane skill-editor-pane" title="Skill Editor" subtitle="Build a reusable guidance skill, then activate and pin it to an agent when ready.">
                 {creatingSkill || skillDetail ? (
                   <>
-                    <label className="field">
-                      <span>Skill Markdown</span>
-                      <textarea
-                        rows={20}
-                        value={skillEditor}
-                        onChange={event => setSkillEditor(event.target.value)}
-                      />
-                    </label>
+                    <SectionTabs
+                      tabs={[
+                        { id: 'builder', label: 'Builder' },
+                        { id: 'source', label: 'Source' },
+                      ]}
+                      active={skillEditorMode}
+                      onChange={value => {
+                        if (value === 'source') setSkillEditor(currentSkillMarkdown())
+                        setSkillEditorMode(value as SkillEditorMode)
+                      }}
+                      ariaLabel="Skill editor mode"
+                    />
+                    {skillEditorMode === 'builder' ? (
+                      <div className="field-stack">
+                        <div className="form-grid form-grid-compact">
+                          <label className="field">
+                            <span>Name</span>
+                            <input aria-label="Skill Name" value={skillDraftName} onChange={event => setSkillDraftName(event.target.value)} />
+                          </label>
+                          <label className="field">
+                            <span>Target Agent</span>
+                            <select
+                              aria-label="Target Agent"
+                              value={skillDraftAgent}
+                              onChange={event => {
+                                const agentName = event.target.value
+                                setSkillDraftAgent(agentName)
+                                const agent = agentByName.get(agentName)
+                                if (agent) setSkillDraftScope(asString(agent.skill_scope, 'general'))
+                              }}
+                            >
+                              <option value="">Choose an agent</option>
+                              {agentRecords.map(agent => (
+                                <option key={asString(agent.name)} value={asString(agent.name)}>{asString(agent.name)}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span>Agent Scope</span>
+                            <input aria-label="Agent Scope" value={skillDraftScope} onChange={event => setSkillDraftScope(event.target.value)} />
+                          </label>
+                          <label className="field">
+                            <span>Tool Tags</span>
+                            <input aria-label="Tool Tags" value={skillDraftToolTags} onChange={event => setSkillDraftToolTags(event.target.value)} />
+                          </label>
+                          <label className="field">
+                            <span>Task Tags</span>
+                            <input aria-label="Task Tags" value={skillDraftTaskTags} onChange={event => setSkillDraftTaskTags(event.target.value)} />
+                          </label>
+                          <label className="field">
+                            <span>When To Apply</span>
+                            <input aria-label="When To Apply" value={skillDraftWhenToApply} onChange={event => setSkillDraftWhenToApply(event.target.value)} />
+                          </label>
+                        </div>
+                        <label className="field">
+                          <span>Description</span>
+                          <textarea aria-label="Skill Description" rows={3} value={skillDraftDescription} onChange={event => setSkillDraftDescription(event.target.value)} />
+                        </label>
+                        <label className="field skill-builder-input">
+                          <span>Context</span>
+                          <textarea aria-label="Skill Builder Context" rows={5} value={skillBuilderContext} onChange={event => setSkillBuilderContext(event.target.value)} />
+                        </label>
+                        <label className="field skill-builder-input">
+                          <span>Examples</span>
+                          <textarea aria-label="Skill Examples" rows={4} value={skillDraftExamples} onChange={event => setSkillDraftExamples(event.target.value)} />
+                        </label>
+                        <ActionBar>
+                          <ActionButton tone="secondary" onClick={() => void handleSkillAutoBuild()} disabled={skillBuilderRunning}>
+                            {skillBuilderRunning ? 'Auto Building' : 'Auto Build'}
+                          </ActionButton>
+                        </ActionBar>
+                        <label className="field">
+                          <span>Workflow</span>
+                          <textarea className="skill-workflow-textarea" aria-label="Skill Workflow" rows={10} value={skillDraftWorkflow} onChange={event => setSkillDraftWorkflow(event.target.value)} />
+                        </label>
+                      </div>
+                    ) : (
+                      <label className="field">
+                        <span>Skill Markdown</span>
+                        <textarea
+                          rows={20}
+                          value={skillEditor}
+                          onChange={event => setSkillEditor(event.target.value)}
+                        />
+                      </label>
+                    )}
+                    <div className="assignment-panel">
+                      <div className="assignment-panel-head">
+                        <div>
+                          <strong>Agent Assignment</strong>
+                          <p>{skillDraftAgent ? `Ready to pin to ${skillDraftAgent} once active.` : 'Choose a target agent to pin this skill after activation.'}</p>
+                        </div>
+                        {selectedSkillAssignedAgents.length > 0 && <StatusBadge tone="accent">{shortList(selectedSkillAssignedAgents)}</StatusBadge>}
+                      </div>
+                    </div>
                     <ActionBar>
                       <ActionButton tone="primary" onClick={() => void handleSkillSave()}>
                         {selectedSkill ? 'Update Skill' : 'Create Skill'}
                       </ActionButton>
+                      <ActionButton tone="secondary" onClick={() => void handleSkillSave('active')}>
+                        {selectedSkill ? 'Update Active' : 'Create Active'}
+                      </ActionButton>
                       <ActionButton tone="ghost" onClick={() => void handleSkillStatus('active')} disabled={!selectedSkill}>Activate</ActionButton>
+                      <ActionButton tone="secondary" onClick={() => void handlePinSkillToAgent()} disabled={!selectedSkill || !isActiveSkill(skillDetail) || !skillDraftAgent}>Pin to Agent</ActionButton>
                       <ActionButton tone="destructive" onClick={() => void handleSkillStatus('archived')} disabled={!selectedSkill}>Deactivate</ActionButton>
                     </ActionBar>
+                    {agentSkillsPendingReload && (
+                      <div className="inline-alert inline-alert-warning">
+                        <span>Agent reload pending</span>
+                        <strong>Reload agents before testing newly pinned skills.</strong>
+                      </div>
+                    )}
                     {skillDetail && <JsonInspector label="Technical details" value={skillDetail} />}
                   </>
                 ) : (
@@ -8765,6 +9444,23 @@ export default function App() {
                     <option value="tenant">Tenant</option>
                   </select>
                 </label>
+                <label className="field">
+                  <span>Managed Service</span>
+                  <input value={mcpDraftManagedService} onChange={event => setMcpDraftManagedService(event.target.value)} placeholder="sam-gov-mcp" />
+                </label>
+                <label className="field">
+                  <span>Server Environment</span>
+                  <textarea
+                    value={mcpDraftEnvironment}
+                    onChange={event => setMcpDraftEnvironment(event.target.value)}
+                    placeholder={'SAM_API_KEY=...\nSAM_GOV_TIMEOUT_SECONDS=30'}
+                    rows={4}
+                  />
+                </label>
+              </div>
+              <div className="inline-alert inline-alert-warning">
+                <strong>Environment changes require the MCP server process to restart.</strong>
+                <span>For bring-your-own servers, restart them in their own host or cloud runtime. The control panel can restart only managed local services such as `sam-gov-mcp`.</span>
               </div>
               <ActionBar>
                 <ActionButton tone="primary" onClick={() => void handleCreateMcpConnection()}>Add MCP</ActionButton>
@@ -8816,10 +9512,60 @@ export default function App() {
                       <span>Last Catalog Refresh</span>
                       <strong>{formatTimestamp(selectedMcpRecord.last_refreshed_at)}</strong>
                     </div>
+                    <div className="summary-row">
+                      <span>Environment Keys</span>
+                      <strong>{shortList(selectedMcpEnvironmentKeys)}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Managed Service</span>
+                      <strong>{asString(selectedMcpRuntimeMetadata.service) || 'External / BYO'}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Restart</span>
+                      <strong>{selectedMcpRestartSupported ? 'Control panel' : 'External runtime'}</strong>
+                    </div>
+                  </div>
+                  <div className="form-grid form-grid-compact">
+                    <label className="field">
+                      <span>Managed Service</span>
+                      <input value={mcpManagedServiceDraft} onChange={event => setMcpManagedServiceDraft(event.target.value)} placeholder="sam-gov-mcp" />
+                    </label>
+                    <label className="field">
+                      <span>Server Environment</span>
+                      <textarea
+                        value={mcpEnvironmentDraft}
+                        onChange={event => setMcpEnvironmentDraft(event.target.value)}
+                        placeholder={'SAM_API_KEY=...\nSAM_GOV_TIMEOUT_SECONDS=30'}
+                        rows={4}
+                      />
+                    </label>
+                  </div>
+                  <div className="inline-alert inline-alert-info">
+                    <strong>Saved values stay encrypted.</strong>
+                    <span>Leave Server Environment blank to keep current values; enter KEY=value lines to replace them.</span>
                   </div>
                   <ActionBar>
                     <ActionButton tone="secondary" onClick={() => void handleTestMcpConnection(selectedMcpRecord.connection_id)}>Test</ActionButton>
                     <ActionButton tone="secondary" onClick={() => void handleRefreshMcpTools(selectedMcpRecord.connection_id)}>Refresh Tools</ActionButton>
+                    <ActionButton
+                      tone="secondary"
+                      disabled={mcpEnvironmentSaving}
+                      onClick={() => void handleSaveMcpServerSettings(selectedMcpRecord)}
+                    >
+                      {mcpEnvironmentSaving ? 'Saving...' : 'Save Server Settings'}
+                    </ActionButton>
+                    <ActionButton
+                      tone="secondary"
+                      disabled={!selectedMcpRestartSupported || mcpRestartBusy}
+                      onClick={() => askConfirm({
+                        title: 'Restart this MCP server?',
+                        description: 'The control panel will recreate the managed Docker Compose service with the encrypted environment values saved on this connection.',
+                        confirmLabel: 'Restart Server',
+                        run: () => handleRestartMcpServer(selectedMcpRecord),
+                      })}
+                    >
+                      {mcpRestartBusy ? 'Restarting...' : 'Restart Server'}
+                    </ActionButton>
                     <ActionButton
                       tone="destructive"
                       onClick={() => askConfirm({
@@ -8888,31 +9634,95 @@ export default function App() {
       {active === 'operations' && (
         <div className="content-stack">
           {operationsTab === 'reloads' && (
-            <SurfaceCard title="Last Reload" subtitle="Most recent runtime swap, prompt reset, or agent reload event.">
-              {lastReload ? (
-                <div className="summary-list">
-                  <div className="summary-row">
-                    <span>Status</span>
-                    <StatusBadge tone={toneForStatus(lastReload.status)}>{asString(lastReload.status, 'unknown')}</StatusBadge>
+            <div className="content-stack">
+              <SurfaceCard title="Last Reload" subtitle="Most recent runtime swap, prompt reset, or agent reload event.">
+                {lastReload ? (
+                  <div className="summary-list">
+                    <div className="summary-row">
+                      <span>Status</span>
+                      <StatusBadge tone={toneForStatus(lastReload.status)}>{asString(lastReload.status, 'unknown')}</StatusBadge>
+                    </div>
+                    <div className="summary-row">
+                      <span>Reason</span>
+                      <strong>{asString(lastReload.reason, 'startup')}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>Actor</span>
+                      <strong>{asString(lastReload.actor, 'system')}</strong>
+                    </div>
+                    <div className="summary-row">
+                      <span>When</span>
+                      <strong>{formatTimestamp(lastReload.timestamp)}</strong>
+                    </div>
                   </div>
-                  <div className="summary-row">
-                    <span>Reason</span>
-                    <strong>{asString(lastReload.reason, 'startup')}</strong>
+                ) : (
+                  <EmptyState title="No reload activity yet" body="Reload information will appear here after startup or any control-plane apply action." />
+                )}
+                {operations && <JsonInspector label="Technical details" value={operations} />}
+              </SurfaceCard>
+
+              <SurfaceCard title="Service Reset" subtitle="Rebuild and recreate the local application and Open WebUI services.">
+                <div className="field-stack">
+                  <div className="inline-alert inline-alert-warning">
+                    <strong>Full reset restarts the API process.</strong>
+                    <span>The browser may lose contact with the backend while the stack is recreated. The reset process writes a host-side log before services go down.</span>
                   </div>
-                  <div className="summary-row">
-                    <span>Actor</span>
-                    <strong>{asString(lastReload.actor, 'system')}</strong>
-                  </div>
-                  <div className="summary-row">
-                    <span>When</span>
-                    <strong>{formatTimestamp(lastReload.timestamp)}</strong>
-                  </div>
+                  {lastServiceReset ? (
+                    <div className="summary-list">
+                      <div className="summary-row">
+                        <span>Status</span>
+                        <StatusBadge tone={toneForStatus(lastServiceReset.status)}>{asString(lastServiceReset.status, 'started')}</StatusBadge>
+                      </div>
+                      <div className="summary-row">
+                        <span>Engine</span>
+                        <strong>{asString(lastServiceReset.engine, 'docker')}</strong>
+                      </div>
+                      <div className="summary-row">
+                        <span>Run</span>
+                        <strong>{shortId(asString(lastServiceReset.run_id, 'service-reset'))}</strong>
+                      </div>
+                      <div className="summary-row">
+                        <span>Log</span>
+                        <strong>{asString(lastServiceReset.log_path, 'pending')}</strong>
+                      </div>
+                      <div className="summary-row">
+                        <span>Started</span>
+                        <strong>{formatTimestamp(lastServiceReset.started_at)}</strong>
+                      </div>
+                    </div>
+                  ) : (
+                    <EmptyState title="No full reset run yet" body="Start a Docker or Podman reset to create a run log." />
+                  )}
+                  {lastServiceReset && <JsonInspector label="Commands" value={asArray<string>(lastServiceReset.commands)} />}
+                  <ActionBar>
+                    <ActionButton
+                      tone="destructive"
+                      disabled={serviceResetBusy}
+                      onClick={() => askConfirm({
+                        title: 'Run Docker full service reset?',
+                        description: 'Runs docker compose down, no-cache image builds, and forced recreation for app, app-bootstrap, Open WebUI, and Open WebUI bootstrap.',
+                        confirmLabel: 'Run Docker Reset',
+                        run: () => handleServiceReset('docker'),
+                      })}
+                    >
+                      Reset Service (Full)
+                    </ActionButton>
+                    <ActionButton
+                      tone="destructive"
+                      disabled={serviceResetBusy}
+                      onClick={() => askConfirm({
+                        title: 'Run Podman full service reset?',
+                        description: 'Stops the Quadlet services, removes the core containers, rebuilds images without cache, and restarts the Podman services in dependency order.',
+                        confirmLabel: 'Run Podman Reset',
+                        run: () => handleServiceReset('podman'),
+                      })}
+                    >
+                      Reset Service (Full, Podman)
+                    </ActionButton>
+                  </ActionBar>
                 </div>
-              ) : (
-                <EmptyState title="No reload activity yet" body="Reload events will appear here after startup or any control-plane apply action." />
-              )}
-              {operations && <JsonInspector label="Technical details" value={operations} />}
-            </SurfaceCard>
+              </SurfaceCard>
+            </div>
           )}
 
           {operationsTab === 'jobs' && (

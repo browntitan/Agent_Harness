@@ -10,7 +10,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel, F
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
-from agentic_chatbot_next.app.service import AppContext, RuntimeService
+from agentic_chatbot_next.app.service import AppContext, RuntimeService, _should_shortcut_to_rag_worker
 from agentic_chatbot_next.api.live_progress import LiveProgressSink
 from agentic_chatbot_next.api.progress_callback import ProgressCallback
 from agentic_chatbot_next.observability.callbacks import RuntimeTraceCallbackHandler
@@ -95,6 +95,34 @@ def test_basic_turn_persists_router_and_basic_runtime_events(tmp_path: Path, mon
     router_event = next(row for row in events if row["event_type"] == "router_decision")
     assert router_event["payload"]["route"] == "BASIC"
     assert router_event["payload"]["router_decision_id"]
+
+
+def test_direct_rag_shortcut_skips_mermaid_skill_workflows() -> None:
+    assert (
+        _should_shortcut_to_rag_worker(
+            user_text="Search the default KB and cite sources.",
+            request_metadata={"kb_collection_id": "default"},
+            scope_mode="knowledge_base",
+            requested_agent_override="",
+            force_agent=False,
+            helper_task_type="",
+        )
+        is True
+    )
+    assert (
+        _should_shortcut_to_rag_worker(
+            user_text=(
+                "Search your skills for Mermaid diagram guidance, then create a Mermaid flowchart "
+                "from the default KB findings."
+            ),
+            request_metadata={"kb_collection_id": "default"},
+            scope_mode="knowledge_base",
+            requested_agent_override="",
+            force_agent=False,
+            helper_task_type="",
+        )
+        is False
+    )
 
 
 def test_process_turn_requested_agent_override_preserves_router_decision_and_changes_starting_agent(tmp_path: Path, monkeypatch):
@@ -646,9 +674,11 @@ def test_general_agent_plan_execute_does_not_finalize_graph_relationships_from_c
         force_plan_execute=True,
     )
 
-    assert "do not have GraphRAG search evidence" in final_text
-    assert "should not infer" in final_text
+    assert "multiple candidate graphs" in final_text
+    assert "without guessing" in final_text
+    assert "Please select one graph ID" in final_text
     assert metadata["recovery"] == ["graph_search_missing"]
+    assert metadata["graph_execution"]["graph_id_resolution_status"] == "ambiguous:tool_results"
     assert [message.name for message in messages if isinstance(message, ToolMessage)] == ["list_graph_indexes"]
 
 
@@ -880,6 +910,178 @@ def test_general_agent_react_missing_graph_search_retries_with_search() -> None:
     assert "Graph evidence answer" in final_text
     assert calls and calls[0]["graph_id"] == "defense_rag_v2_graph"
     assert metadata["recovery"][0] == "graph_search_missing_react"
+
+
+def test_general_agent_uses_context_graph_id_for_plan_execute_search() -> None:
+    from agentic_chatbot_next.general_agent import run_general_agent
+
+    calls: list[dict[str, object]] = []
+
+    @tool("search_graph_index")
+    def search_graph_index(query: str, graph_id: str = "", limit: int = 8) -> str:
+        """Search graph evidence."""
+        calls.append({"query": query, "graph_id": graph_id, "limit": limit})
+        return json.dumps(
+            {
+                "graph_id": graph_id,
+                "evidence_status": "grounded_graph_evidence",
+                "requires_source_read": False,
+                "results": [
+                    {
+                        "backend": "graphrag",
+                        "doc_id": "doc-1",
+                        "title": "relationship.md",
+                        "summary": "Vendor risk relationship found.",
+                        "chunk_ids": ["chunk-1"],
+                    }
+                ],
+            }
+        )
+
+    llm = FakeListChatModel(
+        responses=[
+            '{"plan":[],"notes":"no tools"}',
+            "Vendor risk relationship found.",
+        ]
+    )
+    tool_context = SimpleNamespace(
+        metadata={},
+        session=SimpleNamespace(metadata={"active_graph_ids": ["context_graph"]}),
+    )
+
+    final_text, _messages, metadata = run_general_agent(
+        llm,
+        tools=[search_graph_index],
+        messages=[],
+        user_text="Find relationships between vendors, risks, approvals, and outcomes.",
+        system_prompt="Use graph evidence.",
+        force_plan_execute=True,
+        tool_context=tool_context,
+    )
+
+    assert "Vendor risk relationship found" in final_text
+    assert calls and calls[0]["graph_id"] == "context_graph"
+    assert metadata["graph_execution"]["graph_id"] == "context_graph"
+    assert metadata["graph_execution"]["graph_tool_attempted"] is True
+
+
+def test_general_agent_prefers_selected_graph_over_active_graph_list() -> None:
+    from agentic_chatbot_next.general_agent import run_general_agent
+
+    calls: list[dict[str, object]] = []
+
+    @tool("search_graph_index")
+    def search_graph_index(query: str, graph_id: str = "", limit: int = 8) -> str:
+        """Search graph evidence."""
+        calls.append({"query": query, "graph_id": graph_id, "limit": limit})
+        return json.dumps(
+            {
+                "graph_id": graph_id,
+                "evidence_status": "grounded_graph_evidence",
+                "requires_source_read": False,
+                "results": [{"doc_id": "doc-1", "title": "relationship.md", "summary": "Selected graph evidence found."}],
+            }
+        )
+
+    llm = FakeListChatModel(responses=['{"plan":[],"notes":"no tools"}', "Selected graph evidence found."])
+    tool_context = SimpleNamespace(
+        metadata={},
+        session=SimpleNamespace(metadata={"selected_graph_id": "selected_graph", "active_graph_ids": ["g1", "selected_graph"]}),
+    )
+
+    final_text, _messages, metadata = run_general_agent(
+        llm,
+        tools=[search_graph_index],
+        messages=[],
+        user_text="Find relationships between vendors, risks, approvals, and outcomes.",
+        system_prompt="Use graph evidence.",
+        force_plan_execute=True,
+        tool_context=tool_context,
+    )
+
+    assert "Selected graph evidence found" in final_text
+    assert calls and calls[0]["graph_id"] == "selected_graph"
+    assert metadata["graph_execution"]["graph_id"] == "selected_graph"
+    assert metadata["graph_execution"]["graph_id_resolution_status"] == "resolved:selected_graph_id"
+
+
+def test_general_agent_prefers_route_context_selected_graph_ids_over_active_graph_list() -> None:
+    from agentic_chatbot_next.general_agent import run_general_agent
+
+    calls: list[dict[str, object]] = []
+
+    @tool("search_graph_index")
+    def search_graph_index(query: str, graph_id: str = "", limit: int = 8) -> str:
+        """Search graph evidence."""
+        calls.append({"query": query, "graph_id": graph_id, "limit": limit})
+        return json.dumps(
+            {
+                "graph_id": graph_id,
+                "evidence_status": "grounded_graph_evidence",
+                "requires_source_read": False,
+                "results": [{"doc_id": "doc-1", "title": "relationship.md", "summary": "Route selected graph found."}],
+            }
+        )
+
+    llm = FakeListChatModel(responses=['{"plan":[],"notes":"no tools"}', "Route selected graph found."])
+    tool_context = SimpleNamespace(
+        metadata={
+            "route_context": {
+                "selected_graph_ids": ["route_selected_graph"],
+                "active_graph_ids": ["g1", "route_selected_graph"],
+            }
+        },
+        session=SimpleNamespace(metadata={}),
+    )
+
+    final_text, _messages, metadata = run_general_agent(
+        llm,
+        tools=[search_graph_index],
+        messages=[],
+        user_text="Find relationships between vendors, risks, approvals, and outcomes.",
+        system_prompt="Use graph evidence.",
+        force_plan_execute=True,
+        tool_context=tool_context,
+    )
+
+    assert "Route selected graph found" in final_text
+    assert calls and calls[0]["graph_id"] == "route_selected_graph"
+    assert metadata["graph_execution"]["graph_id"] == "route_selected_graph"
+    assert metadata["graph_execution"]["graph_id_resolution_status"] == "resolved:selected_graph_ids"
+
+
+def test_general_agent_reports_ambiguous_graph_metadata_without_searching() -> None:
+    from agentic_chatbot_next.general_agent import run_general_agent
+
+    calls: list[dict[str, object]] = []
+
+    @tool("search_graph_index")
+    def search_graph_index(query: str, graph_id: str = "", limit: int = 8) -> str:
+        """Search graph evidence."""
+        calls.append({"query": query, "graph_id": graph_id, "limit": limit})
+        return "{}"
+
+    llm = FakeListChatModel(responses=['{"plan":[],"notes":"no tools"}'])
+    tool_context = SimpleNamespace(
+        metadata={},
+        session=SimpleNamespace(metadata={"active_graph_ids": ["g1", "g2"]}),
+    )
+
+    final_text, _messages, metadata = run_general_agent(
+        llm,
+        tools=[search_graph_index],
+        messages=[],
+        user_text="Find relationships between vendors, risks, approvals, and outcomes.",
+        system_prompt="Use graph evidence.",
+        force_plan_execute=True,
+        tool_context=tool_context,
+    )
+
+    assert calls == []
+    assert "multiple candidate graphs" in final_text.lower()
+    assert metadata["graph_execution"]["graph_id"] == ""
+    assert metadata["graph_execution"]["graph_id_resolution_status"] == "ambiguous:context_graphs"
+    assert metadata["graph_execution"]["graph_id_resolution_candidates"] == ["g1", "g2"]
 
 
 def test_general_agent_plan_execute_shows_tool_schemas_to_planner() -> None:

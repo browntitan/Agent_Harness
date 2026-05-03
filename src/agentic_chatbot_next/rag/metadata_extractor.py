@@ -102,12 +102,19 @@ def build_document_index_metadata(
     source_metadata: dict[str, Any] | None = None,
 ) -> DocumentIndexMetadata:
     profile = normalize_metadata_profile(metadata_profile)
+    source_metadata = dict(source_metadata or {})
     full_text = "\n\n".join(str(doc.page_content or "") for doc in raw_docs)
     parser_chain = _parser_chain(raw_docs)
     outline = [] if profile == "off" else _extract_outline(full_text)
     sheets = [] if profile == "off" else _extract_sheet_summaries(raw_docs)
     entities = [] if profile in {"basic", "off"} else _extract_entities(full_text)
     tags = _document_tags(path, full_text, structure, sheets=sheets, profile=profile)
+    workbook_profile = source_metadata.get("workbook_profile") if isinstance(source_metadata.get("workbook_profile"), dict) else {}
+    workbook_domains = list((workbook_profile or {}).get("domain_counts") or [])
+    if workbook_profile:
+        _add_tag(tags, "status_workbook")
+    for domain in workbook_domains:
+        _add_tag(tags, str(domain))
     warnings: list[str] = []
     if not full_text.strip():
         warnings.append("No extractable text was found.")
@@ -124,7 +131,6 @@ def build_document_index_metadata(
         "process_flow_signal_count": len(PROCESS_FLOW_PATTERN.findall(full_text)),
         "clause_density": round(float(structure.clause_density or 0.0), 4),
     }
-    source_metadata = dict(source_metadata or {})
     if source_metadata.get("mime_type"):
         stats["mime_type"] = str(source_metadata.get("mime_type") or "")
 
@@ -358,10 +364,15 @@ def _chunk_tags(content: str, metadata: dict[str, Any], *, document_tags: Sequen
         _add_tag(tags, "process_flow")
     if metadata.get("sheet_name"):
         _add_tag(tags, "tabular")
+    for tag in list(metadata.get("status_domains") or []):
+        _add_tag(tags, str(tag))
+    status_metadata = metadata.get("status_workbook") if isinstance(metadata.get("status_workbook"), dict) else {}
+    for tag in list(status_metadata.get("status_domains") or []):
+        _add_tag(tags, str(tag))
     if metadata.get("clause_number"):
         _add_tag(tags, "clause")
     for tag in document_tags:
-        if tag in {"requirements", "process_flow", "tabular"}:
+        if tag in {"requirements", "process_flow", "tabular", "status_workbook", "risk", "issue", "action", "schedule", "budget", "cdrl", "requirement", "test_event", "milestone", "status"}:
             _add_tag(tags, tag)
     return tags
 

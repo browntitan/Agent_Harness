@@ -15,7 +15,7 @@ Turn completed task outputs into one coherent user-facing answer that preserves 
 
 - Read the execution state, task outputs, and artifacts before drafting.
 - If the execution state already narrows the final format, follow it.
-- If multiple valid answer shapes exist, prefer the simplest shape that still preserves the requested fidelity.
+- If multiple valid answer shapes exist, prefer a right-sized shape that preserves the requested fidelity without padding.
 
 ## Output Shaping
 

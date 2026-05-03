@@ -186,7 +186,9 @@ scheduler state, tenant token budget counters, and any budget block reason on jo
 responses.
 
 For broad document-research asks, this path is now also the owner of long-running research
-campaigns. `planner` can emit multiple `rag_worker` tasks with:
+campaigns. In current routing, those broad corpus-scale asks usually start in
+`research_coordinator`, which uses the same coordinator-mode kernel path. `planner` can emit
+multiple `rag_worker` or `rag_researcher` tasks with:
 
 - focused `doc_scope`
 - `skill_queries`
@@ -201,9 +203,11 @@ consumed artifacts such as `analysis_summary`, `entity_candidates`, `keyword_win
 artifacts, persists them into session metadata, emits handoff progress events, and injects the
 approved subset into downstream worker requests.
 
-Revision rounds are now capped by `MAX_REVISION_ROUNDS` / `settings.max_revision_rounds`
-(default `4`). The cap applies to finalizer/verifier rounds only; planner and worker batches are
-not rerun inside revision loops.
+Revision rounds are capped by `MAX_REVISION_ROUNDS` / `settings.max_revision_rounds`
+(default `8`). The kernel then applies an effective cap by workflow type: inventory-style
+answers are capped lower, deep grounded synthesis can use up to four rounds, and most other
+flows are capped at three. The cap applies to finalizer/verifier rounds only; planner and worker
+batches are not rerun inside revision loops.
 
 ## 7. Query loop execution modes
 
@@ -218,6 +222,8 @@ dispatches by mode:
 - `react` `graph_manager` can start directly from graph fast-path routing or a requested-agent
   override, then use managed graph tools for graph inventory, graph-backed evidence, and source
   planning
+- `react` `rag_researcher` is manual/delegated and uses indexed-doc, graph, and deferred
+  `rag_workbench` tools before final `rag_agent_tool` synthesis
 - `memory_maintainer` skips prompt/model execution and runs direct heuristic extraction when
   `MEMORY_ENABLED=true`
 
@@ -231,11 +237,17 @@ metadata, and disables nested internal fan-out.
 
 There are now two distinct fan-out layers for document work:
 
-- coordinator-owned campaign workers for user-visible multi-task research
+- `research_coordinator` / coordinator-owned campaign workers for user-visible multi-task
+  research
 - runtime-owned internal evidence workers for bounded deep-retrieval assistance inside a
   single RAG run
 
 `rag_worker` participates in both, but it does not become a durable sub-agent manager.
+When selected evidence points at CSV/XLS/XLSX sources and the query needs lookup, profiling,
+aggregation, filtering, or comparison, the RAG runtime bridge can also run inline
+`data_analyst` tabular-evidence jobs. Those jobs inspect the file with `profile_dataset` first
+and return structured source refs that are converted back into citation-eligible synthetic
+tabular evidence.
 
 The class still contains a `basic` handler for parity, but the normal BASIC service path
 goes straight through `RuntimeKernel.process_basic_turn(...)` rather than through

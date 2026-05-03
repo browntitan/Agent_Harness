@@ -1255,6 +1255,48 @@ def build_tool_definitions(ctx: Any) -> Dict[str, ToolDefinition]:
             requires_workspace=True,
             background_safe=True,
         ),
+        "profile_workbook_status": _tool(
+            name="profile_workbook_status",
+            group="analyst",
+            builder=build_analyst_tools,
+            description="Profile Excel workbook sheets, headers, named tables, merged cells, and status-oriented columns.",
+            args_schema=_object_schema(
+                {
+                    "doc_id": _string_field("Workbook reference or filename."),
+                    "sheet_name": _string_field("Optional Excel sheet name."),
+                }
+            ),
+            when_to_use="Use before status workbook extraction or when the user asks what status data a workbook contains.",
+            avoid_when="Avoid for CSV-only profiling or arbitrary dataframe statistics where profile_dataset is better.",
+            output_description="Returns workbook sheet inventory, header rows, named tables, merged cells, column roles, and detected status domains.",
+            examples=["profile_workbook_status(doc_id='tracker.xlsx')"],
+            keywords=["workbook status", "risks", "issues", "actions", "milestones", "cdrl", "requirements"],
+            read_only=True,
+            requires_workspace=True,
+            background_safe=True,
+        ),
+        "extract_workbook_status": _tool(
+            name="extract_workbook_status",
+            group="analyst",
+            builder=build_analyst_tools,
+            description="Extract cited status records from Excel workbook risks, issues, actions, schedules, budgets, CDRLs, requirements, test events, and milestones.",
+            args_schema=_object_schema(
+                {
+                    "doc_id": _string_field("Workbook reference or filename."),
+                    "domains_csv": _string_field("Optional comma-separated domains such as risk,issue,action,schedule,budget,cdrl,requirement,test_event,milestone,status."),
+                    "sheet_name": _string_field("Optional Excel sheet name."),
+                    "status_filter": _string_field("Optional status text filter such as open, late, blocked, or complete."),
+                }
+            ),
+            when_to_use="Use when a user or RAG task asks for workbook risks, issues, actions, dates, owners, CDRLs, requirements, test events, milestones, schedule, or budget status with row/cell citations.",
+            avoid_when="Avoid for open-ended transformations or charting; this tool is read-only and extraction-focused.",
+            output_description="Returns normalized status records with workbook, sheet, row, cell range, source refs, operations, warnings, and confidence.",
+            examples=["extract_workbook_status(doc_id='tracker.xlsx', domains_csv='risk,action')"],
+            keywords=["status extract", "risk", "issue", "action", "schedule", "budget", "cdrl", "requirement", "test event", "milestone"],
+            read_only=True,
+            requires_workspace=True,
+            background_safe=True,
+        ),
         "inspect_columns": _tool(
             name="inspect_columns",
             group="analyst",

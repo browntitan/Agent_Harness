@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
+from agentic_chatbot_next.control_panel import routes as control_panel_routes
 from agentic_chatbot_next.contracts.agents import AgentDefinition
 from agentic_chatbot_next.contracts.tools import ToolDefinition
 from agentic_chatbot_next.mcp.security import (
@@ -42,6 +46,107 @@ def test_mcp_secret_encryption_requires_key_and_never_round_trips_plaintext() ->
 
     with pytest.raises(ValueError):
         encrypt_mcp_secret(_settings(mcp_secret_encryption_key=""), "token-value")
+
+
+def test_mcp_server_environment_metadata_is_encrypted_and_sanitized() -> None:
+    settings = _settings(mcp_secret_encryption_key="server-env-secret")
+
+    metadata = control_panel_routes._metadata_with_mcp_server_environment(
+        settings,
+        {
+            "server_runtime": {
+                "kind": "docker_compose_service",
+                "service": "sam-gov-mcp",
+                "restart_supported": True,
+            },
+        },
+        {"SAM_API_KEY": "live-secret", "EMPTY_VALUE": ""},
+    )
+
+    rendered = json.dumps(metadata)
+    assert "live-secret" not in rendered
+    assert metadata["server_environment"]["configured_keys"] == ["SAM_API_KEY"]
+    encrypted = metadata["server_environment"]["encrypted_values"]
+    assert json.loads(decrypt_mcp_secret(settings, encrypted)) == {"SAM_API_KEY": "live-secret"}
+
+    sanitized = control_panel_routes._sanitize_mcp_metadata(metadata)
+    assert sanitized["server_environment"] == {
+        "configured": True,
+        "configured_keys": ["SAM_API_KEY"],
+        "delivery": "server_process_environment",
+        "restart_required": True,
+    }
+    assert "encrypted_values" not in json.dumps(sanitized)
+
+
+def test_mcp_restart_service_requires_managed_allowlisted_runtime() -> None:
+    settings = _settings(control_panel_mcp_restart_services="custom-mcp")
+
+    service = control_panel_routes._mcp_restart_service(
+        {
+            "server_runtime": {
+                "kind": "docker_compose_service",
+                "service": "custom-mcp",
+                "restart_supported": True,
+            },
+        },
+        settings,
+    )
+    assert service == "custom-mcp"
+
+    web_research_service = control_panel_routes._mcp_restart_service(
+        {
+            "server_runtime": {
+                "kind": "docker_compose_service",
+                "service": "web-research-mcp",
+                "restart_supported": True,
+            },
+        },
+        _settings(control_panel_mcp_restart_services=""),
+    )
+    assert web_research_service == "web-research-mcp"
+
+    with pytest.raises(HTTPException) as exc_info:
+        control_panel_routes._mcp_restart_service({}, settings)
+    assert exc_info.value.status_code == 400
+
+    with pytest.raises(HTTPException) as blocked_info:
+        control_panel_routes._mcp_restart_service(
+            {
+                "server_runtime": {
+                    "kind": "docker_compose_service",
+                    "service": "not-allowlisted",
+                    "restart_supported": True,
+                },
+            },
+            _settings(control_panel_mcp_restart_services="custom-mcp"),
+        )
+    assert blocked_info.value.status_code == 403
+
+
+def test_mcp_restart_command_metadata_redacts_environment_values(tmp_path: Path) -> None:
+    step = control_panel_routes.ServiceResetStep(
+        ["docker", "compose", "up", "-d", "sam-gov-mcp"],
+        env={"SAM_API_KEY": "live-secret"},
+    )
+
+    command = control_panel_routes._service_reset_command_text(step, redact_env=True)
+
+    assert "SAM_API_KEY" in command
+    assert "<redacted>" in command
+    assert "live-secret" not in command
+
+    script = control_panel_routes._build_service_reset_script(
+        engine="docker",
+        run_id="test-run",
+        repo_root=tmp_path,
+        log_path=tmp_path / "restart.log",
+        status_path=tmp_path / "restart.exitcode",
+        steps=[step],
+        include_step_env_exports=False,
+    )
+    assert "SAM_API_KEY" not in script
+    assert "live-secret" not in script
 
 
 def test_mcp_url_validation_enforces_https_and_private_network_policy() -> None:

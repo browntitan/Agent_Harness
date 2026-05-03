@@ -33,6 +33,17 @@ class DocumentRecord:
     source_etag: str = ""
     source_size_bytes: int = 0
     source_content_type: str = ""
+    active: bool = True
+    version_ordinal: int = 1
+    superseded_at: str = ""
+    parser_provenance: Dict[str, Any] = field(default_factory=dict)
+    extraction_status: str = "success"
+    extraction_error: str = ""
+    metadata_confidence: float = 0.5
+    lifecycle_phase: str = ""
+    doc_type: str = ""
+    program_entities: List[str] = field(default_factory=list)
+    signal_summary: Dict[str, Any] = field(default_factory=dict)
 
 
 class DocumentStore:
@@ -49,8 +60,11 @@ class DocumentStore:
                         (doc_id, tenant_id, collection_id, title, source_type, source_path, content_hash,
                          num_chunks, ingested_at, file_type, doc_structure_type, source_display_path, source_identity,
                          source_metadata, source_uri, source_storage_backend, source_object_bucket,
-                         source_object_key, source_etag, source_size_bytes, source_content_type)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         source_object_key, source_etag, source_size_bytes, source_content_type, active,
+                         version_ordinal, superseded_at, parser_provenance, extraction_status, extraction_error,
+                         metadata_confidence, lifecycle_phase, doc_type, program_entities, signal_summary)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (doc_id) DO UPDATE SET
                         tenant_id          = EXCLUDED.tenant_id,
                         collection_id      = EXCLUDED.collection_id,
@@ -71,7 +85,18 @@ class DocumentStore:
                         source_object_key  = EXCLUDED.source_object_key,
                         source_etag        = EXCLUDED.source_etag,
                         source_size_bytes  = EXCLUDED.source_size_bytes,
-                        source_content_type = EXCLUDED.source_content_type
+                        source_content_type = EXCLUDED.source_content_type,
+                        active             = EXCLUDED.active,
+                        version_ordinal    = EXCLUDED.version_ordinal,
+                        superseded_at      = EXCLUDED.superseded_at,
+                        parser_provenance  = EXCLUDED.parser_provenance,
+                        extraction_status  = EXCLUDED.extraction_status,
+                        extraction_error   = EXCLUDED.extraction_error,
+                        metadata_confidence = EXCLUDED.metadata_confidence,
+                        lifecycle_phase    = EXCLUDED.lifecycle_phase,
+                        doc_type           = EXCLUDED.doc_type,
+                        program_entities   = EXCLUDED.program_entities,
+                        signal_summary     = EXCLUDED.signal_summary
                     """,
                     (
                         doc.doc_id,
@@ -95,6 +120,17 @@ class DocumentStore:
                         doc.source_etag,
                         doc.source_size_bytes,
                         doc.source_content_type,
+                        bool(doc.active),
+                        int(doc.version_ordinal or 1),
+                        doc.superseded_at or None,
+                        psycopg2.extras.Json(dict(doc.parser_provenance or {})),
+                        doc.extraction_status or "success",
+                        doc.extraction_error or "",
+                        float(doc.metadata_confidence or 0.0),
+                        doc.lifecycle_phase or "",
+                        doc.doc_type or "",
+                        psycopg2.extras.Json(list(doc.program_entities or [])),
+                        psycopg2.extras.Json(dict(doc.signal_summary or {})),
                     ),
                 )
             conn.commit()
@@ -155,34 +191,23 @@ class DocumentStore:
         source_type: str = "",
         tenant_id: str = "local-dev",
         collection_id: str = "",
+        active_only: bool = True,
     ) -> List[DocumentRecord]:
         """Return all documents for tenant, optionally filtered by source_type ('kb' or 'upload')."""
+        sql = ["SELECT * FROM documents WHERE tenant_id = %s"]
+        params: List[Any] = [tenant_id]
+        if source_type:
+            sql.append("AND source_type = %s")
+            params.append(source_type)
+        if collection_id:
+            sql.append("AND collection_id = %s")
+            params.append(collection_id)
+        if active_only:
+            sql.append("AND active = TRUE")
+        sql.append("ORDER BY ingested_at")
         with get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if source_type and collection_id:
-                    cur.execute(
-                        """
-                        SELECT * FROM documents
-                        WHERE tenant_id = %s AND source_type = %s AND collection_id = %s
-                        ORDER BY ingested_at
-                        """,
-                        (tenant_id, source_type, collection_id),
-                    )
-                elif source_type:
-                    cur.execute(
-                        "SELECT * FROM documents WHERE tenant_id = %s AND source_type = %s ORDER BY ingested_at",
-                        (tenant_id, source_type),
-                    )
-                elif collection_id:
-                    cur.execute(
-                        "SELECT * FROM documents WHERE tenant_id = %s AND collection_id = %s ORDER BY ingested_at",
-                        (tenant_id, collection_id),
-                    )
-                else:
-                    cur.execute(
-                        "SELECT * FROM documents WHERE tenant_id = %s ORDER BY ingested_at",
-                        (tenant_id,),
-                    )
+                cur.execute(" ".join(sql), params)
                 rows = cur.fetchall()
         return [_row_to_record(dict(r)) for r in rows]
 
@@ -196,10 +221,13 @@ class DocumentStore:
         doc_structure_type: str = "",
         title_contains: str = "",
         limit: int = 100,
+        active_only: bool = True,
     ) -> List[DocumentRecord]:
         sql = ["SELECT * FROM documents WHERE tenant_id = %s"]
         params: List[Any] = [tenant_id]
 
+        if active_only:
+            sql.append("AND active = TRUE")
         if collection_id:
             sql.append("AND collection_id = %s")
             params.append(collection_id)
@@ -232,6 +260,58 @@ class DocumentStore:
                 cur.execute("DELETE FROM documents WHERE doc_id = %s AND tenant_id = %s", (doc_id, tenant_id))
             conn.commit()
 
+    def supersede_source_versions(
+        self,
+        *,
+        tenant_id: str,
+        collection_id: str,
+        source_type: str,
+        source_identity: str,
+        active_doc_id: str,
+        superseded_at: str = "",
+    ) -> None:
+        """Mark older rows for the same logical source inactive after a newer version succeeds."""
+        timestamp = superseded_at or (dt.datetime.utcnow().isoformat() + "Z")
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE documents
+                    SET active = FALSE,
+                        superseded_at = COALESCE(superseded_at, %s::timestamptz)
+                    WHERE tenant_id = %s
+                      AND collection_id = %s
+                      AND source_type = %s
+                      AND source_identity = %s
+                      AND doc_id <> %s
+                      AND active = TRUE
+                    """,
+                    (timestamp, tenant_id, collection_id, source_type, source_identity, active_doc_id),
+                )
+            conn.commit()
+
+    def list_document_versions(self, doc_id: str, tenant_id: str) -> List[DocumentRecord]:
+        """Return all stored versions for the logical source that owns doc_id."""
+        base = self.get_document(doc_id, tenant_id)
+        if base is None:
+            return []
+        sql = [
+            "SELECT * FROM documents WHERE tenant_id = %s AND collection_id = %s AND source_type = %s"
+        ]
+        params: List[Any] = [tenant_id, base.collection_id, base.source_type]
+        if base.source_identity:
+            sql.append("AND source_identity = %s")
+            params.append(base.source_identity)
+        else:
+            sql.append("AND title = %s")
+            params.append(base.title)
+        sql.append("ORDER BY version_ordinal DESC, ingested_at DESC, doc_id DESC")
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(" ".join(sql), params)
+                rows = cur.fetchall()
+        return [_row_to_record(dict(r)) for r in rows]
+
     def fuzzy_search_title(
         self,
         hint: str,
@@ -254,6 +334,7 @@ class DocumentStore:
                         FROM documents
                         WHERE tenant_id = %s
                           AND collection_id = %s
+                          AND active = TRUE
                           AND similarity(lower(title), lower(%s)) > 0.1
                         ORDER BY score DESC
                         LIMIT %s
@@ -267,6 +348,7 @@ class DocumentStore:
                                similarity(lower(title), lower(%s)) AS score
                         FROM documents
                         WHERE tenant_id = %s
+                          AND active = TRUE
                           AND similarity(lower(title), lower(%s)) > 0.1
                         ORDER BY score DESC
                         LIMIT %s
@@ -287,6 +369,7 @@ class DocumentStore:
                            MAX(ingested_at) AS latest_ingested_at
                     FROM documents
                     WHERE tenant_id = %s
+                      AND active = TRUE
                     GROUP BY collection_id
                     ORDER BY collection_id
                     """,
@@ -298,6 +381,7 @@ class DocumentStore:
                     SELECT collection_id, source_type, COUNT(*) AS source_count
                     FROM documents
                     WHERE tenant_id = %s
+                      AND active = TRUE
                     GROUP BY collection_id, source_type
                     """,
                     (tenant_id,),
@@ -332,7 +416,7 @@ class DocumentStore:
         with get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT doc_id, title, source_type FROM documents WHERE tenant_id = %s ORDER BY title",
+                    "SELECT doc_id, title, source_type FROM documents WHERE tenant_id = %s AND active = TRUE ORDER BY title",
                     (tenant_id,),
                 )
                 rows = cur.fetchall()
@@ -340,15 +424,7 @@ class DocumentStore:
 
 
 def _row_to_record(row: Dict[str, Any]) -> DocumentRecord:
-    raw_source_metadata = row.get("source_metadata") or {}
-    if isinstance(raw_source_metadata, str):
-        try:
-            parsed_source_metadata = json.loads(raw_source_metadata)
-        except Exception:
-            parsed_source_metadata = {}
-    else:
-        parsed_source_metadata = raw_source_metadata
-    source_metadata = dict(parsed_source_metadata or {})
+    source_metadata = dict(_coerce_json_value(row.get("source_metadata"), {}) or {})
     source_path = row.get("source_path") or ""
     source_uri = row.get("source_uri") or source_metadata.get("source_uri") or ""
     if not source_uri and source_path:
@@ -385,4 +461,30 @@ def _row_to_record(row: Dict[str, Any]) -> DocumentRecord:
             or source_metadata.get("mime_type")
             or ""
         ),
+        active=bool(True if row.get("active") is None else row.get("active")),
+        version_ordinal=int(row.get("version_ordinal") or 1),
+        superseded_at=str(row.get("superseded_at") or ""),
+        parser_provenance=dict(_coerce_json_value(row.get("parser_provenance"), {}) or {}),
+        extraction_status=str(row.get("extraction_status") or "success"),
+        extraction_error=str(row.get("extraction_error") or ""),
+        metadata_confidence=float(row.get("metadata_confidence") if row.get("metadata_confidence") is not None else 0.5),
+        lifecycle_phase=str(row.get("lifecycle_phase") or ""),
+        doc_type=str(row.get("doc_type") or ""),
+        program_entities=[
+            str(item)
+            for item in list(_coerce_json_value(row.get("program_entities"), []) or [])
+            if str(item)
+        ],
+        signal_summary=dict(_coerce_json_value(row.get("signal_summary"), {}) or {}),
     )
+
+
+def _coerce_json_value(value: Any, default: Any) -> Any:
+    if value in ("", None):
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+    return value

@@ -487,7 +487,7 @@ class PolicyAwareToolNode(ToolNode):
             from langgraph.prebuilt.tool_node import ToolRuntime
         except Exception:
             return config
-        state = self._extract_state(input) if hasattr(self, "_extract_state") else {}
+        state = self._extract_state_compat(input, config) if hasattr(self, "_extract_state") else {}
         return ToolRuntime(
             state=state,
             tool_call_id=call["id"],
@@ -498,3 +498,17 @@ class PolicyAwareToolNode(ToolNode):
             execution_info=getattr(runtime, "execution_info", None),
             server_info=getattr(runtime, "server_info", None),
         )
+
+    def _extract_state_compat(
+        self,
+        input: list[Any] | dict[str, Any] | BaseModel,
+        config: RunnableConfig,
+    ) -> Any:
+        """Call ToolNode._extract_state across LangGraph minor-version signatures."""
+        try:
+            return self._extract_state(input, config)
+        except TypeError as exc:
+            message = str(exc)
+            if "_extract_state" not in message and "positional" not in message:
+                raise
+            return self._extract_state(input)

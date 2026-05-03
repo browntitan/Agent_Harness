@@ -89,9 +89,24 @@ def _normalized_text_fingerprint(text: str) -> str:
 
 
 def _prepare_synthesis_docs(question: str, evidence_docs: Sequence[Document], *, limit: int = 6) -> list[Document]:
+    def _evidence_priority(doc: Document) -> float:
+        metadata = dict(doc.metadata or {})
+        priority = 0.0
+        if bool(metadata.get("is_synthetic_evidence")):
+            priority += 10.0
+        if str(metadata.get("source_type") or "").strip().lower() in {"tabular_analysis", "tool_result"}:
+            priority += 8.0
+        if str(metadata.get("chunk_type") or "").strip().lower() in {"tabular_analysis", "tool_result"}:
+            priority += 6.0
+        if metadata.get("sheet_name") or metadata.get("cell_range") or metadata.get("row_start") is not None:
+            priority += 4.0
+        priority += min(2.0, max(0.0, float(metadata.get("tabular_confidence") or 0.0)) * 2.0)
+        return priority
+
     prioritized = sorted(
         list(evidence_docs),
         key=lambda doc: (
+            _evidence_priority(doc),
             _title_overlap_score(question, doc),
             len(str(getattr(doc, "page_content", "") or "")),
         ),
@@ -372,6 +387,12 @@ def generate_grounded_answer(
                 "citation_id": metadata.get("chunk_id"),
                 "title": metadata.get("title"),
                 "location": render_citation_location(metadata),
+                "evidence_priority": (
+                    "binding_structured"
+                    if bool(metadata.get("is_synthetic_evidence"))
+                    or str(metadata.get("source_type") or "").strip().lower() == "tabular_analysis"
+                    else "retrieved"
+                ),
                 "text": doc.page_content[:900],
             }
         )

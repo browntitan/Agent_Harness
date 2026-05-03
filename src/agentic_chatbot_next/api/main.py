@@ -9,6 +9,7 @@ import json
 import logging
 import mimetypes
 import queue
+import re
 import shutil
 import threading
 import time
@@ -65,6 +66,7 @@ from agentic_chatbot_next.contracts.messages import SessionState
 from agentic_chatbot_next.graph.service import GraphService
 from agentic_chatbot_next.mcp.client import McpClientError
 from agentic_chatbot_next.mcp.service import McpCatalogService
+from agentic_chatbot_next.sandbox import probe_sandbox_image
 from agentic_chatbot_next.rag.inventory import (
     INVENTORY_QUERY_GRAPH_INDEXES,
     classify_inventory_query,
@@ -114,6 +116,37 @@ _DEFAULT_UI_CORS_ORIGINS = (
     "http://localhost:18000",
     "http://localhost:8000",
 )
+_SKILL_BUILDER_SYSTEM_PROMPT = """You are the Skill Pack Builder for this agent runtime.
+
+Your job is to turn operator-provided context into a retrievable skill pack draft.
+
+Output contract:
+- Return exactly one JSON object and nothing else.
+- Do not wrap the JSON in markdown fences.
+- Do not include commentary, hidden reasoning, chain-of-thought, or explanations.
+- Use this JSON shape:
+  {
+    "name": "short title",
+    "description": "one sentence",
+    "when_to_apply": "one sentence",
+    "tool_tags": ["tag"],
+    "task_tags": ["tag"],
+    "workflow": ["imperative step"],
+    "examples": ["example user request or situation"],
+    "warnings": ["optional warning"]
+  }
+
+Skill rules:
+- Build a retrievable skill only; never create executable or hybrid skill instructions.
+- Preserve the requested agent_scope exactly if you mention it.
+- Ground every workflow step and example in the supplied context and examples.
+- If context is thin, produce a conservative reusable workflow from the given fields instead of inventing facts.
+- Keep workflow steps concise, specific, and operational.
+- Do not claim tools, APIs, files, or permissions that were not supplied.
+- Do not include secrets, credentials, private tokens, policy bypasses, or unsafe instructions.
+- Do not instruct agents to fabricate citations, evidence, or unsupported claims.
+- Target this markdown shape indirectly through the JSON fields: frontmatter with name, agent_scope, tool_tags, task_tags, version: 1, enabled: true, description, when_to_apply, kind: retrievable; then # Name, ## Workflow, and optional ## Examples.
+"""
 
 
 async def _stream_upload_to_path(file: UploadFile, dest: Path, *, max_bytes: int = MAX_UPLOAD_BYTES) -> int:
@@ -369,6 +402,7 @@ def _preview_index_metadata_for_paths(
     *,
     metadata_profile: str = "auto",
     metadata_enrichment: str = "deterministic",
+    providers: object | None = None,
     source_metadata_by_path: Dict[str, Dict[str, Any]] | None = None,
     source_display_paths: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
@@ -386,6 +420,7 @@ def _preview_index_metadata_for_paths(
                 path,
                 metadata_profile=metadata_profile,
                 metadata_enrichment=metadata_enrichment,
+                providers=providers,
                 source_metadata=_source_metadata_for_path(source_metadata, path),
             )
             summary = dict(preview.get("metadata_summary") or {})
@@ -447,6 +482,18 @@ class SkillPackUpsertRequest(BaseModel):
     version_parent: Optional[str] = None
     kind: Optional[str] = None
     execution_config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillBuildDraftRequest(BaseModel):
+    context: str = ""
+    examples: str = ""
+    name: str = ""
+    agent_scope: str = "general"
+    target_agent: str = ""
+    tool_tags: List[str] = Field(default_factory=list)
+    task_tags: List[str] = Field(default_factory=list)
+    description: str = ""
+    when_to_apply: str = ""
 
 
 class SkillStatusRequest(BaseModel):
@@ -1665,6 +1712,207 @@ def _default_skill_description(
     return f"User-defined {scope} skill pack for {skill_name}."
 
 
+def _skill_builder_clean_scalar(raw: Any, *, default: str = "", max_chars: int = 500) -> str:
+    if isinstance(raw, (list, tuple)):
+        text = " ".join(str(item or "").strip() for item in raw if str(item or "").strip())
+    else:
+        text = str(raw or "")
+    text = re.sub(r"\s+", " ", text.replace("\r", " ").replace("\n", " ")).strip()
+    if not text:
+        text = default
+    return text[:max_chars].strip()
+
+
+def _skill_builder_items(raw: Any) -> List[str]:
+    if raw is None:
+        values: List[Any] = []
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = re.split(r"[\n;]+", str(raw or ""))
+
+    items: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _skill_builder_clean_scalar(value, max_chars=600)
+        text = re.sub(r"^(?:[-*]|\d+[.)])\s+", "", text).strip()
+        if not text or text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        items.append(text)
+    return items
+
+
+def _skill_builder_tag_list(raw: Any, *, fallback: List[str]) -> List[str]:
+    if isinstance(raw, str):
+        values: List[Any] = re.split(r"[,\n]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = []
+    tags: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        tag = _skill_builder_clean_scalar(value, max_chars=80).replace(",", " ").strip()
+        if not tag or tag.lower() in seen:
+            continue
+        seen.add(tag.lower())
+        tags.append(tag)
+    return tags or list(fallback)
+
+
+def _skill_builder_markdown_list(raw: Any, *, fallback: str = "") -> str:
+    items = _skill_builder_items(raw)
+    if not items and fallback:
+        items = _skill_builder_items(fallback)
+    if not items:
+        return ""
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _render_skill_builder_markdown(
+    *,
+    name: str,
+    agent_scope: str,
+    description: str,
+    tool_tags: List[str],
+    task_tags: List[str],
+    when_to_apply: str,
+    workflow: str,
+    examples: str,
+) -> str:
+    lines = [
+        "---",
+        f"name: {name}",
+        f"agent_scope: {agent_scope}",
+        f"tool_tags: {', '.join(tool_tags)}",
+        f"task_tags: {', '.join(task_tags)}",
+        "version: 1",
+        "enabled: true",
+        f"description: {description}",
+        f"when_to_apply: {when_to_apply}",
+        "kind: retrievable",
+        "---",
+        f"# {name}",
+        "",
+        "## Workflow",
+        "",
+        workflow,
+        "",
+    ]
+    if examples.strip():
+        lines.extend(["## Examples", "", examples.strip(), ""])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _parse_skill_builder_json(text: str) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(text.strip())
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="Skill builder LLM returned invalid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail="Skill builder LLM returned JSON that was not an object.")
+    return parsed
+
+
+def _skill_builder_chat_model(runtime: Runtime) -> Any:
+    kernel = getattr(runtime.bot, "kernel", None)
+    providers = None
+    resolve_base_providers = getattr(kernel, "resolve_base_providers", None)
+    if callable(resolve_base_providers):
+        providers = resolve_base_providers()
+    if providers is None:
+        providers = getattr(getattr(runtime.bot, "ctx", None), "providers", None)
+    if providers is None:
+        providers = getattr(kernel, "providers", None)
+    chat = getattr(providers, "chat", None) if providers is not None else None
+    if chat is None:
+        raise HTTPException(status_code=503, detail="Skill builder requires a configured chat LLM.")
+    return chat
+
+
+def _skill_builder_prompt_payload(request: SkillBuildDraftRequest) -> Dict[str, Any]:
+    agent_scope = _skill_builder_clean_scalar(request.agent_scope, default="general", max_chars=120) or "general"
+    return {
+        "context": str(request.context or "").strip(),
+        "examples": str(request.examples or "").strip(),
+        "current_name": str(request.name or "").strip(),
+        "agent_scope": agent_scope,
+        "target_agent": str(request.target_agent or "").strip(),
+        "preferred_tool_tags": list(request.tool_tags or _default_skill_tool_tags(agent_scope)),
+        "preferred_task_tags": list(request.task_tags or _default_skill_task_tags(agent_scope)),
+        "current_description": str(request.description or "").strip(),
+        "current_when_to_apply": str(request.when_to_apply or "").strip(),
+    }
+
+
+def _skill_builder_draft_from_output(request: SkillBuildDraftRequest, output: Dict[str, Any]) -> Dict[str, Any]:
+    agent_scope = _skill_builder_clean_scalar(request.agent_scope, default="general", max_chars=120) or "general"
+    default_name = _skill_builder_clean_scalar(request.name, default="New Skill", max_chars=120) or "New Skill"
+    name = _skill_builder_clean_scalar(output.get("name"), default=default_name, max_chars=120) or default_name
+    description = _skill_builder_clean_scalar(
+        output.get("description"),
+        default=_skill_builder_clean_scalar(
+            request.description,
+            default=f"User-defined {agent_scope.replace('_', ' ')} skill.",
+            max_chars=220,
+        ),
+        max_chars=300,
+    )
+    when_to_apply = _skill_builder_clean_scalar(
+        output.get("when_to_apply"),
+        default=_skill_builder_clean_scalar(
+            request.when_to_apply,
+            default="Use when this reusable workflow fits the user task.",
+            max_chars=220,
+        ),
+        max_chars=300,
+    )
+    tool_tags = _skill_builder_tag_list(
+        output.get("tool_tags"),
+        fallback=list(request.tool_tags or _default_skill_tool_tags(agent_scope)),
+    )
+    task_tags = _skill_builder_tag_list(
+        output.get("task_tags"),
+        fallback=list(request.task_tags or _default_skill_task_tags(agent_scope)),
+    )
+    workflow = _skill_builder_markdown_list(
+        output.get("workflow"),
+        fallback="- Clarify the user task and identify the relevant reusable workflow.\n- Apply the supplied guidance without inventing unsupported evidence.",
+    )
+    examples = _skill_builder_markdown_list(output.get("examples"), fallback=request.examples)
+    warnings = _skill_builder_items(output.get("warnings"))
+    body_markdown = _render_skill_builder_markdown(
+        name=name,
+        agent_scope=agent_scope,
+        description=description,
+        tool_tags=tool_tags,
+        task_tags=task_tags,
+        when_to_apply=when_to_apply,
+        workflow=workflow,
+        examples=examples,
+    )
+    try:
+        parsed = load_skill_pack_from_text(
+            body_markdown,
+            source_path="api://skills/build-draft.md",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"Skill builder produced an invalid skill draft: {exc}") from exc
+    return {
+        "body_markdown": body_markdown,
+        "name": parsed.name,
+        "agent_scope": parsed.agent_scope,
+        "description": parsed.description,
+        "tool_tags": list(parsed.tool_tags),
+        "task_tags": list(parsed.task_tags),
+        "when_to_apply": parsed.when_to_apply,
+        "workflow": workflow,
+        "examples": examples,
+        "warnings": warnings + list(parsed.warnings or []),
+    }
+
+
 def _materialize_skill_pack(
     request: SkillPackUpsertRequest,
     *,
@@ -2187,12 +2435,81 @@ def health_live() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+def _runtime_capability_status(runtime: Runtime, *, include_diagnostics: bool = False) -> Dict[str, Any]:
+    settings = runtime.settings
+    kernel = getattr(runtime.bot, "kernel", None)
+    stores = getattr(getattr(runtime.bot, "ctx", None), "stores", None)
+    graph_store = getattr(stores, "graph_index_store", None)
+    graph_count = 0
+    graph_query_ready_count = 0
+    if graph_store is not None and hasattr(graph_store, "list_indexes"):
+        try:
+            graphs = list(
+                graph_store.list_indexes(
+                    tenant_id=str(getattr(settings, "default_tenant_id", "local-dev") or "local-dev"),
+                    limit=100,
+                )
+            )
+            graph_count = len(graphs)
+            graph_query_ready_count = sum(1 for item in graphs if bool(getattr(item, "query_ready", False)))
+        except Exception:
+            graph_count = 0
+            graph_query_ready_count = 0
+
+    sandbox_status: Dict[str, Any] = {
+        "configured": bool(str(getattr(settings, "sandbox_docker_image", "") or "").strip()),
+        "image": str(getattr(settings, "sandbox_docker_image", "") or ""),
+        "ready": None,
+        "probe_skipped": not include_diagnostics,
+    }
+    if include_diagnostics and sandbox_status["configured"]:
+        probe = probe_sandbox_image(
+            str(getattr(settings, "sandbox_docker_image", "") or ""),
+            timeout_seconds=3.0,
+        )
+        sandbox_status.update(
+            {
+                "ready": bool(probe.ok),
+                "detail": str(probe.detail or ""),
+                "remediation": str(probe.remediation or ""),
+                "probe_skipped": False,
+            }
+        )
+
+    memory_configured = bool(getattr(settings, "memory_enabled", True))
+    memory_store = getattr(kernel, "memory_store", None)
+    file_memory_store = getattr(kernel, "file_memory_store", None)
+    return {
+        "memory": {
+            "configured": memory_configured,
+            "ready": bool(memory_configured and (memory_store is not None or file_memory_store is not None)),
+            "memory_store_ready": memory_store is not None,
+            "file_memory_store_ready": file_memory_store is not None,
+        },
+        "analyst_sandbox": sandbox_status,
+        "graph": {
+            "catalog_available": graph_store is not None,
+            "index_count": graph_count,
+            "query_ready_count": graph_query_ready_count,
+            "query_ready": graph_query_ready_count > 0,
+        },
+        "uploads": {
+            "document_store_available": getattr(stores, "doc_store", None) is not None,
+            "workspace_root": str(getattr(settings, "workspace_dir", "") or ""),
+        },
+    }
+
+
 @app.get("/health/ready")
-def health_ready(runtime_or_error: Runtime | Dict[str, Any] = Depends(get_runtime_readiness)) -> JSONResponse:
+def health_ready(
+    runtime_or_error: Runtime | Dict[str, Any] = Depends(get_runtime_readiness),
+    include_diagnostics: bool = False,
+) -> JSONResponse:
     if isinstance(runtime_or_error, dict):
         return JSONResponse(status_code=503, content=runtime_or_error)
 
     runtime = runtime_or_error
+    capability_status = _runtime_capability_status(runtime, include_diagnostics=include_diagnostics)
     kb_status = runtime.bot.get_kb_status(
         runtime.settings.default_tenant_id,
         refresh=True,
@@ -2210,11 +2527,16 @@ def health_ready(runtime_or_error: Runtime | Dict[str, Any] = Depends(get_runtim
                 "sync_attempted": kb_status.sync_attempted,
                 "sync_error": kb_status.sync_error,
                 "suggested_fix": kb_status.suggested_fix,
+                "capability_status": capability_status,
             },
         )
     return JSONResponse(
         status_code=200,
-        content={"status": "ready", "model": runtime.settings.gateway_model_id},
+        content={
+            "status": "ready",
+            "model": runtime.settings.gateway_model_id,
+            "capability_status": capability_status,
+        },
     )
 
 
@@ -2326,6 +2648,60 @@ def list_skills(
             )
             for item in skills
         ],
+    }
+
+
+@app.post("/v1/skills/build-draft")
+def build_skill_draft(
+    request: SkillBuildDraftRequest,
+    runtime: Runtime = Depends(get_runtime_or_503),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    x_user_email: Optional[str] = Header(None, alias="X-User-Email"),
+    x_openwebui_user_email: Optional[str] = Header(None, alias="X-OpenWebUI-User-Email"),
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+) -> Dict[str, Any]:
+    ctx = get_request_context(
+        runtime,
+        conversation_id=None,
+        request_id="",
+        tenant_id=x_tenant_id,
+        user_id=x_user_id,
+        user_email=_request_user_email(x_user_email, x_openwebui_user_email),
+    )
+    if x_admin_token is None:
+        if not _skill_management_allowed(ctx):
+            raise HTTPException(status_code=403, detail="Skill mutations require an admin token or manage permission.")
+    else:
+        require_admin_token(runtime.settings, x_admin_token=x_admin_token)
+
+    chat = _skill_builder_chat_model(runtime)
+    prompt_payload = _skill_builder_prompt_payload(request)
+    user_prompt = (
+        "Build a retrievable skill draft from this JSON input. "
+        "Return only the JSON object required by the system instructions.\n\n"
+        f"{json.dumps(prompt_payload, indent=2, sort_keys=True)}"
+    )
+    try:
+        response = chat.invoke(
+            [
+                SystemMessage(content=_SKILL_BUILDER_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+            ]
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Skill builder LLM call failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Skill builder LLM call failed: {exc}") from exc
+
+    text = _coerce_content(getattr(response, "content", response)).strip()
+    if not text:
+        raise HTTPException(status_code=502, detail="Skill builder LLM returned an empty response.")
+    parsed = _parse_skill_builder_json(text)
+    return {
+        "object": "skill.build_draft",
+        "draft": _skill_builder_draft_from_output(request, parsed),
     }
 
 
@@ -4875,6 +5251,7 @@ def ingest_documents(
             valid_paths,
             metadata_profile=request.metadata_profile,
             metadata_enrichment=request.metadata_enrichment,
+            providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
             source_metadata_by_path=dict(request.source_metadata or {}),
             source_display_paths=dict(request.source_display_paths or {}),
         )
@@ -4904,6 +5281,7 @@ def ingest_documents(
         source_metadata_by_path=dict(request.source_metadata or {}),
         metadata_profile=request.metadata_profile,
         metadata_enrichment=request.metadata_enrichment,
+        providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
     )
 
     # Copy ingested files into the active session workspace keyed by session_id.
@@ -5101,6 +5479,7 @@ async def upload_files(
             saved_paths,
             metadata_profile=metadata_profile,
             metadata_enrichment=metadata_enrichment,
+            providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
             source_metadata_by_path=source_metadata_by_path,
             source_display_paths=source_display_paths_by_path,
         )
@@ -5133,6 +5512,7 @@ async def upload_files(
             source_metadata_by_path=source_metadata_by_path,
             metadata_profile=metadata_profile,
             metadata_enrichment=metadata_enrichment,
+            providers=getattr(getattr(runtime.bot, "ctx", None), "providers", None),
         )
 
     ws_session_id = f"{ctx.tenant_id}:{ctx.user_id}:{ctx.conversation_id}"

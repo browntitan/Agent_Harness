@@ -152,6 +152,36 @@ Caller-facing retrieval controls now include:
 
 - `search_mode`
 - `max_search_rounds`
+- `research_profile`
+- `coverage_goal`
+- `result_mode`
+- `controller_hints_json`
+- `skill_context`
+
+`controller_hints_json` must be a JSON object string. Invalid JSON returns a warning-shaped
+stable RAG contract and does not call the internal RAG controller.
+
+### RAG workbench cluster
+
+The `rag_workbench` group is a deferred specialist surface for exploratory grounded research.
+These tools are eager for `rag_researcher` and discoverable through deferred tool discovery
+for agents that are explicitly allowed to use them:
+
+- `plan_rag_queries`
+- `search_corpus_chunks`
+- `grep_corpus_chunks`
+- `fetch_chunk_window`
+- `inspect_document_structure`
+- `search_document_sections`
+- `filter_indexed_docs`
+- `grade_evidence_candidates`
+- `prune_evidence_candidates`
+- `validate_evidence_plan`
+- `build_rag_controller_hints`
+
+The workbench is not the final answer surface. It lets a specialist plan query facets,
+inspect chunks and document structure, grade/prune evidence, validate coverage, and package
+safe controller hints before calling `rag_agent_tool` for final citation-safe synthesis.
 
 ### Graph gateway cluster
 
@@ -182,6 +212,7 @@ surfaces and found through `discover_tools`:
 ### Analyst cluster
 
 - `load_dataset`
+- `profile_dataset`
 - `inspect_columns`
 - `execute_code`
 - `run_nlp_column_task`
@@ -193,10 +224,10 @@ surfaces and found through `discover_tools`:
 - `workspace_read`
 - `workspace_list`
 
-`run_nlp_column_task` is the bounded provider-backed NLP path for row-level text
-classification and summarization. `return_file` registers an existing workspace
-file as a user-facing download artifact without moving it out of the session
-workspace.
+`profile_dataset` profiles CSV and Excel data, including all workbook sheets when no sheet is
+specified. `run_nlp_column_task` is the bounded provider-backed NLP path for row-level text
+classification and summarization. `return_file` registers an existing workspace file as a
+user-facing download artifact without moving it out of the session workspace.
 
 ### Orchestration cluster
 
@@ -248,7 +279,7 @@ mailbox never elevates tool access, sandbox permissions, skill scope, or worker 
 - memory tools when `MEMORY_ENABLED=true`
 - `rag_agent_tool`
 - indexed-doc helpers
-- graph gateway read/search tools
+- graph inventory tools
 - `search_skills`
 - orchestration tools
 
@@ -258,8 +289,9 @@ the live registry.
 
 `memory_maintainer` is only actually launchable when `MEMORY_ENABLED=true`.
 
-For broad corpus-mining tasks, `general` should prefer `coordinator` rather than trying to
-simulate a long-running research campaign through repeated direct tool calls.
+For broad corpus-mining tasks, `general` should prefer delegation to a coordinator role rather
+than trying to simulate a long-running research campaign through repeated direct tool calls.
+When the router owns the initial start, deep corpus work now prefers `research_coordinator`.
 
 ### `coordinator`
 
@@ -271,6 +303,16 @@ kernel handles planning, task batching, finalization, and optional verification 
 For document-research campaigns, `planner` now emits one or more `rag_worker` tasks with
 focused `doc_scope`, `skill_queries`, and structured RAG hint fields. `coordinator`
 remains the owner of durable worker spawning and progress tracking.
+
+### `research_coordinator`
+
+- orchestration tools only
+
+`research_coordinator` is also `mode: coordinator`, but its metadata marks it as the
+research-campaign manager. The router prefers it for deep indexed-corpus discovery,
+cross-document inventories, exhaustive searches, and broad reconciliation work. Its worker
+surface includes `planner`, `rag_worker`, `rag_researcher`, `general`, `graph_manager`,
+`finalizer`, and `verifier`.
 
 ### `utility`
 
@@ -284,6 +326,7 @@ remains the owner of durable worker spawning and progress tracking.
 ### `data_analyst`
 
 - dataset inspection
+- dataset profiling through `profile_dataset`
 - bounded NLP column tasks
 - Docker execution
 - calculator
@@ -297,12 +340,18 @@ remains the owner of durable worker spawning and progress tracking.
 
 The live `data_analyst` role is intentionally mixed-mode:
 
+- `profile_dataset` is the first-pass profile path, including multi-sheet workbooks
 - `execute_code` is the open-ended pandas, statistics, and chart path
 - `run_nlp_column_task` is the bounded LLM path for row-level text work
 - `return_file` publishes derived workspace files through the API download flow
 
 `execute_code` now assumes the configured offline analyst image already contains the analyst
 stack. The runtime no longer installs packages inside the sandbox at turn time.
+
+The RAG bridge may invoke `data_analyst` as a worker for tabular evidence. That worker prompt
+requires `profile_dataset` first, then allows `inspect_columns` or `execute_code` only when the
+RAG question needs lookup, profiling, filtering, aggregation, or comparison over spreadsheet
+evidence.
 
 ### `verifier`
 
@@ -337,6 +386,22 @@ GraphRAG, graph inventory, relationship, and source-planning turns. It can also 
 launched by `general` or `coordinator` when a broader task needs managed-graph inspection or
 graph-aware source planning.
 
+### `rag_researcher`
+
+- indexed-doc helpers
+- `rag_agent_tool`
+- all `rag_workbench` tools
+- graph source-planning helpers: `search_graph_index` and `explain_source_plan`
+- `search_skills`
+- bounded peer follow-up through `invoke_agent`
+- team mailbox tools when `TEAM_MAILBOX_ENABLED=true`
+
+`rag_researcher` is a normal `react` role for exploratory grounded retrieval. It is not a
+router-selected fast path. It can be launched manually through
+`metadata.requested_agent="rag_researcher"` or delegated by a coordinator/general flow, and it
+should finish by handing narrowed docs, evidence, and `controller_hints_json` to
+`rag_agent_tool`.
+
 ### `rag_worker`
 
 No top-level tool exposure. It delegates to the next-runtime RAG contract flow, which uses
@@ -346,6 +411,8 @@ That means grounded document work now appears in two live shapes:
 
 - direct specialist starts, where the router or policy layer begins in `rag_worker`
 - delegated tool-path starts, where `general` or `verifier` calls `rag_agent_tool`
+- exploratory researcher starts, where `rag_researcher` uses workbench tools before final
+  `rag_agent_tool` synthesis
 
 The demo notebook keeps both shapes visible. It can pin `general` via
 `metadata.requested_agent=general` when it wants to showcase tool traces rather than the direct
@@ -387,6 +454,8 @@ Design boundary:
 
 - `rag_worker` does not receive `spawn_worker`
 - `rag_worker` is not a durable worker manager
+- `rag_worker` remains the direct bounded lookup path, while deep corpus campaigns usually
+  start in `research_coordinator`
 - prompt-driven agents may still call `search_skills`, but `rag_worker` does not depend on
   free-form skill search as its primary control surface
 - coordinator-owned typed handoffs remain the preferred collaboration path for planned
@@ -394,6 +463,9 @@ Design boundary:
 - prompt-backed agents may now use `invoke_agent` for bounded same-session peer follow-ups,
   and `rag_worker` may make one bounded async peer delegation before final synthesis without
   becoming a full ReAct tool user
+- when spreadsheet or CSV evidence needs row/column reasoning, the RAG bridge can request a
+  bounded `data_analyst` tabular evidence worker; that path profiles with `profile_dataset`
+  first and returns structured evidence to the RAG ledger
 
 ### `memory_maintainer`
 
@@ -417,6 +489,8 @@ Those modules expose operations such as:
 - clause and requirement extraction
 - document diff / comparison
 - chunk window fetches
+- rag workbench query planning, metadata filtering, structure inspection, section search,
+  evidence grading/pruning, coverage validation, and controller-hint building
 - collection listing
 - scratchpad helpers
 - optional web-search helpers

@@ -98,12 +98,12 @@ def test_agent_provider_resolver_returns_base_bundle_without_override(tmp_path: 
 def test_agent_provider_resolver_reuses_cached_bundle_for_identical_override_tuples(tmp_path: Path, monkeypatch) -> None:
     settings = _runtime_settings(tmp_path)
     settings.agent_chat_model_overrides = {
-        "general": "gpt-oss:20b",
-        "utility": "gpt-oss:20b",
+        "general": "nemotron-cascade-2:30b",
+        "utility": "nemotron-cascade-2:30b",
     }
     settings.agent_judge_model_overrides = {
-        "general": "gpt-oss:20b",
-        "utility": "gpt-oss:20b",
+        "general": "nemotron-cascade-2:30b",
+        "utility": "nemotron-cascade-2:30b",
     }
     base_providers = _provider_bundle(chat_text="base")
     calls: list[tuple[str | None, str | None, object]] = []
@@ -128,7 +128,7 @@ def test_agent_provider_resolver_reuses_cached_bundle_for_identical_override_tup
     utility_bundle = resolver.for_agent("utility")
 
     assert general_bundle is utility_bundle
-    assert calls == [("gpt-oss:20b", "gpt-oss:20b", base_providers.embeddings, None, None)]
+    assert calls == [("nemotron-cascade-2:30b", "nemotron-cascade-2:30b", base_providers.embeddings, None, None)]
 
 
 def test_agent_provider_resolver_includes_output_caps_in_bundle_identity(tmp_path: Path, monkeypatch) -> None:

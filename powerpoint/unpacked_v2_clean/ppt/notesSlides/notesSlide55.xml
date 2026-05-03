@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="0" cy="0"/>
+          <a:chOff x="0" y="0"/>
+          <a:chExt cx="0" cy="0"/>
+        </a:xfrm>
+      </p:grpSpPr>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Slide Image Placeholder 1"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldImg"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="3" name="Notes Placeholder 2"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="body" idx="1"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US" dirty="0"/>
+              <a:t>This flow demonstrates the research_coordinator, which is distinct from the regular coordinator. The user uploads two contracts and asks to compare liability clauses and flag risks. The router detects attachments plus a coordinator campaign intent pattern and routes to research_coordinator. The key difference from the regular coordinator is the worker pool: research_coordinator includes rag_researcher in its allowed_worker_agents list alongside planner, rag_worker, general, graph_manager, finalizer, and verifier. This means it can dispatch the specialized rag_researcher agent for fine-grained corpus exploration. The research planner decomposes the task into parallel document extraction jobs. Two rag_worker instances run simultaneously -- one extracting liability clauses from Contract A, the other from Contract B. Each worker gets a scoped copy of the parent SessionState via _build_scoped_worker_state(), which means workers cannot pollute each other's session data. This is critical for parallel execution -- without session scoping, two workers writing to the same session would create race conditions. The handoff artifact system passes typed intermediate results between pipeline stages. When the rag_workers finish, they produce doc_digest and clause_redline_inventory artifacts. These artifacts have a whitelist controlling which downstream agents can consume them -- the finalizer and general agent can read clause inventories, but a utility agent cannot. The general agent then cross-references the extracted clauses, comparing indemnification limits, force majeure definitions, termination rights, and liability caps between the two contracts. The finalizer synthesizes a structured comparison report. The verifier then performs coverage checking: did we find all liability-related sections? Are the cited clause numbers actually in the source documents? If the verifier finds gaps -- say a limitation of liability section was mentioned in Contract B's table of contents but never extracted -- it triggers a revision loop. The planner receives the verifier's feedback and creates a targeted follow-up task. This loop can run up to 4 rounds, configurable via max_revision_rounds. The result is a comprehensive comparison with clause-level citations and a risk assessment, all verified against the source documents.</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="4" name="Slide Number Placeholder 3"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="sldNum" sz="quarter" idx="10"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:fld id="{F7021451-1387-4CA6-816F-3879F97B5CBC}" type="slidenum">
+              <a:rPr lang="en-US"/>
+              <a:t>0</a:t>
+            </a:fld>
+            <a:endParaRPr lang="en-US"/>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:notes>

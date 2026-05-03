@@ -27,6 +27,11 @@ package provisioning: the sandbox image itself must already contain the analyst 
 `python run.py build-sandbox-image`, `python run.py doctor --strict`, plus notebook preflight now
 verify that image contract before analyst demos run.
 
+The newer `profile_dataset` tool and the RAG-to-analyst tabular evidence handoff also use this
+same session workspace and indexed-document access path. They do not introduce a separate
+tabular-evidence storage boundary; any user-facing derived file still becomes a normal
+workspace-backed artifact only when the analyst publishes it through `return_file`.
+
 ## Live creation paths
 
 The workspace is created by the live next runtime in three common paths:
@@ -80,6 +85,7 @@ analyst helpers running inside the offline image configured by `SANDBOX_DOCKER_I
 - files written by `workspace_write`
 - files created by sandbox code
 - derived CSV, Excel, and chart outputs created by the data analyst
+- profile-driven tabular outputs when they are explicitly materialized as workspace files
 - long-form writing drafts such as `long_output_<hash>_<slug>.md`
 - long-form manifest files such as `long_output_<hash>_manifest.json`
 - optional long-form per-section files such as `long_output_<hash>_section_01.md`
@@ -99,6 +105,8 @@ analyst helpers running inside the offline image configured by `SANDBOX_DOCKER_I
 - extracted requirement statement records
 - coordinator-owned typed handoff artifacts such as `analysis_summary`, `entity_candidates`,
   `keyword_windows`, `doc_focus`, `evidence_request`, and `evidence_response`
+- RAG tabular evidence worker JSON when it stays as structured runtime metadata rather than a
+  returned workspace file
 
 Those live under `data/runtime/...`, PostgreSQL-backed stores, configured object storage, or
 GraphRAG project directories depending on the subsystem.
@@ -108,6 +116,8 @@ Design note:
 - workspace files are user-visible or sandbox-visible filesystem artifacts
 - typed handoffs are structured runtime metadata passed between workers through the
   coordinator layer
+- RAG tabular handoff findings are structured runtime metadata unless an analyst tool writes
+  and returns a workspace file
 - long-form drafts and manifests are workspace-backed document artifacts owned by the session,
   not coordinator handoff artifacts
 

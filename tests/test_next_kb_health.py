@@ -4,6 +4,8 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agentic_chatbot_next.persistence.postgres.documents import DocumentRecord
 from agentic_chatbot_next.rag.ingest import (
     build_collection_health_report,
@@ -86,7 +88,7 @@ def _stores() -> SimpleNamespace:
     )
 
 
-def test_ingest_paths_replaces_prior_active_doc_for_same_kb_source(tmp_path: Path) -> None:
+def test_ingest_paths_retains_prior_versions_and_marks_latest_active(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     stores = _stores()
     path = settings.kb_dir / "ARCHITECTURE.md"
@@ -114,9 +116,16 @@ def test_ingest_paths_replaces_prior_active_doc_for_same_kb_source(tmp_path: Pat
 
     assert len(second_doc_ids) == 1
     records = stores.doc_store.list_documents(source_type="kb", tenant_id="tenant", collection_id="default")
-    assert len(records) == 1
-    assert records[0].doc_id == second_doc_ids[0]
-    assert records[0].doc_id != first_doc_ids[0]
+    assert len(records) == 2
+    by_id = {record.doc_id: record for record in records}
+    assert by_id[first_doc_ids[0]].active is False
+    assert by_id[first_doc_ids[0]].superseded_at
+    assert by_id[second_doc_ids[0]].active is True
+    assert by_id[second_doc_ids[0]].version_ordinal == 2
+
+    health = build_kb_health_report(settings, stores, tenant_id="tenant", collection_id="default")
+    assert health.stale_version_count == 1
+    assert len(health.duplicate_groups) == 0
 
 
 def test_ingest_paths_persists_remote_blob_reference(tmp_path: Path) -> None:
@@ -163,6 +172,37 @@ def test_ingest_paths_persists_remote_blob_reference(tmp_path: Path) -> None:
     assert record.source_storage_backend == "s3"
     assert record.source_object_bucket == "agentic-uploads"
     assert record.source_object_key == "uploads/staged-upload.txt"
+
+
+def test_ingest_paths_supports_pptx_parser_provenance(tmp_path: Path) -> None:
+    pptx = pytest.importorskip("pptx")
+    settings = _settings(tmp_path)
+    stores = _stores()
+    path = tmp_path / "program_status.pptx"
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide.shapes.title.text = "Program Status"
+    text_box = slide.shapes.add_textbox(0, 0, 5000000, 1000000)
+    text_box.text_frame.text = "CDRL A001 is approved for WBS 1.2.3."
+    presentation.save(path)
+
+    doc_ids = ingest_paths(
+        settings,
+        stores,
+        [path],
+        source_type="upload",
+        tenant_id="tenant",
+        collection_id="uploads",
+        metadata_enrichment="deterministic",
+    )
+
+    assert len(doc_ids) == 1
+    record = stores.doc_store.get_document(doc_ids[0], tenant_id="tenant")
+    assert record is not None
+    assert record.file_type == "pptx"
+    assert record.doc_type == "cdrl"
+    assert "python-pptx" in record.parser_provenance["chain"]
+    assert record.signal_summary["cdrl"]["count"] >= 1
 
 
 def test_build_kb_health_report_and_repair_handle_same_source_duplicates(tmp_path: Path) -> None:
@@ -213,6 +253,35 @@ def test_build_kb_health_report_and_repair_handle_same_source_duplicates(tmp_pat
     assert result.deleted_doc_ids == ("doc-old",)
     health_after = build_kb_health_report(settings, stores, tenant_id="tenant", collection_id="default")
     assert len(health_after.duplicate_groups) == 0
+
+
+def test_collection_health_reports_extraction_and_metadata_flags(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    stores = _stores()
+    stores.doc_store.upsert_document(
+        DocumentRecord(
+            doc_id="doc-failed",
+            tenant_id="tenant",
+            collection_id="uploads",
+            title="bad.pdf",
+            source_type="upload",
+            content_hash="hash-failed",
+            source_path=str(tmp_path / "bad.pdf"),
+            ingested_at="2026-04-09T02:00:00Z",
+            file_type="pdf",
+            extraction_status="failed",
+            extraction_error="parser failed",
+            metadata_confidence=0.2,
+            parser_provenance={"chain": ["docling", "pypdf"], "steps": []},
+        )
+    )
+
+    health = build_collection_health_report(settings, stores, tenant_id="tenant", collection_id="uploads")
+
+    assert health.extraction_failure_count == 1
+    assert health.low_confidence_metadata_count == 1
+    assert health.parser_counts["docling"] == 1
+    assert health.source_groups[0].status == "extraction_failed"
 
 
 def test_build_collection_health_report_and_repair_canonicalize_repo_alias_paths(tmp_path: Path) -> None:

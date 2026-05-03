@@ -135,8 +135,8 @@ def _doctor_settings():
         tiktoken_enabled=False,
         tiktoken_cache_dir=None,
         ollama_base_url="http://ollama:11434",
-        ollama_chat_model="gpt-oss:20b",
-        ollama_judge_model="gpt-oss:20b",
+        ollama_chat_model="nemotron-cascade-2:30b",
+        ollama_judge_model="nemotron-cascade-2:30b",
         ollama_embed_model="nomic-embed-text:latest",
         sandbox_docker_image="agentic-chatbot-sandbox:py312",
     )
@@ -153,7 +153,7 @@ def test_doctor_fails_when_selected_ollama_model_is_missing(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "gpt-oss:20b"}]},
+            payload={"models": [{"name": "nemotron-cascade-2:30b"}]},
         ),
     )
 
@@ -174,7 +174,7 @@ def test_doctor_passes_when_selected_ollama_models_exist(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
 
@@ -200,7 +200,7 @@ def test_doctor_fails_when_sandbox_image_is_not_ready(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
 
@@ -268,7 +268,7 @@ def test_doctor_passes_when_selected_ollama_models_use_latest_alias(monkeypatch)
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text"}]},
+            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text"}]},
         ),
     )
 
@@ -353,7 +353,7 @@ def test_doctor_fails_when_skill_chunks_dimension_is_misaligned(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
     monkeypatch.setitem(
@@ -388,7 +388,7 @@ def test_doctor_warns_when_configured_kb_sources_are_not_indexed(monkeypatch):
         "urlopen",
         lambda req, timeout=0: _FakeHTTPResponse(
             status_code=200,
-            payload={"models": [{"name": "gpt-oss:20b"}, {"name": "nomic-embed-text:latest"}]},
+            payload={"models": [{"name": "nemotron-cascade-2:30b"}, {"name": "nomic-embed-text:latest"}]},
         ),
     )
     monkeypatch.setitem(

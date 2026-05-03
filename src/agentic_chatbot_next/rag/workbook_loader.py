@@ -6,6 +6,11 @@ from typing import Any, Iterable, List, Sequence, Tuple
 
 from langchain_core.documents import Document
 
+from agentic_chatbot_next.rag.status_workbooks import (
+    status_metadata_for_row,
+    status_metadata_for_sheet,
+)
+
 
 @dataclass(frozen=True)
 class IndexedRow:
@@ -26,6 +31,13 @@ def _is_empty_row(values: Sequence[Any]) -> bool:
 
 def _trim_rows(rows: Sequence[IndexedRow]) -> List[IndexedRow]:
     items = [row for row in rows if not _is_empty_row(row.values)]
+    return items
+
+
+def _trim_trailing_empty(values: Sequence[Any]) -> List[Any]:
+    items = list(values)
+    while items and not _cell_text(items[-1]):
+        items.pop()
     return items
 
 
@@ -115,6 +127,7 @@ def _render_sheet_summary(
     data_rows: Sequence[Tuple[int, List[str]]],
     *,
     sheet_range: str,
+    status_domains: Sequence[str] = (),
 ) -> str:
     parts = [
         f"Workbook: {workbook_name}",
@@ -124,6 +137,8 @@ def _render_sheet_summary(
         parts.append(f"Range: {sheet_range}")
     if headers:
         parts.append("Columns: " + ", ".join(header for header in headers if header))
+    if status_domains:
+        parts.append("Status Domains: " + ", ".join(str(item) for item in status_domains if str(item)))
     preview_rows: List[str] = []
     for row_number, values in data_rows[:3]:
         preview = "; ".join(_key_value_pairs(headers, values)[:6])
@@ -142,6 +157,7 @@ def _render_row_text(
     row_number: int,
     values: Sequence[str],
     cell_range: str,
+    status_domains: Sequence[str] = (),
 ) -> str:
     pairs = _key_value_pairs(headers, values)
     body = "; ".join(pairs[:12]) or "No non-empty cells."
@@ -152,6 +168,8 @@ def _render_row_text(
     ]
     if cell_range:
         parts.append(f"Cells: {cell_range}")
+    if status_domains:
+        parts.append("Status Domains: " + ", ".join(str(item) for item in status_domains if str(item)))
     parts.append(body)
     return " | ".join(part for part in parts if part)
 
@@ -171,6 +189,8 @@ def _build_documents_for_sheet(
     header_row = trimmed[header_index]
     headers = _normalize_headers(header_row.values)
     data_rows = _normalize_indexed_rows_with_headers(trimmed[header_index + 1 :], headers)
+    sheet_status_metadata = status_metadata_for_sheet(headers)
+    sheet_status_domains = [str(item) for item in (sheet_status_metadata.get("status_domains") or []) if str(item)]
 
     documents: List[Document] = []
     sheet_range = _sheet_range(headers, trimmed[header_index:])
@@ -182,6 +202,7 @@ def _build_documents_for_sheet(
                 headers,
                 data_rows,
                 sheet_range=sheet_range,
+                status_domains=sheet_status_domains,
             ),
             metadata={
                 "chunk_index": chunk_index_start,
@@ -191,6 +212,8 @@ def _build_documents_for_sheet(
                 "row_end": int(trimmed[-1].row_number),
                 "cell_range": sheet_range,
                 "is_prechunked": True,
+                "status_domains": sheet_status_domains,
+                "status_workbook": sheet_status_metadata,
             },
         )
     )
@@ -201,6 +224,8 @@ def _build_documents_for_sheet(
         if not any(values):
             continue
         cell_range = f"A{row_number}:{max_col}{row_number}"
+        row_status_metadata = status_metadata_for_row(headers, values, row_number=row_number)
+        row_status_domains = [str(item) for item in (row_status_metadata.get("status_domains") or []) if str(item)]
         documents.append(
             Document(
                 page_content=_render_row_text(
@@ -210,6 +235,7 @@ def _build_documents_for_sheet(
                     row_number=row_number,
                     values=values,
                     cell_range=cell_range,
+                    status_domains=row_status_domains,
                 ),
                 metadata={
                     "chunk_index": next_index,
@@ -219,6 +245,8 @@ def _build_documents_for_sheet(
                     "row_end": int(row_number),
                     "cell_range": cell_range,
                     "is_prechunked": True,
+                    "status_domains": row_status_domains,
+                    "status_workbook": row_status_metadata,
                 },
             )
         )
@@ -234,7 +262,7 @@ def _openpyxl_rows(path: Path) -> Iterable[Tuple[str, List[IndexedRow]]]:
     try:
         for sheet in workbook.worksheets:
             indexed_rows = [
-                IndexedRow(row_number=row_index, values=tuple(cells))
+                IndexedRow(row_number=row_index, values=tuple(_trim_trailing_empty(cells)))
                 for row_index, cells in enumerate(sheet.iter_rows(values_only=True), start=1)
             ]
             yield sheet.title, indexed_rows
@@ -275,4 +303,3 @@ def load_workbook_documents(path: Path) -> List[Document]:
         documents.extend(sheet_docs)
         chunk_index += len(sheet_docs)
     return documents
-

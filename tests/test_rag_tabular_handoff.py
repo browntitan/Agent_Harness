@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from langchain_core.documents import Document
+from openpyxl import Workbook
 
 from agentic_chatbot_next.contracts.messages import SessionState
 from agentic_chatbot_next.providers import ProviderBundle
@@ -231,3 +232,106 @@ def test_run_rag_contract_adds_tabular_analyst_evidence_before_synthesis(tmp_pat
     assert captured["tabular_chunk_id"] in contract.used_citation_ids
     assert contract.citations[0].location == "IMS row 2 A2:C2"
     assert "tabular_analyst" in contract.retrieval_summary.strategies_used
+
+
+def test_run_rag_contract_uses_deterministic_status_workbook_extractor_before_worker(tmp_path: Path, monkeypatch) -> None:
+    workbook_path = tmp_path / "status_tracker.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Risks"
+    sheet.append(["Risk ID", "Risk", "Owner", "Status", "Due Date"])
+    sheet.append(["R-1", "Battery supplier late", "Pat Lee", "Open", "2028-09-26"])
+    workbook.save(workbook_path)
+
+    settings = _settings(tmp_path)
+    session = SessionState(tenant_id="tenant", user_id="user", conversation_id="conv")
+    providers = ProviderBundle(chat=_ChatModel(), judge=_ChatModel(), embeddings=object())
+    spreadsheet_doc = Document(
+        page_content="Workbook: status_tracker.xlsx | Sheet: Risks | Row 2: Risk: Battery supplier late; Owner: Pat Lee",
+        metadata={
+            "doc_id": "doc-status",
+            "chunk_id": "doc-status#chunk0001",
+            "title": "status_tracker.xlsx",
+            "source_type": "kb",
+            "source_path": str(workbook_path),
+            "file_type": "xlsx",
+            "sheet_name": "Risks",
+            "row_start": 2,
+            "row_end": 2,
+            "cell_range": "A2:E2",
+        },
+    )
+    retrieval_run = RetrievalRun(
+        selected_docs=[spreadsheet_doc],
+        candidate_docs=[spreadsheet_doc],
+        graded=[GradedChunk(doc=spreadsheet_doc, relevance=3, reason="test")],
+        query_used="List the open risks with owner and due date.",
+        search_mode="fast",
+        rounds=1,
+        tool_calls_used=1,
+        tool_call_log=["fast"],
+        strategies_used=["hybrid"],
+        candidate_counts={"selected_docs": 1},
+    )
+    captured: dict[str, object] = {}
+
+    class _Selection:
+        resolved = True
+        selected_collection_id = "default"
+
+        def to_dict(self):
+            return {"selected_collection_id": "default"}
+
+    class _Bridge:
+        def run_tabular_evidence_tasks(self, tasks):
+            del tasks
+            raise AssertionError("deterministic status extractor should answer before worker fallback")
+
+    monkeypatch.setattr(
+        "agentic_chatbot_next.rag.engine.sync_session_kb_collection_state",
+        lambda *args, **kwargs: {
+            "kb_collection_id": "default",
+            "available_kb_collection_ids": ["default"],
+            "kb_collection_confirmed": True,
+        },
+    )
+    monkeypatch.setattr("agentic_chatbot_next.rag.engine.get_collection_readiness_status", lambda *args, **kwargs: _ready_status())
+    monkeypatch.setattr("agentic_chatbot_next.rag.engine.select_collection_for_query", lambda *args, **kwargs: _Selection())
+    monkeypatch.setattr("agentic_chatbot_next.rag.engine.apply_selection_to_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr("agentic_chatbot_next.rag.engine.run_retrieval_controller", lambda *args, **kwargs: retrieval_run)
+
+    def fake_generate_grounded_answer(llm, *, question, evidence_docs, **kwargs):
+        del llm, question, kwargs
+        status_doc = next(doc for doc in evidence_docs if doc.metadata.get("chunk_type") == "tabular_analysis")
+        captured["status_doc"] = status_doc
+        return {
+            "answer": f"Open risk: Battery supplier late, owner Pat Lee, due 2028-09-26 ({status_doc.metadata['chunk_id']}).",
+            "used_citation_ids": [status_doc.metadata["chunk_id"]],
+            "followups": [],
+            "warnings": [],
+            "confidence_hint": 0.9,
+        }
+
+    monkeypatch.setattr("agentic_chatbot_next.rag.engine.generate_grounded_answer", fake_generate_grounded_answer)
+
+    contract = run_rag_contract(
+        settings,
+        SimpleNamespace(doc_store=SimpleNamespace(), chunk_store=SimpleNamespace(), graph_store=None),
+        providers=providers,
+        session=session,
+        query="List the open risks with owner and due date.",
+        conversation_context="",
+        preferred_doc_ids=[],
+        must_include_uploads=False,
+        top_k_vector=2,
+        top_k_keyword=2,
+        max_retries=1,
+        runtime_bridge=_Bridge(),
+    )
+
+    status_doc = captured["status_doc"]
+    assert status_doc.metadata["sheet_name"] == "Risks"
+    assert status_doc.metadata["row_start"] == 2
+    assert contract.citations[0].location == "Risks row 2 A2:E2"
+    assert "status_workbook_extractor" in contract.retrieval_summary.strategies_used
+    assert contract.retrieval_summary.status_extractors["record_count"] >= 1

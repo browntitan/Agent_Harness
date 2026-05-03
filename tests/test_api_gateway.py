@@ -471,6 +471,17 @@ class _InMemorySkillStore:
         return list(reversed(rows))[:limit]
 
 
+class _FakeSkillBuilderChat:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.messages = []
+
+    def invoke(self, messages, config=None):
+        del config
+        self.messages.append(messages)
+        return AIMessage(content=self.content)
+
+
 def _make_settings(tmp_path: Path):
     workspace_dir = tmp_path / "workspaces"
     workspace_dir.mkdir(exist_ok=True)
@@ -498,8 +509,8 @@ def _make_settings(tmp_path: Path):
         team_mailbox_max_channels_per_session=8,
         team_mailbox_max_open_messages_per_channel=50,
         team_mailbox_claim_limit=8,
-        agent_chat_model_overrides={"general": "gpt-oss:20b"},
-        agent_judge_model_overrides={"general": "gpt-oss:20b"},
+        agent_chat_model_overrides={"general": "nemotron-cascade-2:30b"},
+        agent_judge_model_overrides={"general": "nemotron-cascade-2:30b"},
     )
 
 
@@ -971,6 +982,86 @@ async def test_skill_api_supports_create_update_activate_and_preview(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_skill_api_build_draft_uses_llm_without_persisting(tmp_path):
+    client, bot, _ = _make_skill_client(tmp_path)
+    store = bot.ctx.stores.skill_store
+    chat = _FakeSkillBuilderChat(
+        json.dumps(
+            {
+                "name": "Routing Triage Skill",
+                "description": "Guide routing issue triage.",
+                "when_to_apply": "Use when an operator is investigating routing outcomes.",
+                "tool_tags": ["search_skills"],
+                "task_tags": ["workflow", "routing"],
+                "workflow": [
+                    "Review the user task and current route decision.",
+                    "Compare the decision with available routing evidence.",
+                    "Summarize the recommended route and confidence.",
+                ],
+                "examples": ["User asks why a routing decision selected the basic agent."],
+                "warnings": ["Do not invent missing routing evidence."],
+            }
+        )
+    )
+    bot.kernel = SimpleNamespace(resolve_base_providers=lambda: SimpleNamespace(chat=chat))
+    try:
+        response = await client.post(
+            "/v1/skills/build-draft",
+            headers={"X-Tenant-ID": "tenant-a", "X-User-ID": "user-a", "X-Admin-Token": "admin-secret"},
+            json={
+                "context": "Operators need a repeatable workflow for inspecting routing decisions.",
+                "examples": "- User asks why a routing decision selected the basic agent.",
+                "name": "Routing Helper",
+                "agent_scope": "general",
+                "target_agent": "general",
+                "tool_tags": ["search_skills"],
+                "task_tags": ["workflow"],
+                "description": "Draft routing helper.",
+                "when_to_apply": "Use for routing review.",
+            },
+        )
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 200
+    payload = response.json()
+    draft = payload["draft"]
+    assert payload["object"] == "skill.build_draft"
+    assert draft["name"] == "Routing Triage Skill"
+    assert draft["agent_scope"] == "general"
+    assert draft["tool_tags"] == ["search_skills"]
+    assert "kind: retrievable" in draft["body_markdown"]
+    assert "## Examples" in draft["body_markdown"]
+    assert "routing decision selected the basic agent" in draft["body_markdown"]
+    assert store.records == {}
+    assert chat.messages
+
+
+@pytest.mark.asyncio
+async def test_skill_api_build_draft_reports_invalid_llm_json(tmp_path):
+    client, bot, _ = _make_skill_client(tmp_path)
+    store = bot.ctx.stores.skill_store
+    bot.kernel = SimpleNamespace(resolve_base_providers=lambda: SimpleNamespace(chat=_FakeSkillBuilderChat("not json")))
+    try:
+        response = await client.post(
+            "/v1/skills/build-draft",
+            headers={"X-Tenant-ID": "tenant-a", "X-User-ID": "user-a", "X-Admin-Token": "admin-secret"},
+            json={
+                "context": "Build a skill for routing review.",
+                "agent_scope": "general",
+            },
+        )
+    finally:
+        await client.aclose()
+        _clear_overrides()
+
+    assert response.status_code == 502
+    assert "invalid JSON" in response.json()["detail"]
+    assert store.records == {}
+
+
+@pytest.mark.asyncio
 async def test_skill_api_supports_executable_skill_preview(tmp_path):
     client, _, settings = _make_skill_client(tmp_path)
     settings.executable_skills_enabled = True
@@ -1220,7 +1311,11 @@ async def test_health_ready_returns_200_when_kb_is_ready(tmp_path):
         _clear_overrides()
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ready", "model": "enterprise-agent"}
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["model"] == "enterprise-agent"
+    assert payload["capability_status"]["memory"]["configured"] is True
+    assert "analyst_sandbox" in payload["capability_status"]
 
 
 @pytest.mark.asyncio

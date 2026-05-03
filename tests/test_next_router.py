@@ -97,6 +97,99 @@ def test_route_turn_suggests_rag_worker_for_grounded_document_query() -> None:
     assert decision.suggested_agent == "rag_worker"
 
 
+def test_route_turn_suggests_general_for_mermaid_skill_workflow() -> None:
+    settings = SimpleNamespace(
+        llm_router_enabled=False,
+        enable_coordinator_mode=False,
+    )
+    decision = route_turn(
+        settings,
+        providers=SimpleNamespace(judge=None),
+        user_text=(
+            "Search your skills for Mermaid diagram guidance, then create a Mermaid flowchart "
+            "showing how a control-panel-created skill becomes available to the general agent."
+        ),
+        has_attachments=False,
+        force_agent=False,
+    )
+
+    assert decision.route == "AGENT"
+    assert decision.suggested_agent == "general"
+    assert "mermaid_diagram_workflow" in decision.reasons
+
+
+def test_route_turn_suggests_general_for_grounded_mermaid_research_workflow() -> None:
+    settings = SimpleNamespace(
+        llm_router_enabled=False,
+        enable_coordinator_mode=False,
+    )
+    decision = route_turn(
+        settings,
+        providers=SimpleNamespace(judge=None),
+        user_text=(
+            "Use the default KB, research how skills are indexed and resolved, "
+            "then produce a Mermaid flowchart with citations below it."
+        ),
+        has_attachments=False,
+        force_agent=False,
+    )
+
+    assert decision.route == "AGENT"
+    assert decision.suggested_agent == "general"
+    assert "mermaid_diagram_workflow" in decision.reasons
+
+
+def test_route_turn_keeps_simple_mermaid_prompt_on_basic_path() -> None:
+    settings = SimpleNamespace(
+        llm_router_enabled=False,
+        enable_coordinator_mode=False,
+    )
+    decision = route_turn(
+        settings,
+        providers=SimpleNamespace(judge=None),
+        user_text=(
+            "Make a Mermaid state diagram for a skill lifecycle: draft, active, archived, "
+            "updated version, rollback target, and dependency-blocked activation."
+        ),
+        has_attachments=False,
+        force_agent=False,
+    )
+
+    assert decision.route == "BASIC"
+    assert decision.suggested_agent == ""
+
+
+def test_route_turn_sends_mcp_intent_to_general_before_rag_patterns() -> None:
+    settings = SimpleNamespace(
+        llm_router_enabled=False,
+        enable_coordinator_mode=False,
+    )
+    decision = route_turn(
+        settings,
+        providers=SimpleNamespace(judge=None),
+        user_text=(
+            "using mcp tooling do the following: Find 10 active SAM.gov contract opportunities related "
+            "to artificial intelligence, AI, machine learning, or ML, posted from 04/02/2026 to 05/02/2026."
+        ),
+        has_attachments=False,
+        force_agent=False,
+        session_metadata={
+            "mcp_intent": {
+                "detected": True,
+                "trigger": "explicit_mcp",
+                "discover_query": "Find 10 active SAM.gov contract opportunities related to AI.",
+                "matched_connections": [{"connection_id": "mcp_conn_sam", "display_name": "SAM.gov", "connection_slug": "sam_gov"}],
+                "matched_tools": [{"registry_name": "mcp__sam_gov__search_open_contracts", "raw_tool_name": "search_open_contracts", "connection_id": "mcp_conn_sam"}],
+            }
+        },
+    )
+
+    assert decision.route == "AGENT"
+    assert decision.suggested_agent == "general"
+    assert "mcp_intent" in decision.reasons
+    assert decision.router_evidence["mcp_intent"]["trigger"] == "explicit_mcp"
+
+
 def test_route_turn_suggests_general_for_requirements_inventory_requests() -> None:
     settings = SimpleNamespace(
         llm_router_enabled=False,
@@ -347,6 +440,27 @@ def test_route_turn_suggests_graph_manager_for_graph_relationship_query() -> Non
     assert decision.semantic_contract.requested_scope_kind == "graph_indexes"
     assert decision.semantic_contract.requires_external_evidence is True
     assert "graph_retrieval_intent" in decision.reasons
+
+
+def test_route_turn_uses_graph_metadata_for_relationship_query() -> None:
+    settings = SimpleNamespace(
+        llm_router_enabled=False,
+        enable_coordinator_mode=False,
+    )
+
+    decision = route_turn(
+        settings,
+        providers=SimpleNamespace(judge=None),
+        user_text="Find the relationships between vendors, risks, approvals, and outcomes.",
+        has_attachments=False,
+        force_agent=False,
+        session_metadata={"active_graph_ids": ["program_graph"]},
+    )
+
+    assert decision.route == "AGENT"
+    assert decision.suggested_agent == "graph_manager"
+    assert choose_agent_name(settings, decision) == "graph_manager"
+    assert "graph_metadata_intent" in decision.reasons
 
 
 @pytest.mark.parametrize(

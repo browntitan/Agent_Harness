@@ -120,7 +120,12 @@ The runtime emits structured `RuntimeEvent` records for:
   `coordinator_planning_started`, `coordinator_planning_completed`,
   `coordinator_batch_started`, `coordinator_finalizer_completed`,
   `coordinator_verifier_completed`, `coordinator_revision_round_started`,
-  `coordinator_revision_limit_reached`
+  `coordinator_revision_stopped`, `coordinator_revision_limit_reached`
+- context-budget lifecycle:
+  `context_budget_estimated`, `autocompact_started`, `autocompact_completed`,
+  `microcompact_created`
+- frontend context trace lifecycle:
+  `agent_context_loaded`
 - worker lifecycle: `worker_agent_started`, `worker_agent_completed`
 - job lifecycle: `job_created`, `job_started`, `job_completed`, `job_failed`, `job_stopped`
 - mailbox lifecycle: `mailbox_enqueued`
@@ -168,6 +173,8 @@ When available, the payload also includes runtime-specific fields such as:
   the long-form writing path
 - coordinator worker and verifier metadata
 - RAG worker task ids and doc scopes for worker lifecycle events
+- `agent_context_loaded` safe prompt-doc, skill-doc, context-section, memory-context, redaction,
+  and budget metadata when frontend context events are enabled
 - capability-profile source and hidden/unavailable values when gateway responses include
   effective capability metadata
 - scheduler state, queue class, token budget, and budget block reason on task/job responses
@@ -201,9 +208,16 @@ Current live progress event families include:
 - `handoff_prepared`, `handoff_consumed`
 - `summary`
 - `tool_call`, `tool_result`, `tool_error`
+- `context_trace`
 
 Those events are intentionally summarized. They expose routing, current phase, active worker
 tasks, and current document/file focus without exposing raw chain-of-thought.
+
+`agent_context_loaded` durable events are translated to streaming `context_trace` progress
+items only when the frontend event policy allows it. Payloads are metadata or safe-preview
+snippets with redaction markers; memory previews stay hidden unless
+`FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT=true`. The OpenWebUI pipe can surface these as
+`agentic_audit_item` entries.
 
 The scenario-first demo notebook consumes that same live stream per scenario cell. It prints the
 progress/tool/artifact timeline inline while the cell runs, then renders structured summaries
@@ -290,6 +304,26 @@ The live SSE progress layer is useful for:
 - `TEAM_MAILBOX_ENABLED`
 - `WORKER_SCHEDULER_ENABLED`
 - `CONTEXT_BUDGET_ENABLED`
+- `CONTEXT_WINDOW_TOKENS`
+- `CONTEXT_TARGET_RATIO`
+- `CONTEXT_AUTOCOMPACT_THRESHOLD`
+- `CONTEXT_TOOL_RESULT_MAX_TOKENS`
+- `CONTEXT_TOOL_RESULTS_TOTAL_TOKENS`
+- `CONTEXT_MICROCOMPACT_TARGET_TOKENS`
+- `CONTEXT_COMPACT_RECENT_MESSAGES`
+- `CONTEXT_RESTORE_RECENT_FILES`
+- `CONTEXT_RESTORE_RECENT_SKILLS`
+- `FRONTEND_EVENTS_ENABLED`
+- `FRONTEND_EVENTS_SHOW_STATUS`
+- `FRONTEND_EVENTS_SHOW_AGENTS`
+- `FRONTEND_EVENTS_SHOW_TOOLS`
+- `FRONTEND_EVENTS_SHOW_PARALLEL_GROUPS`
+- `FRONTEND_EVENTS_SHOW_GUIDANCE`
+- `FRONTEND_EVENTS_SHOW_SKILLS`
+- `FRONTEND_EVENTS_SHOW_CONTEXT`
+- `FRONTEND_EVENTS_SHOW_MEMORY_CONTEXT`
+- `FRONTEND_EVENTS_DETAIL_LEVEL`
+- `FRONTEND_EVENTS_PREVIEW_CHARS`
 - `AUTHZ_ENABLED`
 
 ## Operational takeaway

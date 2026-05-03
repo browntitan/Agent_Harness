@@ -42,7 +42,7 @@ Observed live behavior:
 - router hinting now comes from config-backed deterministic patterns plus the LLM router
 - `choose_agent_name(...)` in `router/policy.py` is now registry-aware through
   `build_router_targets(registry)`, and the live hint surface includes `coordinator`,
-  `data_analyst`, `rag_worker`, and `graph_manager`
+  `research_coordinator`, `data_analyst`, `rag_worker`, and `graph_manager`
 
 Why it matters:
 
@@ -116,7 +116,8 @@ Decision:
 
 Action in this pass:
 
-- update router docs to include `rag_worker`
+- update router docs to include `rag_worker` and the newer `research_coordinator` broad
+  corpus-campaign start
 
 ### 3. Gateway and runtime docs still described removed compatibility paths
 
@@ -214,6 +215,21 @@ broader external-action tool surface.
 Recent live runtime additions that the docs now treat as first-class behavior:
 
 - `metadata.requested_agent` for explicit API/demo control of the initial AGENT role
+- `research_coordinator` as the kernel-owned coordinator mode for deep corpus campaigns
+- `rag_researcher` as a manual/delegated ReAct researcher; it is a valid requested-agent
+  override but is not a normal router-selected fast path
+- the `rag_workbench` deferred specialist tools used by `rag_researcher` for query planning,
+  chunk/section search, evidence grading/pruning, evidence-plan validation, and controller
+  hint building
+- `profile_dataset` in the data-analyst surface and the RAG-to-analyst tabular evidence
+  handoff that profiles spreadsheet evidence before optional code/statistics work
+- reranking defaults over Ollama
+  `rjmalagon/mxbai-rerank-large-v2:1.5b-fp16`, with heuristic fallback when reranking is
+  unavailable
+- frontend transparency events such as `agent_context_loaded` and context-budget events that
+  are safe-preview or metadata-only, not raw prompt dumps
+- `MAX_REVISION_ROUNDS=8` as the configured default, with workflow-specific effective caps
+  inside coordinator execution
 - `MEMORY_ENABLED` as a real runtime-wide feature flag
 - the offline analyst sandbox image contract built through `python run.py build-sandbox-image`
 - `graph_manager` as a top-level-or-worker graph specialist

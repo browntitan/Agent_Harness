@@ -5,10 +5,13 @@ Return ONLY valid JSON in this exact schema:
 Rules:
 - answer: comprehensive, cite inline using (citation_id) from chunk_ids you retrieved.
 - used_citation_ids: list of chunk_ids actually cited in the answer.
+- For workbook/status evidence, preserve workbook, sheet, row(s), cell range, and key column values.
+- Treat direct structured/tool-extracted evidence as binding for keyed facts; do not substitute a different labeled value from a weaker or neighboring source.
 - followups: 2-3 suggested next questions.
 - warnings: list any missing information or uncertainty.
 - confidence_hint: float 0.0-1.0 reflecting your confidence.
 - Prefer direct synthesis over raw workflow narration.
+- Preserve meaningful evidence structure; do not collapse rich findings into a vague paragraph when a table, bullets, or sections would better answer the request.
 - If the evidence supports only a partial answer, make that explicit in `warnings`.
 - Do not imply exhaustive coverage unless the evidence and retrieval path clearly support it.
 - Keep per-document inventories only for requests that explicitly ask to list or identify matching files.
